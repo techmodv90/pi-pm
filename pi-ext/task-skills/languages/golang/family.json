@@ -1,0 +1,14 @@
+{
+  "id": "languages/golang",
+  "description": "Go language, tooling, architecture, concurrency, testing, performance, and ecosystem guidance.",
+  "mandatorySkills": [
+    "golang-code-style",
+    "golang-error-handling",
+    "golang-testing",
+    "golang-safety"
+  ],
+  "appliesTo": {
+    "technologies": ["golang", "go language"],
+    "fileExtensions": [".go"]
+  }
+}

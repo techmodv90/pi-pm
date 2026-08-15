@@ -1,0 +1,64 @@
+---
+description: Implement Svelte 5 runes correctly. Use for reactive state, props, effects, $state.raw, $derived.by, $props, and $bindable.
+metadata:
+    github-path: sveltekit-svelte-runes
+    github-ref: refs/heads/main
+    github-repo: https://github.com/spences10/skills
+    github-tree-sha: 4819456f5361dbc6e0f983167dc3756f477d27d3
+    last_updated: "2026-05-14"
+    verified_against: Svelte 5 official docs and current local skill refresh
+name: sveltekit-svelte-runes
+---
+# Svelte Runes
+
+## Quick Start
+
+**Which rune?** Props: `$props()` | Bindable: `$bindable()` |
+Computed: `$derived()` | Side effect: `$effect()` | State: `$state()`
+
+**Key rules:** Runes are top-level only. $derived can be overridden
+(use `const` for read-only). Objects/arrays are deeply reactive by
+default; use `$state.raw` for large data replaced wholesale.
+
+## Example
+
+```svelte
+<script>
+	let count = $state(0); // Mutable state
+	const doubled = $derived(count * 2); // Computed (const = read-only)
+
+	$effect(() => {
+		console.log(`Count is ${count}`); // Side effect
+	});
+</script>
+
+<button onclick={() => count++}>
+	{count} (doubled: {doubled})
+</button>
+```
+
+## Reference Files
+
+- [reactivity-patterns.md](references/reactivity-patterns.md) - When
+  to use each rune
+- [component-api.md](references/component-api.md) - $props, $bindable
+  patterns
+- [snippets-vs-slots.md](references/snippets-vs-slots.md) - New
+  snippet syntax
+- [common-mistakes.md](references/common-mistakes.md) - Anti-patterns
+  with fixes
+
+> For `@attach` and other template directives, see the
+> **sveltekit-svelte-template-directives** skill.
+
+## Notes
+
+- Use event properties like `onclick`, and `{@render children()}` in layouts
+- `$derived` can be reassigned (5.25+) - use `const` for read-only
+- Use `createContext` over `setContext`/`getContext` for type safety
+- Use `$inspect.trace` to debug reactivity issues
+- Prefer `$derived.by` for multi-line derivations
+- Avoid state updates inside `$effect`; effects are an escape hatch
+- Effects do not run on the server; don't wrap effect bodies in `if (browser)`
+- **Last verified:** 2026-05-14
+

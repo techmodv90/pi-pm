@@ -1,0 +1,10 @@
+{
+  "description": "TypeScript guidance for strict typing, type-safe APIs, asynchronous code, validation, and common correctness pitfalls.",
+  "mandatorySkills": [
+    "typescript-development"
+  ],
+  "appliesTo": {
+    "technologies": ["typescript"],
+    "fileExtensions": [".ts", ".tsx", ".mts", ".cts"]
+  }
+}

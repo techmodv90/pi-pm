@@ -1,0 +1,23 @@
+node_modules/
+.svelte-kit/
+go-pic/web/node_modules/
+backup/typescript-cli/node_modules/
+
+# Local indexes and embedding caches
+.ck/
+.codanna/
+.codannaignore
+.fastembed_cache
+
+# Task and subagent runtime state
+.pi/
+.pi-subagents/
+.playwright-cli/
+tasks.db
+tasks.db-shm
+tasks.db-wal
+
+# Generated application artifacts
+go-pic/dist/
+go-pic/pic
+go-pic/web/build/

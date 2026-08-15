@@ -1,0 +1,30 @@
+{
+  "name": "pi-task-system",
+  "private": true,
+  "version": "0.1.0",
+  "keywords": [
+    "pi-package"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "npm run build:web && npm run build:pic",
+    "build:web": "cd ../go-pic/web && npm run build",
+    "build:pic": "cd ../go-pic && mkdir -p dist && go build -o dist/pic ./cmd/pic",
+    "check": "tsc --noEmit",
+    "test": "node --experimental-strip-types --test core/*.test.ts tasking/*.test.ts pipeline/*.test.ts subagent/*.test.ts ui/*.test.ts reporting/*.test.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@mariozechner/pi-ai": "*",
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "typescript": "^6.0.3"
+  }
+}
