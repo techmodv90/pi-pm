@@ -509,12 +509,17 @@ const SCOUT_EVIDENCE_REQUIRED_ELEMENTS = ["scope", "findings", "gaps", "verifica
 
 export function validateScoutEvidenceXml(output: string, section: string): void {
   const normalized = normalizeScoutEvidenceXml(output);
-  const root = normalized.match(/^<scout_evidence\s+section="([^"]+)"\s+confidence="(high|medium|low)">([\s\S]*)<\/scout_evidence>$/);
-  if (!root || root[1] !== section.toLowerCase()) throw new Error(`Scout ${section} output must be one <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low"> document`);
+  const root = normalized.match(/^<scout_evidence\b([^>]*)>([\s\S]*)<\/scout_evidence>$/);
+  const attributes = root?.[1].match(/([a-zA-Z_][\w.-]*)="([^"]*)"/g)?.reduce<Record<string, string>>((values, attribute) => {
+    const match = attribute.match(/^([a-zA-Z_][\w.-]*)="([^"]*)"$/);
+    if (match) values[match[1]] = match[2];
+    return values;
+  }, {}) || {};
+  if (!root || attributes.section !== section.toLowerCase() || !["high", "medium", "low"].includes(attributes.confidence)) throw new Error(`Scout ${section} output must be one <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low"> document`);
   for (const element of SCOUT_EVIDENCE_REQUIRED_ELEMENTS) {
-    if (!root[3].includes(`<${element}>`) || !root[3].includes(`</${element}>`)) throw new Error(`Scout ${section} evidence missing <${element}>`);
+    if (!root[2].includes(`<${element}>`) || !root[2].includes(`</${element}>`)) throw new Error(`Scout ${section} evidence missing <${element}>`);
   }
-  if (!/<source\s+path="[^"]+"(?:\s+line="[^"]+")?\s*>[\s\S]*<\/source>/.test(root[3])) throw new Error(`Scout ${section} evidence requires at least one source citation`);
+  if (!/<source\s+path="[^"]+"(?:\s+line="[^"]+")?\s*>[\s\S]*<\/source>/.test(root[2])) throw new Error(`Scout ${section} evidence requires at least one source citation`);
 }
 
 function normalizeScoutEvidenceXml(output: string): string {
