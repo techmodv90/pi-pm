@@ -82,6 +82,12 @@ func cmdWorkItem(args []string) error {
 		return workItemArtifactSave(db, args[1:])
 	case "artifact-approve":
 		return workItemArtifactApprove(db, args[1:])
+	case "planning-reset":
+		return workItemPlanningReset(db, args[1:])
+	case "scan-reject":
+		return workItemScanReject(db, args[1:])
+	case "scan-rejection":
+		return workItemScanRejection(db, args[1:])
 	case "workflow-status":
 		return workItemWorkflowStatus(db, args[1:])
 	case "graph-validate":
@@ -776,6 +782,98 @@ func validateChildArtifactStage(agent, stage string) error {
 		return nil
 	}
 	return fmt.Errorf("%s cannot save %s artifacts", agent, stage)
+}
+
+func workItemPlanningReset(db *sql.DB, args []string) error {
+	if len(args) != 2 || args[1] != "owner" {
+		return errors.New("usage: pic work-item planning-reset <id> owner")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	item, err := workItemByIDTx(tx, args[0])
+	if err != nil {
+		return err
+	}
+	if item["status"] == "cancelled" || item["status"] == "done" {
+		return errors.New("planning reset requires a non-terminal Work Item")
+	}
+	var count int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=?`, args[0]).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return errors.New("planning reset requires no descendants")
+	}
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=?`, args[0]).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return errors.New("planning reset cannot remove approved planning artifacts")
+	}
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND status IN ('claimed','running')`, args[0]).Scan(&count); err != nil {
+		return err
+	}
+	if count != 0 {
+		return errors.New("planning reset requires no active pipeline runs")
+	}
+	var artifacts, runs int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, args[0]).Scan(&artifacts); err != nil {
+		return err
+	}
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=?`, args[0]).Scan(&runs); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM work_item_artifacts WHERE work_item_id=?`, args[0]); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM pipeline_runs WHERE task_id=? AND stage='scan'`, args[0]); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE work_items SET status='open',claimed_at='',claimed_by='' WHERE id=?`, args[0]); err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(map[string]int{"artifacts": artifacts, "pipeline_runs": runs})
+	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,?,?,?,?)`, "wie-"+shortID(), args[0], "planning_reset", "owner", "Unapproved planning artifacts and Scan runs reset for rerun", string(payload)); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return outputOne(db, `SELECT `+workItemColumns+` FROM work_items WHERE id=?`, args[0])
+}
+
+func workItemScanReject(db *sql.DB, args []string) error {
+	if len(args) != 3 || args[1] != "contractor" || strings.TrimSpace(args[2]) == "" {
+		return errors.New("usage: pic work-item scan-reject <id> contractor <reason>")
+	}
+	if _, err := workItemByID(db, args[0]); err != nil {
+		return err
+	}
+	id, reason := "wie-"+shortID(), strings.TrimSpace(args[2])
+	if _, err := db.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,?,?,?,?)`, id, args[0], "scan_report_rejected", args[1], reason, "{}"); err != nil {
+		return err
+	}
+	writeJSON(os.Stdout, map[string]any{"id": id, "work_item_id": args[0], "rejected": true, "reason": reason})
+	return nil
+}
+
+func workItemScanRejection(db *sql.DB, args []string) error {
+	if len(args) != 1 {
+		return errors.New("usage: pic work-item scan-rejection <id>")
+	}
+	rows, err := queryMaps(db, `SELECT event_type,id,summary,created_at FROM work_item_events WHERE work_item_id=? AND event_type IN ('scan_report_rejected','planning_reset') ORDER BY created_at DESC,id DESC LIMIT 1`, args[0])
+	if err != nil {
+		return err
+	}
+	if len(rows) == 0 || rows[0]["event_type"] != "scan_report_rejected" {
+		writeJSON(os.Stdout, map[string]any{"rejected": false})
+		return nil
+	}
+	writeJSON(os.Stdout, map[string]any{"rejected": true, "id": rows[0]["id"], "reason": rows[0]["summary"], "created_at": rows[0]["created_at"]})
+	return nil
 }
 
 func workItemArtifactApprove(db *sql.DB, args []string) error {

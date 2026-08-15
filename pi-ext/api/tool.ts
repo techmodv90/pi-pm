@@ -31,7 +31,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
       parameters: Type.Object({
         action: StringEnum([
           "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels",
-          "save_work_item_artifact", "approve_work_item_artifact", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
+          "save_work_item_artifact", "approve_work_item_artifact", "reject_work_item_scan", "reset_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
           "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
           "relate_work_items", "reset_pipeline_circuit",
         ] as const),
@@ -134,6 +134,16 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             if (!params.id || !params.stage || !params.artifact_id) return { content: [{ type: "text", text: "Error: id, stage, and artifact_id required" }], details: {}, isError: true };
             if (params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: actor_role must be owner after explicit owner approval" }], details: {}, isError: true };
             args = ["work-item", "artifact-approve", params.id, params.stage, params.artifact_id, params.stage === "scan" ? "accepted" : "approved"];
+            break;
+          }
+          case "reset_work_item_planning": {
+            if (!params.id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id and actor_role must be owner after explicit owner approval" }], details: {}, isError: true };
+            args = ["work-item", "planning-reset", params.id, params.actor_role];
+            break;
+          }
+          case "reject_work_item_scan": {
+            if (!params.id || !params.notes || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, notes, and actor_role=contractor required" }], details: {}, isError: true };
+            args = ["work-item", "scan-reject", params.id, params.actor_role, params.notes];
             break;
           }
           case "work_item_workflow_status": {
