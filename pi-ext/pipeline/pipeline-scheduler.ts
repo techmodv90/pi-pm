@@ -508,12 +508,17 @@ const FULL_SCAN_SECTIONS = [
 const SCOUT_EVIDENCE_REQUIRED_ELEMENTS = ["scope", "findings", "gaps", "verification", "risks", "handoff_questions", "recommended_actions"] as const;
 
 export function validateScoutEvidenceXml(output: string, section: string): void {
-  const root = output.trim().match(/^<scout_evidence\s+section="([^"]+)"\s+confidence="(high|medium|low)">([\s\S]*)<\/scout_evidence>$/);
+  const normalized = normalizeScoutEvidenceXml(output);
+  const root = normalized.match(/^<scout_evidence\s+section="([^"]+)"\s+confidence="(high|medium|low)">([\s\S]*)<\/scout_evidence>$/);
   if (!root || root[1] !== section.toLowerCase()) throw new Error(`Scout ${section} output must be one <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low"> document`);
   for (const element of SCOUT_EVIDENCE_REQUIRED_ELEMENTS) {
     if (!root[3].includes(`<${element}>`) || !root[3].includes(`</${element}>`)) throw new Error(`Scout ${section} evidence missing <${element}>`);
   }
   if (!/<source\s+path="[^"]+"(?:\s+line="[^"]+")?\s*>[\s\S]*<\/source>/.test(root[3])) throw new Error(`Scout ${section} evidence requires at least one source citation`);
+}
+
+function normalizeScoutEvidenceXml(output: string): string {
+  return output.trim().replace(/^```(?:xml)?\s*([\s\S]*?)\s*```$/, "$1").trim();
 }
 
 function startFullScanFanout(spec: any, agent: any): SubagentHandle {
@@ -527,8 +532,21 @@ function startFullScanFanout(spec: any, agent: any): SubagentHandle {
   const result = Promise.all(handles.map((handle) => handle.result)).then((results): SubagentResult => {
     const failed = results.filter((entry) => entry.exitCode !== 0);
     const outputs = results.map((entry) => finalAssistantText(entry.messages) || entry.errorMessage || entry.stderr || "");
-    outputs.forEach((output, index) => validateScoutEvidenceXml(output, FULL_SCAN_SECTIONS[index]![0]));
-    const evidence = outputs.map((output, index) => output.replace("<scout_evidence ", `<scout_evidence run_id="${results[index]!.runId}" `)).join("\n");
+    try {
+      outputs.forEach((output, index) => validateScoutEvidenceXml(output, FULL_SCAN_SECTIONS[index]![0]));
+    } catch (error: any) {
+      const message = error?.message || String(error);
+      return {
+        runId: id,
+        agent: "task-scout-group",
+        task: spec.task,
+        exitCode: 1,
+        messages: [{ role: "assistant", content: [{ type: "text", text: `Scout fanout failed: ${message}` }] }],
+        stderr: message,
+        usage: results.reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
+      };
+    }
+    const evidence = outputs.map((output, index) => normalizeScoutEvidenceXml(output).replace("<scout_evidence ", `<scout_evidence run_id="${results[index]!.runId}" `)).join("\n");
     return {
       runId: id,
       agent: "task-scout-group",
