@@ -523,7 +523,11 @@ export function validateScoutEvidenceXml(output: string, section: string): void 
 }
 
 function normalizeScoutEvidenceXml(output: string): string {
-  return output.trim().replace(/^```(?:xml)?\s*([\s\S]*?)\s*```$/, "$1").trim();
+  const trimmed = output.trim().replace(/^```(?:xml)?\s*([\s\S]*?)\s*```$/, "$1").trim();
+  const start = trimmed.indexOf("<scout_evidence");
+  const end = trimmed.lastIndexOf("</scout_evidence>");
+  if (start >= 0 && end > start) return trimmed.slice(start, end + "</scout_evidence>".length).trim();
+  return trimmed;
 }
 
 function startFullScanFanout(spec: any, agent: any): SubagentHandle {

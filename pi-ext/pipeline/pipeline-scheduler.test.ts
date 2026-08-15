@@ -137,6 +137,7 @@ test("Scout evidence requires structured XML rather than a Markdown wrapper", ()
   const valid = `<scout_evidence section="architecture" confidence="high"><scope><task>Map</task></scope><findings><finding><evidence><source path="main.go" line="1">package main</source></evidence></finding></findings><gaps></gaps><verification></verification><risks></risks><handoff_questions></handoff_questions><recommended_actions></recommended_actions></scout_evidence>`;
   assert.doesNotThrow(() => validateScoutEvidenceXml(valid, "Architecture"));
   assert.doesNotThrow(() => validateScoutEvidenceXml("```xml\n" + valid + "\n```", "Architecture"));
+  assert.doesNotThrow(() => validateScoutEvidenceXml("I have comprehensive source evidence.\n\n" + valid + "\n\nDone.", "Architecture"));
   assert.doesNotThrow(() => validateScoutEvidenceXml(valid.replace('section="architecture" confidence="high"', 'run_id="scout-1" confidence="high" section="architecture"'), "Architecture"));
   assert.throws(() => validateScoutEvidenceXml(`<scout_evidence section="architecture" confidence="high"># Markdown</scout_evidence>`, "Architecture"), /missing <scope>/);
   assert.throws(() => validateScoutEvidenceXml(valid.replace(/<source[\s\S]*<\/source>/, "No citation"), "Architecture"), /source citation/);
