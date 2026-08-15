@@ -137,16 +137,63 @@ function markdownItems(values: any, indent = ""): string {
     .join("\n") || `${indent}- None`;
 }
 
-export function renderCanonicalInstructionPackMarkdown(item: any, pack: any): string {
+function xmlEscape(value: unknown): string {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&apos;");
+}
+
+function xmlValue(tag: string, value: unknown): string {
+  return `<${tag}>${xmlEscape(value)}</${tag}>`;
+}
+
+function xmlFields(value: unknown): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return xmlValue("value", value);
+  return Object.entries(value).map(([key, field]) => {
+    const tag = key.replace(/[^a-zA-Z0-9_.-]/g, "_");
+    if (Array.isArray(field)) return `<${tag}>${field.map((entry) => xmlFields(entry)).join("")}</${tag}>`;
+    if (field && typeof field === "object") return `<${tag}>${xmlFields(field)}</${tag}>`;
+    return xmlValue(tag, field);
+  }).join("");
+}
+
+function xmlCollection(tag: string, itemTag: string, value: unknown): string {
+  const values = Array.isArray(value) ? value : value == null ? [] : [value];
+  return `<${tag}>${values.map((entry) => `<${itemTag}>${entry && typeof entry === "object" ? xmlFields(entry) : xmlEscape(entry)}</${itemTag}>`).join("")}</${tag}>`;
+}
+
+export function validateInstructionPackXml(output: string): void {
+  const root = output.trim().match(/^<instruction_pack\s+schema_version="1"\s+display_key="[^"]+"\s+id="[^"]+"\s+version="[^"]+"\s+content_hash="[^"]+">([\s\S]*)<\/instruction_pack>$/);
+  if (!root) throw new Error("Worker handoff must be one versioned <instruction_pack> XML document");
+  for (const element of ["pipeline_ownership", "handoff_validation", "header", "context", "task", "specifications", "requirements", "constraints", "verification", "report_format"]) {
+    if (!root[1].includes(`<${element}>`) || !root[1].includes(`</${element}>`)) throw new Error(`Instruction Pack XML missing <${element}>`);
+  }
+}
+
+export function renderCanonicalInstructionPackXml(item: any, pack: any): string {
   const envelope = JSON.parse(pack.content_json || "{}");
   const content = envelope.content || envelope;
   const requirements = Array.isArray(envelope.requirements)
     ? envelope.requirements
     : Array.isArray(content.requirement_snapshots) ? content.requirement_snapshots : [];
-  return `# WORK ITEM INSTRUCTION PACK: ${item.title || item.id}\n\n## PIPELINE OWNERSHIP
-- The scheduler has already claimed and launched this Work Item. Implement the bounded scope directly.
-- Do not call \`work_on_work_item\`, \`pipeline-claim\`, \`reset_pipeline_circuit\`, or other lifecycle-control actions from this worker.
-\n## HANDOFF VALIDATION\n- Pack: ${pack.id}\n- Pack version: ${pack.version}\n- Pack status: ${pack.status}\n- Pack content hash: ${pack.content_hash}\n- Result: READY\n\n## HEADER\n- Work Item: ${item.id}\n- Work Item type: ${item.type}\n- Priority: ${item.priority || "medium"}\n- Skill families: ${(content.skill_families || content.skillFamilies || []).join(", ") || "None"}\n- Depends on: derived from Work Item relations\n\n## CONTEXT\n- Working directory: current process CWD is authoritative\n- Key files:\n${markdownItems(content.files, "  ")}\n- Patterns:\n${markdownItems(content.patterns, "  ")}\n\n## TASK\n${content.goal || item.description || item.title}\n\n## SPECIFICATIONS\n\n### Business Rules\n${markdownItems(content.business_rules)}\n\n### Validation\n${markdownItems(content.validation_rules)}\n\n### Error Handling\n${markdownItems(content.error_handling)}\n\n### State Transitions\n${markdownItems(content.state_transitions)}\n\n### Contract Obligations\n${markdownItems(content.contract_obligations)}\n\n## ACCEPTANCE CRITERIA\n${requirements.map((requirement: any) => `### ${requirement.requirement_key || requirement.requirement_id || "Requirement"} - ${requirement.title || "Acceptance"}\n${requirement.acceptance_criteria || ""}`).join("\n\n") || "- None"}\n\n## CONSTRAINTS\n${markdownItems(content.constraints)}\n\n## VERIFICATION\n${markdownItems(content.verification)}\n\n## REPORT FORMAT\nReturn the canonical Completion or Issue Report for pack ${pack.id} version ${pack.version} and content hash ${pack.content_hash}.\n`;
+  const files = (content.files || []).map((file: unknown) => xmlValue("file", file)).join("");
+  const patterns = (content.patterns || []).map((pattern: unknown) => `<pattern>${xmlFields(pattern)}</pattern>`).join("");
+  const requirementXml = requirements.map((requirement: any) => `<requirement key="${xmlEscape(requirement.requirement_key || requirement.requirement_id || "Requirement")}">${xmlValue("title", requirement.title || "Acceptance")}${xmlValue("acceptance_criteria", requirement.acceptance_criteria || "")}</requirement>`).join("");
+  const output = `<instruction_pack schema_version="1" display_key="${xmlEscape(pack.display_key || `TIP-${pack.version}`)}" id="${xmlEscape(pack.id)}" version="${xmlEscape(pack.version)}" content_hash="${xmlEscape(pack.content_hash)}">
+  <pipeline_ownership>
+    <instruction>The scheduler has already claimed and launched this Work Item. Implement the bounded scope directly.</instruction>
+    <instruction>Do not call work_on_work_item, pipeline-claim, reset_pipeline_circuit, or other lifecycle-control actions from this worker.</instruction>
+  </pipeline_ownership>
+  <handoff_validation>${xmlValue("status", "READY")}${xmlValue("pack_status", pack.status)}${xmlValue("content_hash", pack.content_hash)}</handoff_validation>
+  <header>${xmlValue("work_item", item.id)}${xmlValue("work_item_type", item.type)}${xmlValue("priority", item.priority || "medium")}${xmlCollection("skill_families", "skill_family", content.skill_families || content.skillFamilies)}</header>
+  <context><working_directory>current process CWD is authoritative</working_directory><files>${files}</files><patterns>${patterns}</patterns></context>
+  ${xmlValue("task", content.goal || item.description || item.title)}
+  <specifications>${xmlCollection("business_rules", "rule", content.business_rules)}${xmlCollection("validation_rules", "rule", content.validation_rules)}${xmlCollection("error_handling", "rule", content.error_handling)}${xmlCollection("state_transitions", "transition", content.state_transitions)}${xmlCollection("contract_obligations", "obligation", content.contract_obligations)}</specifications>
+  <requirements>${requirementXml}</requirements>
+  <constraints>${xmlFields(content.constraints || {})}</constraints>
+  ${xmlCollection("verification", "check", content.verification)}
+  <report_format>Return the canonical Completion or Issue Report for pack ${xmlEscape(pack.id)} version ${xmlEscape(pack.version)} and content hash ${xmlEscape(pack.content_hash)}.</report_format>
+</instruction_pack>`;
+  validateInstructionPackXml(output);
+  return output;
 }
 
 export function canonicalReadyLeafIds(root: any, load: (id: string) => any): string[] {
@@ -458,23 +505,36 @@ const FULL_SCAN_SECTIONS = [
   ["Reliability", "Inspect the gap ledger, open invariants, operational risks, migrations, generated artifacts, and documentation drift. Report exact statuses only."],
 ] as const;
 
+const SCOUT_EVIDENCE_REQUIRED_ELEMENTS = ["scope", "findings", "gaps", "verification", "risks", "handoff_questions", "recommended_actions"] as const;
+
+export function validateScoutEvidenceXml(output: string, section: string): void {
+  const root = output.trim().match(/^<scout_evidence\s+section="([^"]+)"\s+confidence="(high|medium|low)">([\s\S]*)<\/scout_evidence>$/);
+  if (!root || root[1] !== section.toLowerCase()) throw new Error(`Scout ${section} output must be one <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low"> document`);
+  for (const element of SCOUT_EVIDENCE_REQUIRED_ELEMENTS) {
+    if (!root[3].includes(`<${element}>`) || !root[3].includes(`</${element}>`)) throw new Error(`Scout ${section} evidence missing <${element}>`);
+  }
+  if (!/<source\s+path="[^"]+"(?:\s+line="[^"]+")?\s*>[\s\S]*<\/source>/.test(root[3])) throw new Error(`Scout ${section} evidence requires at least one source citation`);
+}
+
 function startFullScanFanout(spec: any, agent: any): SubagentHandle {
   const id = randomUUID();
   const handles = FULL_SCAN_SECTIONS.map(([section, assignment]) => startSubagent({
     ...spec,
     runId: undefined,
     agent,
-    task: `${spec.task}\n\n## SECTION ASSIGNMENT: ${section}\n${assignment}\nReturn evidence for this section only. Do not compose the canonical Scan Report.`,
+    task: `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nReturn exactly one XML document matching the schema in your system prompt. Do not use Markdown outside XML and do not compose the canonical Scan Report.`,
   }));
   const result = Promise.all(handles.map((handle) => handle.result)).then((results): SubagentResult => {
     const failed = results.filter((entry) => entry.exitCode !== 0);
-    const evidence = results.map((entry, index) => `## ${FULL_SCAN_SECTIONS[index]![0]}\nScout run: ${entry.runId}\n\n${finalAssistantText(entry.messages) || entry.errorMessage || entry.stderr || "No evidence returned."}`).join("\n\n");
+    const outputs = results.map((entry) => finalAssistantText(entry.messages) || entry.errorMessage || entry.stderr || "");
+    outputs.forEach((output, index) => validateScoutEvidenceXml(output, FULL_SCAN_SECTIONS[index]![0]));
+    const evidence = outputs.map((output, index) => output.replace("<scout_evidence ", `<scout_evidence run_id="${results[index]!.runId}" `)).join("\n");
     return {
       runId: id,
       agent: "task-scout-group",
       task: spec.task,
       exitCode: failed.length ? 1 : 0,
-      messages: [{ role: "assistant", content: [{ type: "text", text: `# FULL SCAN EVIDENCE\n\n${evidence}\n\nContractor: validate these section reports, resolve contradictions against source, and author one canonical Scan Report. Do not persist any individual Scout output as the Scan artifact.` }] }],
+      messages: [{ role: "assistant", content: [{ type: "text", text: `<scan_evidence work_item="${spec.taskId || "unknown"}" scan_level="full">\n${evidence}\n</scan_evidence>\n\nContractor: validate each <scout_evidence> section, resolve contradictions against source, and author one canonical Scan Report. Do not persist any individual Scout output as the Scan artifact.` }] }],
       stderr: failed.map((entry) => entry.errorMessage || entry.stderr).filter(Boolean).join("\n"),
       usage: results.reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
     };
@@ -643,9 +703,9 @@ function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string 
     const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
     if (!activePack) throw new Error(`Work Item ${taskId} requires one active instruction pack`);
     if (stage === "review") return buildWorkItemReviewerHandoff(taskId);
-    if (stage === "autofix") return renderCanonicalInstructionPackMarkdown(data.work_item, activePack) + buildAutofixContext(data);
+    if (stage === "autofix") return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildAutofixContext(data);
     const currentReview = currentFailedReview(parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)), activePack);
-    return renderCanonicalInstructionPackMarkdown(data.work_item, activePack) + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data);
+    return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data);
   }
   const data = withInheritedParentWorkflowArtifacts(raw, cwd);
   if (stage === "scan") return buildWorkItemScanPrompt(data.work_item, data.project);

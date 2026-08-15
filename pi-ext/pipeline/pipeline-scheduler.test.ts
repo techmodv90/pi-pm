@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseTaskCompletionReport, pipelineFailureResult, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, renderCanonicalInstructionPackMarkdown, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate } from "./pipeline-scheduler.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseTaskCompletionReport, pipelineFailureResult, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, renderCanonicalInstructionPackXml, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 
 test("normalizePipelineData adapts canonical Work Items without snapshot authority", () => {
@@ -34,25 +34,27 @@ test("normalizePipelineData adapts canonical Work Items without snapshot authori
   assert.doesNotThrow(() => assertRunContractCurrent(data, { instruction_pack_id: "wip-1", instruction_pack_hash: "hash-2" }));
 });
 
-test("canonical worker handoff renders structured TIP content as readable Markdown", () => {
-  const markdown = renderCanonicalInstructionPackMarkdown(
+test("canonical worker handoff renders strict structured TIP XML", () => {
+  const xml = renderCanonicalInstructionPackXml(
     { id: "wi-1", title: "Migrate guests", type: "task", priority: "high" },
     { id: "pack-1", version: 1, status: "active", content_hash: "hash-1", content_json: JSON.stringify({ content: { goal: "Move guest mutations", files: ["src/guests.ts"], patterns: [{ file: "src/mutations.ts", symbol: "createMutation", reason: "Reuse mutation behavior" }], business_rules: ["Preserve validation"], validation_rules: [{ input: "guest forms", rule: "Preserve validation", failure: "Keep input visible" }], constraints: { scope_roots: ["src"], must_not_change: ["docs"] }, verification: [{ command: "npm test", expected_writes: ["coverage/**"], required: true }], skillFamilies: ["languages/typescript"] }, requirements: [{ requirement_key: "REQ-1", title: "Guest mutations", acceptance_criteria: "Mutations use the API" }] }) },
   );
-  assert.match(markdown, /^# WORK ITEM INSTRUCTION PACK: Migrate guests/m);
-  assert.match(markdown, /scheduler has already claimed and launched this Work Item/);
-  assert.match(markdown, /Do not call `work_on_work_item`, `pipeline-claim`, `reset_pipeline_circuit`/);
-  assert.match(markdown, /- Skill families: languages\/typescript/);
-  assert.match(markdown, /- Key files:\n  - src\/guests\.ts/);
-  assert.match(markdown, /- Patterns:\n  - \*\*File:\*\* src\/mutations\.ts\n    - \*\*Symbol:\*\* createMutation\n    - \*\*Reason:\*\* Reuse mutation behavior/);
-  assert.match(markdown, /### Validation\n- \*\*Input:\*\* guest forms\n  - \*\*Rule:\*\* Preserve validation\n  - \*\*Failure:\*\* Keep input visible/);
-  assert.match(markdown, /## CONSTRAINTS\n- \*\*Scope roots:\*\* src\n- \*\*Must not change:\*\* docs/);
-  assert.match(markdown, /## VERIFICATION\n- \*\*Command:\*\* npm test\n  - \*\*Expected writes:\*\* coverage\/\*\*\n  - \*\*Required:\*\* true/);
-  assert.match(markdown, /## TASK\nMove guest mutations/);
-  assert.match(markdown, /## ACCEPTANCE CRITERIA[\s\S]*REQ-1/);
-  assert.match(markdown, /## VERIFICATION[\s\S]*npm test/);
-  assert.doesNotMatch(markdown, /\{"(?:file|input|scope_roots|command)"/);
-  assert.doesNotMatch(markdown, /```json/);
+  assert.match(xml, /^<instruction_pack schema_version="1" /);
+  assert.match(xml, /<pipeline_ownership>/);
+  assert.match(xml, /<instruction>The scheduler has already claimed and launched this Work Item/);
+  assert.match(xml, /<skill_families><skill_family>languages\/typescript<\/skill_family><\/skill_families>/);
+  assert.match(xml, /<file>src\/guests\.ts<\/file>/);
+  assert.match(xml, /<pattern><file>src\/mutations\.ts<\/file><symbol>createMutation<\/symbol><reason>Reuse mutation behavior<\/reason><\/pattern>/);
+  assert.match(xml, /<validation_rules><rule><input>guest forms<\/input><rule>Preserve validation<\/rule><failure>Keep input visible<\/failure><\/rule><\/validation_rules>/);
+  assert.match(xml, /<task>Move guest mutations<\/task>/);
+  assert.match(xml, /<requirement key="REQ-1">[\s\S]*<acceptance_criteria>Mutations use the API<\/acceptance_criteria>/);
+  assert.match(xml, /<verification><check><command>npm test<\/command><expected_writes><value>coverage\/\*\*<\/value><\/expected_writes><required>true<\/required><\/check><\/verification>/);
+  assert.doesNotMatch(xml, /\{&quot;|\[&quot;/);
+  assert.doesNotThrow(() => validateInstructionPackXml(xml));
+});
+
+test("rejects incomplete Instruction Pack XML", () => {
+  assert.throws(() => validateInstructionPackXml(`<instruction_pack schema_version="1" display_key="TIP-1" id="pack-1" version="1" content_hash="hash"><task>work</task></instruction_pack>`), /missing <pipeline_ownership>/);
 });
 
 test("pipeline circuit reset tool forwards typed runner evidence", () => {
@@ -127,8 +129,15 @@ test("full aggregate Scan fans out bounded evidence sections for contractor synt
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   for (const section of ["Architecture", "Lifecycle", "Authority", "Verification", "Reliability"]) assert.match(source, new RegExp(`\\["${section}"`));
   assert.match(source, /startFullScanFanout/);
-  assert.match(source, /Do not compose the canonical Scan Report/);
-  assert.match(source, /Contractor: validate these section reports[\s\S]+author one canonical Scan Report/);
+  assert.match(source, /do not compose the canonical Scan Report/i);
+  assert.match(source, /Contractor: validate each <scout_evidence>[\s\S]+author one canonical Scan Report/);
+});
+
+test("Scout evidence requires structured XML rather than a Markdown wrapper", () => {
+  const valid = `<scout_evidence section="architecture" confidence="high"><scope><task>Map</task></scope><findings><finding><evidence><source path="main.go" line="1">package main</source></evidence></finding></findings><gaps></gaps><verification></verification><risks></risks><handoff_questions></handoff_questions><recommended_actions></recommended_actions></scout_evidence>`;
+  assert.doesNotThrow(() => validateScoutEvidenceXml(valid, "Architecture"));
+  assert.throws(() => validateScoutEvidenceXml(`<scout_evidence section="architecture" confidence="high"># Markdown</scout_evidence>`, "Architecture"), /missing <scope>/);
+  assert.throws(() => validateScoutEvidenceXml(valid.replace(/<source[\s\S]*<\/source>/, "No citation"), "Architecture"), /source citation/);
 });
 
 test("successful Scan Scout handoff completes without reporting a blocked attempt", () => {

@@ -162,4 +162,28 @@ Quality bar:
 
 If a task asks for a saved output path, write the report there and keep the final response short. Otherwise return the report directly after persistence.
 
-Return exactly one evidence section with source citations, your Scout run ID, and confidence. Do not call `save_work_item_artifact`, request owner approval, synthesize the canonical report, or mutate pipeline or Work Item state.
+Return exactly one XML document and no Markdown or prose outside it:
+
+```xml
+<scout_evidence section="assigned-section" confidence="high|medium|low">
+  <scope>
+    <task>...</task>
+    <scan_level>light|focused|full</scan_level>
+    <paths><path>...</path></paths>
+  </scope>
+  <findings>
+    <finding id="SECTION-001" severity="critical|high|medium|low" status="confirmed|inferred">
+      <title>...</title><claim>...</claim>
+      <evidence><source path="relative/file" line="optional">Exact source-backed evidence</source></evidence>
+      <impact>...</impact>
+    </finding>
+  </findings>
+  <gaps><gap id="SECTION-GAP-001" confidence="high|medium|low"><description>...</description><recommended_action>...</recommended_action></gap></gaps>
+  <verification><command status="passed|failed|not_run">exact command</command></verification>
+  <risks><risk severity="high|medium|low">...</risk></risks>
+  <handoff_questions><question audience="owner|developer|qa|security|ops">...</question></handoff_questions>
+  <recommended_actions><action priority="high|medium|low">...</action></recommended_actions>
+</scout_evidence>
+```
+
+Use empty container elements such as `<gaps></gaps>` when a category has no entries. XML-escape source text and attribute values. Do not call `save_work_item_artifact`, request owner approval, synthesize the canonical report, or mutate pipeline or Work Item state.
