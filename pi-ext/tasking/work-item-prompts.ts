@@ -66,7 +66,7 @@ export function buildAggregateVerifyPrompt(data: any): string {
 
 export function buildWorkItemContinuePrompt(status: { work_item_id: string; next_stage: string }, item: Pick<WorkItemPrompt, "title" | "type">): string {
   const actions: Record<string, string> = {
-    scan: "Publish the Scan artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
+    scan: "Inspect the Scout report and existing drafts. If accurate, save the complete report verbatim exactly once with `save_work_item_artifact`. If inaccurate, call `reject_work_item_scan` with actor_role=contractor and a concrete reason; wait for the owner to decide whether to reset and rescan.",
     rri: "Publish the RRI artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
     vision: "Publish the Vision artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
     blueprint: "Publish the Blueprint artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
@@ -96,7 +96,8 @@ export function buildWorkItemScanPrompt(item: WorkItemPrompt, project?: { name?:
     project?.root_path ? `Root: ${project.root_path}` : "",
     item.description || "",
     "You are the read-only task-scout. Inspect the relevant repository scope without modifying files. Record stack, architecture, commands, reusable patterns, and risks with source evidence.",
-    "Return the complete Scan Report to the contractor. Do not call task_manager to save the report or mutate Work Item state; the contractor will validate and persist it before owner approval.",
+    "Return evidence for your assigned Scan section only. Do not synthesize the canonical Scan Report or mutate Work Item state.",
+    "The contractor validates all Scout evidence, resolves contradictions against source, and authors one canonical Scan Report. Save that contractor-authored report exactly once. If evidence is insufficient, call `reject_work_item_scan` with actor_role=contractor and a concrete reason; the owner decides whether to dispatch targeted follow-up Scouts.",
   ].filter(Boolean).join("\n\n");
 }
 

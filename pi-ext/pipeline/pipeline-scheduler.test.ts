@@ -117,9 +117,26 @@ test("pipeline dry-run reports planned leaf stages and blockers without mutation
   });
 });
 
-test("canonical aggregate scheduling has an explicit initial Scan Scout path", () => {
+test("canonical aggregate scheduling requires owner resolution after Scan rejection", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /next_stage[\s\S]{0,180}scan[\s\S]{0,180}launchGroup\("scan"/);
+  assert.match(source, /next_stage[\s\S]{0,500}scan-rejection[\s\S]{0,500}launchGroup\("scan"/);
+  assert.match(source, /Owner decision required:[\s\S]{0,220}reset_work_item_planning/);
+});
+
+test("full aggregate Scan fans out bounded evidence sections for contractor synthesis", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  for (const section of ["Architecture", "Lifecycle", "Authority", "Verification", "Reliability"]) assert.match(source, new RegExp(`\\["${section}"`));
+  assert.match(source, /startFullScanFanout/);
+  assert.match(source, /Do not compose the canonical Scan Report/);
+  assert.match(source, /Contractor: validate these section reports[\s\S]+author one canonical Scan Report/);
+});
+
+test("successful Scan Scout handoff completes without reporting a blocked attempt", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const scanStart = source.indexOf('if (run.stage === "scan")');
+  const scanFinish = source.slice(scanStart, source.indexOf("this.pi.sendUserMessage", scanStart));
+  assert.match(scanFinish, /pipeline-complete[\s\S]+"completed"/);
+  assert.doesNotMatch(scanFinish, /pipeline-complete[\s\S]+"blocked"/);
 });
 
 test("canonical aggregate creation starts orchestration at Scan", () => {

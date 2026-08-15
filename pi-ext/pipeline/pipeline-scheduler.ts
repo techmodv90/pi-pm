@@ -1,5 +1,5 @@
 import { execFile, execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { promisify } from "node:util";
@@ -450,6 +450,38 @@ export function pipelineSpawnParams(stage: PipelineStage, task: any, cwd: string
   return spec;
 }
 
+const FULL_SCAN_SECTIONS = [
+  ["Architecture", "Map stack, modules, boundaries, entry points, and data flow. Cite files and lines; do not estimate unrelated metrics."],
+  ["Lifecycle", "Trace planning, materialization, authorization, execution, review, verification, acceptance, merge, cancellation, and reset state transitions."],
+  ["Authority", "Audit actor-role checks, child-agent capabilities, persistence boundaries, immutability, and security risks. Distinguish implemented guards from gaps."],
+  ["Verification", "Inspect manifests, test/build/typecheck commands, test layout, runtime prerequisites, and current blockers. Separate observed runs from historical evidence."],
+  ["Reliability", "Inspect the gap ledger, open invariants, operational risks, migrations, generated artifacts, and documentation drift. Report exact statuses only."],
+] as const;
+
+function startFullScanFanout(spec: any, agent: any): SubagentHandle {
+  const id = randomUUID();
+  const handles = FULL_SCAN_SECTIONS.map(([section, assignment]) => startSubagent({
+    ...spec,
+    runId: undefined,
+    agent,
+    task: `${spec.task}\n\n## SECTION ASSIGNMENT: ${section}\n${assignment}\nReturn evidence for this section only. Do not compose the canonical Scan Report.`,
+  }));
+  const result = Promise.all(handles.map((handle) => handle.result)).then((results): SubagentResult => {
+    const failed = results.filter((entry) => entry.exitCode !== 0);
+    const evidence = results.map((entry, index) => `## ${FULL_SCAN_SECTIONS[index]![0]}\nScout run: ${entry.runId}\n\n${finalAssistantText(entry.messages) || entry.errorMessage || entry.stderr || "No evidence returned."}`).join("\n\n");
+    return {
+      runId: id,
+      agent: "task-scout-group",
+      task: spec.task,
+      exitCode: failed.length ? 1 : 0,
+      messages: [{ role: "assistant", content: [{ type: "text", text: `# FULL SCAN EVIDENCE\n\n${evidence}\n\nContractor: validate these section reports, resolve contradictions against source, and author one canonical Scan Report. Do not persist any individual Scout output as the Scan artifact.` }] }],
+      stderr: failed.map((entry) => entry.errorMessage || entry.stderr).filter(Boolean).join("\n"),
+      usage: results.reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
+    };
+  });
+  return { id, result, stop: () => handles.forEach((handle) => handle.stop()) };
+}
+
 function outputFor(run: PipelineRun): string {
   const path = join(run.async_dir || "", `output-${run.child_index || 0}.log`);
   if (!existsSync(path)) throw new Error(`subagent output missing: ${path}`);
@@ -783,6 +815,10 @@ export class PipelineScheduler {
         try {
           const workflow = execPic(["work-item", "workflow-status", rootTaskId], ctx.cwd);
           if (workflow.next_stage === "scan") {
+            const rejection = execPic(["work-item", "scan-rejection", rootTaskId], ctx.cwd);
+            if (rejection.rejected) {
+              throw new Error(`Scan report was rejected by the contractor: ${rejection.reason}. Owner decision required: call reset_work_item_planning with actor_role=owner to rescan, or leave the Work Item at Scan and do not retry.`);
+            }
             await this.launchGroup("scan", [rootTaskId]);
             return;
           }
@@ -967,9 +1003,11 @@ export class PipelineScheduler {
         let runId = "";
         let handle: SubagentHandle;
         try {
-          handle = startSubagent({ ...spec, agent }, (update) => {
-            this.reportProgress(runId, taskId, stage, update.event, finalAssistantText(update.result.messages));
-          });
+          handle = stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)
+            ? startFullScanFanout(spec, agent)
+            : startSubagent({ ...spec, agent }, (update) => {
+                this.reportProgress(runId, taskId, stage, update.event, finalAssistantText(update.result.messages));
+              });
         } catch (error) {
           if (spec.preparedWorktree && spec.runId) removeSubagentWorktree(this.cwd, spec.preparedWorktree, spec.runId);
           throw error;
@@ -1093,9 +1131,9 @@ export class PipelineScheduler {
       }
       if (run.stage === "scan") {
         const output = outputFor(run);
-        const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", "Scan report returned to contractor for validation and persistence", "--result-json", JSON.stringify({ subagent_state: status.state, scan_report: output })], this.cwd);
+        const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state, scan_report: output })], this.cwd);
         if (result.error) throw new Error(result.error);
-        this.pi.sendUserMessage(`Scan report ready for contractor review for ${run.task_id}. Validate the report, then save it with save_work_item_artifact before requesting owner approval.\n\n${output}`, { deliverAs: "followUp" });
+        this.pi.sendUserMessage(`Scan evidence ready for contractor synthesis for ${run.task_id}. Inspect existing Scan drafts and validate every section against source. Resolve contradictions, author one canonical Scan Report, and save that contractor-authored report exactly once with save_work_item_artifact. If evidence is insufficient, call reject_work_item_scan with actor_role=contractor and explain why; the owner decides whether to dispatch targeted follow-up Scouts.\n\n${output}`, { deliverAs: "followUp" });
         checkpoint(run, "advanced", this.cwd);
         return;
       }

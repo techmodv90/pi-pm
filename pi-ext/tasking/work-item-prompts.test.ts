@@ -56,17 +56,21 @@ test("Work Item prompts use only canonical lifecycle actions", () => {
   ].join("\n");
 
   assert.match(prompts, /save_work_item_artifact/);
-  assert.match(prompts, /Return the complete Scan Report to the contractor/);
+  assert.match(prompts, /Return evidence for your assigned Scan section only/);
   assert.match(prompts, /trigger_work_item_review/);
   assert.doesNotMatch(prompts, /scan_task|rri_task|design_task|complete_task_item|save_verification_report|save_owner_decision/);
   assert.doesNotMatch(prompts, /\bEpic\b|\bTask Item\b|\bchild Tasks\b/);
 });
 
-test("Scan Scout returns the report without Work Item persistence", () => {
+test("Scan Scout returns section evidence for contractor synthesis", () => {
   const prompt = buildWorkItemScanPrompt({ id: "wi-1", title: "Canonical item" });
   assert.match(prompt, /read-only task-scout/i);
-  assert.match(prompt, /Return the complete Scan Report to the contractor/);
-  assert.doesNotMatch(prompt, /save_work_item_artifact|approve_work_item_artifact/);
+  assert.match(prompt, /assigned Scan section only/);
+  assert.match(prompt, /contractor validates all Scout evidence/i);
+  assert.match(prompt, /authors one canonical Scan Report/i);
+  assert.match(prompt, /reject_work_item_scan/);
+  assert.match(prompt, /owner decides whether to dispatch targeted follow-up Scouts/i);
+  assert.doesNotMatch(prompt, /approve_work_item_artifact/);
 });
 
 test("formatWorkItemChecklist preserves archived checklist evidence", () => {

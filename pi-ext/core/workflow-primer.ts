@@ -19,6 +19,8 @@ Execution order:
 - Ask for explicit owner authorization, then call \`authorize_work_item_implementation\` with \`actor_role=owner\`; this activates the generated TIPs.
 - Launch only dependency-ready executable Work Items with \`work_on_work_item\`; the persisted scheduler owns worker and review execution.
 - Follow \`work_item_workflow_status\` for contractor verification and aggregate-only owner acceptance/merge actions. Passed executable children close automatically; never request owner acceptance for a child Task, Bug, or Chore.
+- Workflow debugging rule: never work around a blocker by filtering runtime state, relabeling a failure, or bypassing a gate. Trace the persisted state transition first; model valid handoffs explicitly and add regression evidence before retrying.
+- Scan handoff rule: focused scans use one read-only Scout and full scans fan out bounded section assignments. Scouts return immutable evidence only; the contractor validates it, resolves conflicts, authors one canonical Scan Report, and saves that artifact exactly once. Rejected evidence pauses for an explicit owner rescan decision.
 - A Feature owns a delivery branch by default; an Epic coordinates by default unless explicitly marked branch-owning. Only one aggregate on a containment path may own a branch.
 - After aggregate verification and explicit owner acceptance, the scheduler merges the bound branch to \`develop\`; merge failure leaves \`merge_pending\` and must not rerun completed children.
 - Legacy pic task commands and task-runner dispatch were removed. Never invoke "pic task" or launch task workers directly.
