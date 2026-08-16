@@ -5,7 +5,7 @@ tools: read, grep, find, ls, bash, subagent
 thinking: high
 prompt_mode: replace
 inherit_context: false
-model: aibox-openai/deepseek-v4-pro[1m]
+model: cliproxy/ds-4-pro
 ---
 
 # Task RRI Orchestrator

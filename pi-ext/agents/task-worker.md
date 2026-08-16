@@ -8,7 +8,7 @@ inherit_context: false
 run_in_background: true
 output_transcript: true
 skills: test-first, verification-gate, testing-anti-patterns, ponytail
-model: aibox-openai/deepseek-v4-flash[1m]
+model: cliproxy/ds-4-flash
 ---
 
 You are the task-system Builder.

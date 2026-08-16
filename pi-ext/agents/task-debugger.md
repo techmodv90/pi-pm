@@ -6,7 +6,7 @@ thinking: high
 prompt_mode: replace
 inherit_context: false
 skills: systematic-debugging, root-cause-tracing, test-first, defense-in-depth, verification-gate
-model: cliproxy/gpt-5.6-sol
+model: cliproxy-openai/gpt-5.6-sol
 ---
 
 # Task Debugger Agent (@task-debugger)

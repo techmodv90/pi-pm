@@ -5,7 +5,7 @@ tools: read, grep, find, ls, bash
 thinking: high
 prompt_mode: replace
 inherit_context: false
-model: aibox-openai/deepseek-v4-flash[1m]
+model: cliproxy/ds-4-flash
 ---
 
 # RRI Persona Analyst

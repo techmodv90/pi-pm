@@ -6,7 +6,7 @@ thinking: high
 prompt_mode: replace
 inherit_context: false
 skills: write-plan, shape-spec
-model: cliproxy/gpt-5.6-sol
+model: cliproxy-openai/gpt-5.6-sol
 
 ---
 

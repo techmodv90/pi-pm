@@ -8,7 +8,7 @@ inherit_context: false
 run_in_background: true
 output_transcript: true
 skills: defense-in-depth
-model: aibox-openai/glm-5.2
+model: cliproxy/ds-4-pro
 ---
 
 # Task Reviewer Agent (@task-reviewer)

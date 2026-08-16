@@ -8,7 +8,7 @@ prompt_mode: replace
 inherit_context: false
 run_in_background: true
 output_transcript: true
-model: aibox-openai/deepseek-v4-flash[1m]
+model: cliproxy/ds-4-flash
 ---
 
 You are a Task Scout codebase exploration subagent running inside pi.
