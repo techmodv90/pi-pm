@@ -618,12 +618,12 @@ function startRriFanout(spec: any, taskRriAgent: any, personaAgent: any, handoff
   const personas: readonly string[] = /\b(production|deploy(?:ment)?|operations?|observability|backup|recovery|scal(?:e|ing)|uptime)\b/i.test(spec.task)
     ? [...RRI_PERSONAS, "Operator"]
     : RRI_PERSONAS;
-  const launchPersona = async (persona: string, attempt = 0): Promise<{ output: string; result: SubagentResult }> => {
+  const launchPersona = async (persona: string, attempt = 0, correction = ""): Promise<{ output: string; result: SubagentResult }> => {
     const handle = startSubagent({
       ...spec,
       runId: undefined,
       agent: personaAgent,
-      task: `${spec.task}\n\nAssigned persona: ${persona}. Analyze only this persona and return exactly one JSON object matching your system contract.`,
+      task: `${spec.task}\n\nAssigned persona: ${persona}. Analyze only this persona and return exactly one JSON object matching your system contract.${correction ? ` Previous attempt failed validation: ${correction}. This is the only retry. The first output character must be { and the last must be }; emit no other text.` : ""}`,
     });
     handles.push(handle);
     const result = await handle.result;
@@ -634,8 +634,8 @@ function startRriFanout(spec: any, taskRriAgent: any, personaAgent: any, handoff
       parseRriPersonaResult(output, persona);
       return { output, result };
     } catch (error) {
-      if (attempt === 0) return launchPersona(persona, 1);
-      throw error;
+      if (attempt === 0 && !stopped) return launchPersona(persona, 1, error instanceof Error ? error.message : String(error));
+      throw new Error(`RRI persona ${persona} ${error instanceof Error ? error.message : String(error)}`);
     }
   };
   const result = Promise.all(personas.map((persona) => launchPersona(persona))).then(async (personaResults): Promise<SubagentResult> => {

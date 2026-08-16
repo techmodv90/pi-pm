@@ -231,6 +231,7 @@ test("RRI synthesis handoff is strict JSON", () => {
 
 test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const personaInstructions = readFileSync(new URL("../agents/rri-persona.md", import.meta.url), "utf8");
   assert.match(source, /stage === "rri"[\s\S]+startRriFanout\(spec, agent, personaAgent, this\.handoffs\)/);
   const fanout = source.slice(source.indexOf("function startRriFanout"), source.indexOf("function outputFor"));
   assert.match(fanout, /personas\.map/);
@@ -238,6 +239,8 @@ test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () 
   assert.match(fanout, /handoffs\.put\("rri-persona"/);
   assert.match(fanout, /startSubagent\([\s\S]+agent: taskRriAgent/);
   assert.match(fanout, /catch[\s\S]+handles\.forEach\(\(handle\) => handle\.stop\(\)\)/);
+  assert.match(personaInstructions, /first character.*\{.*last character.*\}/s);
+  assert.doesNotMatch(personaInstructions, /```json/);
 });
 
 test("review output is a single structured scheduler-owned verdict", () => {
