@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseTaskCompletionReport, pipelineFailureResult, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, renderCanonicalInstructionPackXml, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate } from "./pipeline-scheduler.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseTaskCompletionReport, pipelineFailureResult, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, renderCanonicalInstructionPackXml, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 
 test("normalizePipelineData adapts canonical Work Items without snapshot authority", () => {
@@ -198,6 +198,46 @@ test("planning pipeline stages use planning agents and prompts without an active
   assert.match(source, /task_graph: "task-planner"/);
   assert.match(source, /if \(isPlanningStage\(stage\)\) return buildWorkItemContinuePrompt/);
   assert.match(source, /if \(planningStages\.includes\(workflow\.next_stage\)\)[\s\S]+launchGroup\(workflow\.next_stage, \[rootTaskId\]\)/);
+});
+
+test("completed planning stages pause for main-agent synthesis instead of launching Scan", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const finishBody = source.slice(source.indexOf("private async finish"), source.indexOf("private async continueWorkerGroup"));
+  assert.match(finishBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
+  assert.ok(finishBody.indexOf("if (isPlanningStage(run.stage))") < finishBody.lastIndexOf("await this.advance(run.task_id, parentId)"));
+  const resumeBody = source.slice(source.indexOf("private async resumePending"), source.indexOf("private pipelineRuns"));
+  assert.match(resumeBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
+});
+
+test("RRI persona handoffs require strict assigned-persona JSON", () => {
+  const valid = JSON.stringify({
+    persona: "QA / Tester",
+    auto_answered: [{ question: "Tests?", answer: "Go and Node", source: "AGENTS.md", confidence: "high" }],
+    candidate_questions: [{ priority: "P1", classification: "SMART-ASKED", mode: "GUIDED", question: "Why this matters: failures block delivery. Which recovery outcome is required?", suggested_answers: ["Retry", "Stop"], reason: "Recovery policy is unspecified", requirement_area: "reliability" }],
+    not_applicable: [],
+  });
+  assert.equal(parseRriPersonaResult(valid, "QA / Tester").persona, "QA / Tester");
+  assert.throws(() => parseRriPersonaResult(valid, "Developer"), /expected Developer/);
+  assert.throws(() => parseRriPersonaResult('{"persona":"QA / Tester"}', "QA / Tester"), /auto_answered/);
+  assert.throws(() => parseRriPersonaResult("```json\n" + valid + "\n```", "QA / Tester"), /one JSON object/);
+});
+
+test("RRI synthesis handoff is strict JSON", () => {
+  const valid = JSON.stringify({ next_question: null, remaining_queue: [], auto_answered: [], not_applicable: [], open_blockers: [], final_report: null });
+  assert.deepEqual(parseRriSynthesisResult(valid), JSON.parse(valid));
+  assert.throws(() => parseRriSynthesisResult("Prepared interview"), /one JSON object/);
+  assert.throws(() => parseRriSynthesisResult('{"next_question":null}'), /remaining_queue/);
+});
+
+test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /stage === "rri"[\s\S]+startRriFanout\(spec, agent, personaAgent, this\.handoffs\)/);
+  const fanout = source.slice(source.indexOf("function startRriFanout"), source.indexOf("function outputFor"));
+  assert.match(fanout, /personas\.map/);
+  assert.match(fanout, /parseRriPersonaResult/);
+  assert.match(fanout, /handoffs\.put\("rri-persona"/);
+  assert.match(fanout, /startSubagent\([\s\S]+agent: taskRriAgent/);
+  assert.match(fanout, /catch[\s\S]+handles\.forEach\(\(handle\) => handle\.stop\(\)\)/);
 });
 
 test("review output is a single structured scheduler-owned verdict", () => {

@@ -573,6 +573,108 @@ function startFullScanFanout(spec: any, agent: any): SubagentHandle {
   return { id, result, stop: () => handles.forEach((handle) => handle.stop()) };
 }
 
+const RRI_PERSONAS = ["End User", "Business Analyst", "QA / Tester", "Developer"] as const;
+
+export function parseRriPersonaResult(output: string, expectedPersona: string): any {
+  const trimmed = output.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) throw new Error(`RRI persona ${expectedPersona} must return one JSON object`);
+  let value: any;
+  try { value = JSON.parse(trimmed); } catch { throw new Error(`RRI persona ${expectedPersona} returned invalid JSON`); }
+  if (value.persona !== expectedPersona) throw new Error(`RRI persona output expected ${expectedPersona}, got ${value.persona || "none"}`);
+  for (const field of ["auto_answered", "candidate_questions", "not_applicable"]) {
+    if (!Array.isArray(value[field])) throw new Error(`RRI persona ${expectedPersona} missing ${field} array`);
+  }
+  for (const answer of value.auto_answered) {
+    if (!["high", "medium", "low"].includes(answer?.confidence) || !answer.question || !answer.answer || !answer.source) throw new Error(`RRI persona ${expectedPersona} has invalid auto_answered entry`);
+  }
+  for (const question of value.candidate_questions) {
+    if (!["P0", "P1", "P2", "P3"].includes(question?.priority)
+      || !["SMART-ASKED", "CHALLENGE-PROPOSED"].includes(question?.classification)
+      || !["CHALLENGE", "GUIDED", "EXPLORE"].includes(question?.mode)
+      || !question.question || !Array.isArray(question.suggested_answers) || !question.reason || !question.requirement_area) {
+      throw new Error(`RRI persona ${expectedPersona} has invalid candidate_questions entry`);
+    }
+  }
+  return value;
+}
+
+export function parseRriSynthesisResult(output: string): any {
+  const trimmed = output.trim();
+  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) throw new Error("RRI synthesis must return one JSON object");
+  let value: any;
+  try { value = JSON.parse(trimmed); } catch { throw new Error("RRI synthesis returned invalid JSON"); }
+  for (const field of ["remaining_queue", "auto_answered", "not_applicable", "open_blockers"]) {
+    if (!Array.isArray(value[field])) throw new Error(`RRI synthesis missing ${field} array`);
+  }
+  if (!(value.next_question === null || (value.next_question && typeof value.next_question === "object"))) throw new Error("RRI synthesis has invalid next_question");
+  if (!(value.final_report === null || (value.final_report && typeof value.final_report === "object"))) throw new Error("RRI synthesis has invalid final_report");
+  return value;
+}
+
+function startRriFanout(spec: any, taskRriAgent: any, personaAgent: any, handoffs: EphemeralHandoffStore): SubagentHandle {
+  const id = randomUUID();
+  const handles: SubagentHandle[] = [];
+  let stopped = false;
+  const personas: readonly string[] = /\b(production|deploy(?:ment)?|operations?|observability|backup|recovery|scal(?:e|ing)|uptime)\b/i.test(spec.task)
+    ? [...RRI_PERSONAS, "Operator"]
+    : RRI_PERSONAS;
+  const launchPersona = async (persona: string, attempt = 0): Promise<{ output: string; result: SubagentResult }> => {
+    const handle = startSubagent({
+      ...spec,
+      runId: undefined,
+      agent: personaAgent,
+      task: `${spec.task}\n\nAssigned persona: ${persona}. Analyze only this persona and return exactly one JSON object matching your system contract.`,
+    });
+    handles.push(handle);
+    const result = await handle.result;
+    if (stopped) throw new Error("RRI persona fanout cancelled");
+    try {
+      if (result.exitCode !== 0) throw new Error(result.errorMessage || result.stderr || "persona process failed");
+      const output = finalAssistantText(result.messages);
+      parseRriPersonaResult(output, persona);
+      return { output, result };
+    } catch (error) {
+      if (attempt === 0) return launchPersona(persona, 1);
+      throw error;
+    }
+  };
+  const result = Promise.all(personas.map((persona) => launchPersona(persona))).then(async (personaResults): Promise<SubagentResult> => {
+    const synchronized = personaResults.map(({ output, result }) => ({ handoffId: handoffs.put("rri-persona", spec.taskId, output), result }));
+    const handoffPayloads = synchronized.map(({ handoffId }) => {
+      const entry = handoffs.get(handoffId, spec.taskId);
+      if (!entry) throw new Error(`RRI persona handoff unavailable: ${handoffId}`);
+      return { handoff_id: handoffId, evidence: JSON.parse(entry.payload) };
+    });
+    const synthesis = startSubagent({
+      ...spec,
+      runId: undefined,
+      agent: taskRriAgent,
+      task: `${spec.task}\n\nThe scheduler has completed and validated all required persona runs. Do not launch subagents. Synthesize the prepared owner interview from these ephemeral persona handoffs:\n${JSON.stringify(handoffPayloads)}`,
+    });
+    handles.push(synthesis);
+    const synthesisResult = await synthesis.result;
+    if (synthesisResult.exitCode === 0) {
+      parseRriSynthesisResult(finalAssistantText(synthesisResult.messages));
+      for (const { handoffId } of synchronized) handoffs.delete(handoffId);
+    }
+    return { ...synthesisResult, runId: id, agent: "task-rri-group", usage: [...synchronized.map((entry) => entry.result), synthesisResult].reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }) };
+  }).catch((error): SubagentResult => {
+    stopped = true;
+    handles.forEach((handle) => handle.stop());
+    return {
+      runId: id,
+      agent: "task-rri-group",
+      task: spec.task,
+      exitCode: 1,
+      messages: [],
+      stderr: error instanceof Error ? error.message : String(error),
+      errorMessage: error instanceof Error ? error.message : String(error),
+      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+    };
+  });
+  return { id, result, stop: () => { stopped = true; handles.forEach((handle) => handle.stop()); } };
+}
+
 function outputFor(run: PipelineRun): string {
   const path = join(run.async_dir || "", `output-${run.child_index || 0}.log`);
   if (!existsSync(path)) throw new Error(`subagent output missing: ${path}`);
@@ -1073,7 +1175,8 @@ export class PipelineScheduler {
           if (!Array.isArray(parsed) || !parsed.every((family) => typeof family === "string")) throw new Error(`Task ${taskId} has invalid persisted skill families`);
           skillFamilies = parsed;
         }
-        const taskPrompt = workerPrompts.get(taskId) || stagePrompt(stage, taskId, this.cwd);
+        let taskPrompt = workerPrompts.get(taskId) || stagePrompt(stage, taskId, this.cwd);
+        if (stage === "rri") taskPrompt += `\n\nComplete RRI source context:\n${JSON.stringify({ work_item: data.work_item, scan_reports: data.scan_reports, requirements: data.requirements || [], owner_decisions: data.owner_decisions || [] })}`;
         const task = { agent: stageAgent(stage), task: taskPrompt, taskId, ...(isMutationStage(stage) || stage === "review" ? { skillFamilies } : {}) };
         const spec = pipelineSpawnParams(stage, task, this.cwd);
         if (stage === "worker") spec.initialPatchPath = initialPatchPaths.get(taskId);
@@ -1106,7 +1209,11 @@ export class PipelineScheduler {
         let runId = "";
         let handle: SubagentHandle;
         try {
-          handle = stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)
+          if (stage === "rri") {
+            const personaAgent = discoverAgents(this.cwd, "project").find((candidate) => candidate.name === "rri-persona");
+            if (!personaAgent) throw new Error("Task-system agent definition not found: rri-persona");
+            handle = startRriFanout(spec, agent, personaAgent, this.handoffs);
+          } else handle = stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)
             ? startFullScanFanout(spec, agent)
             : startSubagent({ ...spec, agent }, (update) => {
                 this.reportProgress(runId, taskId, stage, update.event, finalAssistantText(update.result.messages));
@@ -1238,6 +1345,13 @@ export class PipelineScheduler {
         if (result.error) throw new Error(result.error);
         const handoffId = this.handoffs.put("scan", run.task_id, output);
         this.pi.sendUserMessage(`Scan evidence ready for contractor synthesis for ${run.task_id}. Load ephemeral handoff ${handoffId}, validate every section against source, resolve contradictions, and save one canonical Scan Report as structured XML matching this schema:\n\n${CANONICAL_SCAN_REPORT_XML_FORMAT}\n\nDo not format owner-facing Markdown; the task_manager tool renders the saved XML deterministically. Otherwise reject the scan. The handoff expires after five minutes and is never persisted.`, { deliverAs: "followUp" });
+        checkpoint(run, "advanced", this.cwd);
+        return;
+      }
+      if (isPlanningStage(run.stage)) {
+        const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state })], this.cwd);
+        if (result.error) throw new Error(result.error);
+        this.publishPlanningHandoff(run, outputFor(run));
         checkpoint(run, "advanced", this.cwd);
         return;
       }
@@ -1417,9 +1531,22 @@ export class PipelineScheduler {
         this.promoteReviewedCandidate(workerRun);
       }
     }
+    if (isPlanningStage(run.stage)) {
+      this.publishPlanningHandoff(run, outputFor(run));
+      checkpoint(run, "advanced", this.cwd);
+      return;
+    }
     const parentId = data.work_item?.parent_id;
     checkpoint(run, "advanced", this.cwd);
     await this.advance(run.task_id, parentId);
+  }
+
+  private publishPlanningHandoff(run: PipelineRun, output: string): void {
+    const handoffId = this.handoffs.put(run.stage, run.task_id, output);
+    const action = run.stage === "rri"
+      ? "conduct the owner interview, persist confirmed requirements and decisions, then save the owner-confirmed RRI artifact"
+      : `validate the result, save the ${run.stage} artifact, and present it for owner approval`;
+    this.pi.sendUserMessage(`${run.stage.toUpperCase()} analysis ready for ${run.task_id}. Load ephemeral handoff ${handoffId}, ${action}. The handoff expires after five minutes and is never persisted.`, { deliverAs: "followUp" });
   }
 
   private pipelineRuns(taskId: string): any[] {

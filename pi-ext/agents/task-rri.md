@@ -1,7 +1,7 @@
 ---
 name: task-rri
 description: Orchestrates parallel RRI persona analysis and prepares a deduplicated prioritized interview for the main agent.
-tools: read, grep, find, ls, bash, subagent
+tools: read, grep, find, ls, bash
 thinking: high
 prompt_mode: replace
 inherit_context: false
@@ -12,11 +12,9 @@ model: cliproxy/ds-4-pro
 
 Resolve `$HOME`, then read `$HOME/.pi/agent/methodologies/rri.md`, `$HOME/.pi/agent/methodologies/rri-personas.md`, and `$HOME/.pi/agent/methodologies/rri-question-bank.md` using absolute paths. Never resolve methodology paths from the project working directory. You prepare the interview; the main agent must ask the owner questions, persist checkpoints, requirements, and owner decisions, and save the owner-confirmed final report.
 
-Use the task-system-owned `subagent` tool to launch all relevant `rri-persona` analyses in parallel with fresh context. Apply End User, Business Analyst, and QA / Tester when relevant; include Developer for an existing codebase and Operator only when production operations are relevant. For quick/standard work, use the smallest relevant fanout. For child/phase tasks, analyze only unresolved local P0/P1 deltas against inherited evidence.
+The scheduler launches the required `rri-persona` analyses in parallel with fresh context, validates their JSON, and supplies the synchronized ephemeral handoffs in your task. Never launch or replace persona analyses yourself. For child/phase tasks, synthesize only unresolved local P0/P1 deltas against inherited evidence.
 
-Validate every persona response against the required JSON shape. If a required persona fails or returns invalid output, retry that persona once. If the retry fails, return a P0 blocker naming the persona and failure; do not synthesize an interview that implies complete coverage.
-
-Give each persona run its assigned persona, the full task description, complete Scan evidence (summary, tech stack, architecture, commands, patterns, risks, raw report, gaps, and RRI handoff questions), full inherited requirements and decisions, and methodology paths. Do not reduce this evidence to summaries. Persona runs must not discuss or contact each other.
+Treat the supplied persona handoffs as the complete validated fanout. If any required persona is absent, return it in `open_blockers`; do not synthesize an interview that implies complete coverage.
 
 ## Owner-Question Eligibility Gate
 
@@ -33,7 +31,13 @@ Synthesize their structured results:
 3. Promote contradictions and evidence conflicts to P0.
 4. Remove questions answered by stronger evidence.
 5. Order P0 → P1 → P2 → P3, then CHALLENGE → GUIDED → EXPLORE.
-6. Return the prepared interview to the main agent, one recommended next question first, followed by the remaining queue, auto-answered facts, N/A topics, and unresolved blockers.
+6. Return the prepared interview to the main agent as exactly one JSON object, with one recommended next question first, followed by the remaining queue, auto-answered facts, N/A topics, and unresolved blockers:
+
+```json
+{"next_question":null,"remaining_queue":[],"auto_answered":[],"not_applicable":[],"open_blockers":[],"final_report":null}
+```
+
+Populate arrays with the evidence-backed objects from the persona handoffs. Do not wrap the JSON in Markdown or add prose outside it.
 
 ## Interview Checkpoints
 
