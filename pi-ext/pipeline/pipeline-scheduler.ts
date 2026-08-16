@@ -7,6 +7,7 @@ import { join, matchesGlob } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { execGitIndexWrite, execPic, execPicText, withGitWriteLock } from "../core/cli-helpers.ts";
+import { EphemeralHandoffStore } from "../core/ephemeral-handoffs.ts";
 
 import { validateSkillFamilies } from "../subagent/skills.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -536,7 +537,7 @@ function startFullScanFanout(spec: any, agent: any): SubagentHandle {
     ...spec,
     runId: undefined,
     agent,
-    task: `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nReturn exactly one XML document matching the schema in your system prompt. Do not use Markdown outside XML and do not compose the canonical Scan Report.`,
+    task: `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nReturn exactly one XML document matching the schema in your system prompt. Include at least one non-empty <source path="relative/file"> citation. Use exactly one concise finding with at most two source citations and keep the complete document under 2,500 characters, including the closing </scout_evidence> tag. Do not use Markdown outside XML and do not compose the canonical Scan Report.`,
   }));
   const result = Promise.all(handles.map((handle) => handle.result)).then((results): SubagentResult => {
     const failed = results.filter((entry) => entry.exitCode !== 0);
@@ -754,6 +755,7 @@ function rejectedCandidatePatch(data: any, runs: PipelineRun[]): string | undefi
 }
 
 export class PipelineScheduler {
+  readonly handoffs = new EphemeralHandoffStore();
   private cwd = "";
   private integrating = Promise.resolve();
   private reconciling = false;
@@ -841,7 +843,12 @@ export class PipelineScheduler {
 
 
   stopSession(): void {
+    this.handoffs.clear();
     this.context = undefined;
+  }
+
+  finalizeHandoffs(workItemId: string, workflow: string): void {
+    this.handoffs.deleteForWorkItem(workItemId, workflow);
   }
 
   private reportError(error: unknown, ctx: ExtensionContext): void {
@@ -1220,7 +1227,8 @@ export class PipelineScheduler {
         const output = outputFor(run);
         const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state, scan_report: output })], this.cwd);
         if (result.error) throw new Error(result.error);
-        this.pi.sendUserMessage(`Scan evidence ready for contractor synthesis for ${run.task_id}. Inspect existing Scan drafts and validate every section against source. Resolve contradictions, author one canonical Scan Report, and save that contractor-authored report exactly once with save_work_item_artifact. If evidence is insufficient, call reject_work_item_scan with actor_role=contractor and explain why; the owner decides whether to dispatch targeted follow-up Scouts.\n\n${output}`, { deliverAs: "followUp" });
+        const handoffId = this.handoffs.put("scan", run.task_id, output);
+        this.pi.sendUserMessage(`Scan evidence ready for contractor synthesis for ${run.task_id}. Load ephemeral handoff ${handoffId}, validate every section against source, and save one canonical Scan Report or reject the scan. The handoff expires after five minutes and is never persisted.`, { deliverAs: "followUp" });
         checkpoint(run, "advanced", this.cwd);
         return;
       }
@@ -1440,6 +1448,17 @@ export function registerPipelineScheduler(pi: ExtensionAPI): PipelineScheduler {
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
       }
+    },
+  });
+  pi.registerTool({
+    name: "ephemeral_handoff",
+    label: "Ephemeral Handoff",
+    description: "Read temporary Scout, RRI, or planning evidence from memory. Evidence is never persisted.",
+    parameters: Type.Object({ id: Type.String(), work_item_id: Type.String() }),
+    async execute(_id, params) {
+      const entry = scheduler.handoffs.get(params.id, params.work_item_id);
+      if (!entry) return { content: [{ type: "text", text: "Error: ephemeral handoff missing or expired; rerun the producing stage" }], details: { id: params.id, workflow: "", work_item_id: params.work_item_id, expires_at: 0 }, isError: true };
+      return { content: [{ type: "text", text: entry.payload }], details: { id: entry.id, workflow: entry.workflow, work_item_id: entry.workItemId, expires_at: entry.expiresAt } };
     },
   });
   pi.registerTool({

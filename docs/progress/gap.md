@@ -108,6 +108,8 @@ This file is the authority for the review-before-integration reliability work. A
 
 ## Review Log
 
+- 2026-08-16: GAP-100 opened after the Task-System Extension Epic could not reset because an exploratory child Work Item was counted as execution lineage. Aggregate planning must distinguish explicit exploratory proposals from promoted delivery descendants; reset may ignore only proposals with no materialization, authorization, active pack, pipeline, completion, or verification authority.
+
 - 2026-08-14: GAP-099 closed by separating eligibility to run aggregate verification from the authority produced by a passed aggregate report. Pending requirements no longer deadlock the final gate; only a committed passed report satisfies them, and rollback preserves their prior status on any final validation failure.
 - 2026-08-14: GAP-099 opened from live post-migration evidence after GAP-098. Requirement satisfaction belongs to passed aggregate verification, not to a prerequisite manual mutation or individual child owner gate.
 - 2026-08-14: GAP-098 closed with executable closure moved atomically into passed contractor verification. Delivery state and aggregate owner decisions are separate authorities; Feature/structural delivery roots default to branch ownership, Epics default to coordination, labels override, and recursive ancestry prevents nested branch owners. Aggregate verification binds current task graph, branch head, and `develop` base. Owner acceptance either closes coordination work or enters `merge_pending`; the scheduler performs an idempotent `--no-ff` merge in a temporary worktree, pushes, confirms the remote SHA, and only then records `done`. Failed operations persist `blocked` without rerunning children.

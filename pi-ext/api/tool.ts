@@ -299,6 +299,9 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           }
         }
         let text = result.error ? `Error: ${result.error}` : JSON.stringify(result, null, 2);
+        if (!result.error && params.id && ((params.action === "save_work_item_artifact" && params.stage === "scan") || params.action === "reject_work_item_scan")) {
+          pipelineScheduler.finalizeHandoffs(params.id, "scan");
+        }
         if (!result.error && params.action === "work_item_workflow_status" && ["aggregate_verification", "owner_acceptance", "merge_pending"].includes(result.next_stage)) {
           const data = execPic(["show", params.id!], ctx.cwd);
           if (data.error) text = `Error: ${data.error}`;

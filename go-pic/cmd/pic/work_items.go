@@ -801,11 +801,24 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 		return errors.New("planning reset requires a non-terminal Work Item")
 	}
 	var count int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=?`, args[0]).Scan(&count); err != nil {
+	if err = tx.QueryRow(`WITH RECURSIVE descendants(id) AS (
+		SELECT id FROM work_items WHERE parent_id=?
+		UNION ALL
+		SELECT wi.id FROM work_items wi JOIN descendants d ON wi.parent_id=d.id
+	) SELECT COUNT(*) FROM descendants d
+	JOIN work_items child ON child.id=d.id
+	WHERE child.status NOT IN ('open','cancelled')
+	OR EXISTS (SELECT 1 FROM workflow_checkpoints c WHERE c.work_item_id=d.id)
+	OR EXISTS (SELECT 1 FROM work_item_materializations m WHERE m.work_item_id=d.id OR m.root_work_item_id=d.id)
+	OR EXISTS (SELECT 1 FROM implementation_authorizations a WHERE a.work_item_id=d.id AND a.revoked_at='')
+	OR EXISTS (SELECT 1 FROM work_item_instruction_packs p WHERE p.work_item_id=d.id)
+	OR EXISTS (SELECT 1 FROM pipeline_runs r WHERE r.task_id=d.id)
+	OR EXISTS (SELECT 1 FROM work_item_completion_reports r WHERE r.work_item_id=d.id)
+	OR EXISTS (SELECT 1 FROM work_item_verification_reports r WHERE r.work_item_id=d.id)`, args[0]).Scan(&count); err != nil {
 		return err
 	}
 	if count != 0 {
-		return errors.New("planning reset requires no descendants")
+		return errors.New("planning reset requires no execution-bearing descendants")
 	}
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=?`, args[0]).Scan(&count); err != nil {
 		return err

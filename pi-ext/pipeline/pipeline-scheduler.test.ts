@@ -130,7 +130,11 @@ test("full aggregate Scan fans out bounded evidence sections for contractor synt
   for (const section of ["Architecture", "Lifecycle", "Authority", "Verification", "Reliability"]) assert.match(source, new RegExp(`\\["${section}"`));
   assert.match(source, /startFullScanFanout/);
   assert.match(source, /do not compose the canonical Scan Report/i);
-  assert.match(source, /Contractor: validate each <scout_evidence>[\s\S]+author one canonical Scan Report/);
+  assert.match(source, /Include at least one non-empty <source path="relative\/file"/);
+  assert.match(source, /Use exactly one concise finding with at most two source citations and keep the complete document under 2,500 characters/);
+  assert.match(source, /handoffs\.put\("scan"/);
+  assert.match(source, /Load ephemeral handoff \$\{handoffId\}/);
+  assert.doesNotMatch(source, /Scan evidence ready[^`]+\$\{output\}/);
 });
 
 test("Scout evidence requires structured XML rather than a Markdown wrapper", () => {
