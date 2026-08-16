@@ -79,6 +79,18 @@ test("owner-only graph actions never synthesize owner authorization", () => {
   assert.match(source, /actor_role must be owner after explicit owner approval/);
 });
 
+test("RRI interview checkpoints use disposable drafts and clean up after terminal planning actions", () => {
+  const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  assert.match(source, /checkpoint_rri_interview/);
+  assert.match(source, /load_rri_interview/);
+  assert.match(source, /saveRriDraft/);
+  assert.match(source, /loadRriDraft/);
+  assert.match(source, /execPic\(\["project", "current"\]/);
+  assert.match(source, /approve_work_item_artifact[\s\S]{0,700}deleteRriDraft/);
+  assert.match(source, /reset_work_item_planning[\s\S]{0,700}deleteRriDraft/);
+  assert.match(source, /update_work_item_status[\s\S]{0,700}deleteRriDraft/);
+});
+
 test("child task-manager capabilities are restricted by the launched agent role", () => {
   const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   const runner = readFileSync(new URL("../subagent/runner.ts", import.meta.url), "utf8");

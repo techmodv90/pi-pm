@@ -9,6 +9,7 @@ import { buildReviewContext } from "../tasking/settings";
 import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemDebugPrompt } from "../tasking/work-item-prompts";
 import { assertTaskManagerActionAllowed } from "../tasking/agent-capabilities.ts";
 import { prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
+import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
 
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
 import type { PipelineScheduler } from "../pipeline/pipeline-scheduler.ts";
@@ -24,6 +25,19 @@ function aggregateGitEvidence(cwd: string): { branch: string; head: string; base
   return { branch, head: git("rev-parse", "HEAD"), baseBranch, baseCommit };
 }
 
+function approvedScanLineage(cwd: string, workItemId: string): RriDraftLineage {
+  const data = execPic(["show", workItemId], cwd);
+  const checkpoint = (data.checkpoints || []).find((entry: any) => entry.stage === "scan");
+  if (!checkpoint?.artifact_id || !checkpoint?.content_hash) throw new Error("RRI interview requires an approved Scan checkpoint");
+  return { artifactId: checkpoint.artifact_id, contentHash: checkpoint.content_hash };
+}
+
+function rriDraftRoot(cwd: string): string {
+  const project = execPic(["project", "current"], cwd);
+  if (!project.root_path) throw new Error(project.error || "RRI interview requires a current project root");
+  return project.root_path;
+}
+
 export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: PipelineScheduler) {
     pi.registerTool({
       name: "task_manager",
@@ -32,7 +46,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
       promptSnippet: "Use Work Item actions for lifecycle mutations. Archived Task Items are read-only history.",
       parameters: Type.Object({
         action: StringEnum([
-          "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels",
+          "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview",
           "save_work_item_artifact", "approve_work_item_artifact", "reject_work_item_scan", "reset_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
           "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
           "relate_work_items", "reset_pipeline_circuit",
@@ -77,6 +91,31 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         }
 
         switch (params.action as string) {
+          case "checkpoint_rri_interview": {
+            if (!params.id || !params.content) return { content: [{ type: "text", text: "Error: id and JSON content required" }], details: {}, isError: true };
+            let state: unknown;
+            try { state = JSON.parse(params.content); }
+            catch { return { content: [{ type: "text", text: "Error: RRI interview content must be valid JSON" }], details: {}, isError: true }; }
+            if (!state || typeof state !== "object" || Array.isArray(state)) return { content: [{ type: "text", text: "Error: RRI interview content must be one JSON object" }], details: {}, isError: true };
+            try {
+              const path = saveRriDraft(rriDraftRoot(ctx.cwd), params.id, approvedScanLineage(ctx.cwd, params.id), state);
+              const result = { work_item_id: params.id, checkpointed: true, path };
+              return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Error: ${message}` }], details: { error: message }, isError: true };
+            }
+          }
+          case "load_rri_interview": {
+            if (!params.id) return { content: [{ type: "text", text: "Error: id required" }], details: {}, isError: true };
+            try {
+              const result = loadRriDraft(rriDraftRoot(ctx.cwd), params.id, approvedScanLineage(ctx.cwd, params.id));
+              return { content: [{ type: "text", text: JSON.stringify(result.state, null, 2) }], details: result };
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Error: ${message}` }], details: { error: message }, isError: true };
+            }
+          }
           case "create_work_item": {
             if (!params.work_item_type || !params.title) return { content: [{ type: "text", text: "Error: work_item_type and title required" }], details: {}, isError: true };
             args = ["work-item", "create", params.work_item_type, params.title];
@@ -279,6 +318,11 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         }
   
         const result = execPic(args, ctx.cwd);
+        if (!result.error && params.id && (
+          (params.action === "approve_work_item_artifact" && params.stage === "rri")
+          || params.action === "reset_work_item_planning"
+          || (params.action === "update_work_item_status" && params.status === "cancelled")
+        )) deleteRriDraft(rriDraftRoot(ctx.cwd), params.id);
         if (!result.error && params.action === "create_work_item" && ["epic", "feature"].includes(params.work_item_type || "")) {
           const workflow = execPic(["work-item", "workflow-status", result.id], ctx.cwd);
           result.next_stage = workflow.next_stage;
