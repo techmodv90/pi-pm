@@ -31,13 +31,11 @@ Synthesize their structured results:
 3. Promote contradictions and evidence conflicts to P0.
 4. Remove questions answered by stronger evidence.
 5. Order P0 → P1 → P2 → P3, then CHALLENGE → GUIDED → EXPLORE.
-6. Return the prepared interview to the main agent as exactly one JSON object, with one recommended next question first, followed by the remaining queue, auto-answered facts, N/A topics, and unresolved blockers:
+6. Return the prepared interview to the main agent as exactly one JSON object, with one recommended next question first, followed by the remaining queue, auto-answered facts, N/A topics, and unresolved blockers. The first character must be `{` and the last character must be `}`. Do not use a Markdown fence, heading, introduction, or trailing explanation. Use this shape on one line:
 
-```json
 {"next_question":null,"remaining_queue":[],"auto_answered":[],"not_applicable":[],"open_blockers":[],"final_report":null}
-```
 
-Populate arrays with the evidence-backed objects from the persona handoffs. Do not wrap the JSON in Markdown or add prose outside it.
+Populate arrays with the evidence-backed objects from the persona handoffs.
 
 ## Interview Checkpoints
 

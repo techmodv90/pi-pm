@@ -645,19 +645,29 @@ function startRriFanout(spec: any, taskRriAgent: any, personaAgent: any, handoff
       if (!entry) throw new Error(`RRI persona handoff unavailable: ${handoffId}`);
       return { handoff_id: handoffId, evidence: JSON.parse(entry.payload) };
     });
-    const synthesis = startSubagent({
-      ...spec,
-      runId: undefined,
-      agent: taskRriAgent,
-      task: `${spec.task}\n\nThe scheduler has completed and validated all required persona runs. Do not launch subagents. Synthesize the prepared owner interview from these ephemeral persona handoffs:\n${JSON.stringify(handoffPayloads)}`,
-    });
-    handles.push(synthesis);
-    const synthesisResult = await synthesis.result;
-    if (synthesisResult.exitCode === 0) {
-      parseRriSynthesisResult(finalAssistantText(synthesisResult.messages));
-      for (const { handoffId } of synchronized) handoffs.delete(handoffId);
-    }
-    return { ...synthesisResult, runId: id, agent: "task-rri-group", usage: [...synchronized.map((entry) => entry.result), synthesisResult].reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }) };
+    const synthesisAttempts: SubagentResult[] = [];
+    const launchSynthesis = async (attempt = 0, correction = ""): Promise<SubagentResult> => {
+      const synthesis = startSubagent({
+        ...spec,
+        runId: undefined,
+        agent: taskRriAgent,
+        task: `${spec.task}\n\nThe scheduler has completed and validated all required persona runs. Do not launch subagents. Synthesize the prepared owner interview from these ephemeral persona handoffs:\n${JSON.stringify(handoffPayloads)}${correction ? `\n\nRRI synthesis failed validation: ${correction}. This is the only retry. The first output character must be { and the last must be }; emit no other text.` : ""}`,
+      });
+      handles.push(synthesis);
+      const synthesisResult = await synthesis.result;
+      synthesisAttempts.push(synthesisResult);
+      try {
+        if (synthesisResult.exitCode !== 0) throw new Error(synthesisResult.errorMessage || synthesisResult.stderr || "synthesis process failed");
+        parseRriSynthesisResult(finalAssistantText(synthesisResult.messages));
+        return synthesisResult;
+      } catch (error) {
+        if (attempt === 0 && !stopped) return launchSynthesis(1, error instanceof Error ? error.message : String(error));
+        throw error;
+      }
+    };
+    const synthesisResult = await launchSynthesis();
+    for (const { handoffId } of synchronized) handoffs.delete(handoffId);
+    return { ...synthesisResult, runId: id, agent: "task-rri-group", usage: [...synchronized.map((entry) => entry.result), ...synthesisAttempts].reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }) };
   }).catch((error): SubagentResult => {
     stopped = true;
     handles.forEach((handle) => handle.stop());

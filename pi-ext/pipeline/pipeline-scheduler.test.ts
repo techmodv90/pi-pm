@@ -241,6 +241,8 @@ test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () 
   assert.match(fanout, /catch[\s\S]+handles\.forEach\(\(handle\) => handle\.stop\(\)\)/);
   assert.match(personaInstructions, /first character.*\{.*last character.*\}/s);
   assert.doesNotMatch(personaInstructions, /```json/);
+  assert.match(readFileSync(new URL("../agents/task-rri.md", import.meta.url), "utf8"), /prepared interview[\s\S]+first character.*\{.*last character.*\}/s);
+  assert.match(fanout, /RRI synthesis failed validation:[\s\S]+only retry/);
 });
 
 test("review output is a single structured scheduler-owned verdict", () => {
