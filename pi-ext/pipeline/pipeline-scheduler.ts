@@ -11,7 +11,7 @@ import { EphemeralHandoffStore } from "../core/ephemeral-handoffs.ts";
 
 import { validateSkillFamilies } from "../subagent/skills.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
-import { buildTaskVerifyPrompt, buildWorkItemReviewerHandoff, buildWorkItemScanPrompt, CANONICAL_SCAN_REPORT_XML_FORMAT } from "../tasking/work-item-prompts.ts";
+import { buildTaskVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemReviewerHandoff, buildWorkItemScanPrompt, CANONICAL_SCAN_REPORT_XML_FORMAT } from "../tasking/work-item-prompts.ts";
 import { getBlockingTaskDependencies } from "../tasking/workflow-gates.ts";
 import { discoverAgents } from "../subagent/agents.ts";
 import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, startSubagent, type SubagentHandle } from "../subagent/runner.ts";
@@ -21,6 +21,9 @@ import { parsePipelineRuns, type PipelineRunRecord, type PipelineStage } from ".
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_GENERATED_FILES = ["test-results/**", "playwright-report/**", "coverage/**", ".nyc_output/**"];
+const planningStages: PipelineStage[] = ["rri", "vision", "blueprint", "contracts", "task_graph"];
+
+function isPlanningStage(stage: PipelineStage): boolean { return planningStages.includes(stage); }
 
 function verificationEnvironmentFingerprint(cwd: string): string {
   const values = ["NODE_ENV", "CI", "DATABASE_URL", "TEST_DATABASE_URL", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]
@@ -688,7 +691,7 @@ function saveWorkerReport(run: PipelineRun, cwd: string, taskReport: { status: "
 }
 
 function stageAgent(stage: PipelineStage): string {
-  return ({ scan: "task-scout", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
+  return ({ scan: "task-scout", rri: "task-rri", vision: "task-planner", blueprint: "task-planner", contracts: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
 }
 
 export function buildWorkerCorrectionContext(data: any): string {
@@ -727,6 +730,7 @@ function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string 
   const raw = execPic(["show", taskId], cwd);
   if (raw.work_item) {
     if (stage === "scan") return buildWorkItemScanPrompt(raw.work_item, raw.project);
+    if (isPlanningStage(stage)) return buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, raw.work_item);
     const data = normalizePipelineData(raw);
     const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
     if (!activePack) throw new Error(`Work Item ${taskId} requires one active instruction pack`);
@@ -914,6 +918,11 @@ export class PipelineScheduler {
               throw new Error(`Scan report was rejected by the contractor: ${rejection.reason}. Owner decision required: call reset_work_item_planning with actor_role=owner to rescan, or leave the Work Item at Scan and do not retry.`);
             }
             await this.launchGroup("scan", [rootTaskId]);
+            return;
+          }
+          if (planningStages.includes(workflow.next_stage)) {
+            assertCleanGit(ctx.cwd);
+            await this.launchGroup(workflow.next_stage, [rootTaskId]);
             return;
           }
           assertCleanGit(ctx.cwd);

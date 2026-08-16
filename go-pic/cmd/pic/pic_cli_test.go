@@ -743,7 +743,49 @@ Then it completes')`)
 	}
 }
 
-func TestWorkItemGraphRevisionReusesStableMaterializedChildren(t *testing.T) {
+func TestStandaloneWorkItemMaterializesTIPWithoutCreatingChild(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Standalone task"))
+	id := item["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,task_id,requirement_key,title,acceptance_criteria) VALUES('req-standalone','`+id+`','REQ-001','Required','Given valid context
+When work runs
+Then it completes')`)
+	for _, stage := range []string{"scan", "rri"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, stage))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	graph := `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"IMPLEMENT","type":"task","name":"Standalone task","goal":"Implement standalone task","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}],"skillFamilies":[]}]}`
+	artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graph))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", artifact["id"].(string), "approved")
+	result := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id))
+	if result["created"] != float64(0) || result["total"] != float64(1) {
+		t.Fatalf("standalone materialization = %#v", result)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var children, mappings, packs int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=?`, id).Scan(&children)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id=?`, id, id).Scan(&mappings)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='inactive'`, id).Scan(&packs)
+	if children != 0 || mappings != 1 || packs != 1 {
+		t.Fatalf("standalone children=%d mappings=%d inactive packs=%d", children, mappings, packs)
+	}
+	authorized := asObject(t, runPic(t, bin, root, home, "work-item", "authorize", id, "owner"))
+	if authorized["activated"] != float64(1) {
+		t.Fatalf("standalone authorization = %#v", authorized)
+	}
+}
+
+func TestStandaloneGraphRevisionReusesRootWorkItem(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Parent task"))
@@ -752,7 +794,7 @@ func TestWorkItemGraphRevisionReusesStableMaterializedChildren(t *testing.T) {
 	runSQLite(t, dbPath, `INSERT INTO requirements(id,task_id,requirement_key,title,acceptance_criteria) VALUES('req-stable','`+id+`','REQ-001','Required','Given valid context
 When work runs
 Then it completes')`)
-	for _, stage := range []string{"scan", "rri", "vision", "blueprint", "contracts"} {
+	for _, stage := range []string{"scan", "rri"} {
 		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, stage))
 		decision := "approved"
 		if stage == "scan" {
@@ -767,7 +809,7 @@ Then it completes')`)
 	secondArtifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graph))
 	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", secondArtifact["id"].(string), "approved")
 	second := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id))
-	if first["created"] != float64(1) || second["created"] != float64(0) || second["reused"] != float64(1) {
+	if first["created"] != float64(0) || second["created"] != float64(0) {
 		t.Fatalf("materialization first=%#v second=%#v", first, second)
 	}
 	db, err := openSQLite(dbPath)
@@ -782,7 +824,7 @@ Then it completes')`)
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id=?`, id).Scan(&mappings); err != nil {
 		t.Fatal(err)
 	}
-	if children != 1 || mappings != 2 {
+	if children != 0 || mappings != 2 {
 		t.Fatalf("children=%d mappings=%d", children, mappings)
 	}
 }
@@ -875,6 +917,29 @@ func TestAggregateWorkItemVerificationAndClosure(t *testing.T) {
 	closed := asObject(t, runPic(t, bin, root, home, "work-item", "show", epic["id"].(string)))
 	if closed["status"] != "done" {
 		t.Fatalf("closed aggregate = %#v", closed)
+	}
+}
+
+func TestFailedAggregateVerificationCreatesCorrectiveBug(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Correct aggregate"))
+	completed := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Completed child", "--parent", epic["id"].(string)))
+	runPic(t, bin, root, home, "work-item", "status", completed["id"].(string), "done")
+	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", epic["id"].(string), "failed", "release check failed", "--actor-role", "contractor"))
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var bugs, links, requirements int
+	var completedStatus string
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=? AND type='bug' AND status='open'`, epic["id"]).Scan(&bugs)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_corrective_bugs WHERE verification_report_id=?`, report["id"]).Scan(&links)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM requirements WHERE task_id=(SELECT bug_work_item_id FROM work_item_corrective_bugs WHERE verification_report_id=?)`, report["id"]).Scan(&requirements)
+	_ = db.QueryRow(`SELECT status FROM work_items WHERE id=?`, completed["id"]).Scan(&completedStatus)
+	if bugs != 1 || links != 1 || requirements != 1 || completedStatus != "done" {
+		t.Fatalf("corrective bugs=%d links=%d requirements=%d completed=%q report=%#v", bugs, links, requirements, completedStatus, report)
 	}
 }
 
@@ -1016,6 +1081,23 @@ func TestValidateInstructionPackVerificationContract(t *testing.T) {
 	missingSetup.Verification = []any{map[string]any{"command": "npm test", "required": true, "requires": []any{"dev-server"}}}
 	if err := validateInstructionPackContent(missingSetup); err == nil || !strings.Contains(err.Error(), "setup_commands") {
 		t.Fatalf("service prerequisite without setup accepted: %v", err)
+	}
+}
+
+func TestPipelineClaimAcceptsCurrentPlanningStageWithoutTIP(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Durable planning"))
+	id := item["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "rri"); !strings.Contains(out, "current planning stage is scan") {
+		t.Fatalf("out-of-order RRI claim was not rejected: %s", out)
+	}
+	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-scan','`+id+`','scan',1,'<scan_report/>','scan-hash'); INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-scan','`+id+`','scan','wia-scan',1,'scan-hash','approved');`)
+
+	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "rri"))
+	if claim["stage"] != "rri" || claim["instruction_pack_id"] != "" {
+		t.Fatalf("RRI planning claim = %#v", claim)
 	}
 }
 

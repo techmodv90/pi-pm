@@ -81,7 +81,9 @@ export function buildWorkItemContinuePrompt(status: { work_item_id: string; next
     vision: "Publish the Vision artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
     blueprint: "Publish the Blueprint artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
     contracts: "Publish the Contracts artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
-    task_graph: "Publish the complete requirement-covering task graph with `save_work_item_artifact`, validate the saved draft with `validate_work_item_graph`, then present the validated graph to the owner. Call `approve_work_item_artifact` with `actor_role=owner` only after their explicit approval.",
+    task_graph: ["task", "bug", "chore"].includes(item.type || "")
+      ? "Publish a requirement-covering task graph with exactly one executable node matching the existing Work Item type, no parent, and no dependencies. This node specifies the TIP for the existing Work Item; it must not create or decompose Work Items. Save it with `save_work_item_artifact`, validate it with `validate_work_item_graph`, then present it to the owner. Call `approve_work_item_artifact` with `actor_role=owner` only after explicit approval."
+      : "Publish the complete requirement-covering task graph with `save_work_item_artifact`, validate the saved draft with `validate_work_item_graph`, then present the validated graph to the owner. Call `approve_work_item_artifact` with `actor_role=owner` only after their explicit approval.",
     materialize: "Materialize the approved task graph with `materialize_work_item`; do not create child Work Items manually before this stage.",
     authorize: "Ask the owner for implementation authorization. Call `authorize_work_item_implementation` with `actor_role=owner` only after their explicit approval.",
     implement: ["task", "bug", "chore"].includes(item.type || "")

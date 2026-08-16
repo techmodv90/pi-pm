@@ -1,4 +1,4 @@
-export type PipelineStage = "scan" | "worker" | "review" | "autofix";
+export type PipelineStage = "scan" | "rri" | "vision" | "blueprint" | "contracts" | "task_graph" | "worker" | "review" | "autofix";
 export type PipelineRunStatus = "claimed" | "running" | "completed" | "failed" | "blocked" | "cancelled" | "expired";
 
 export interface PipelineRunRecord {
@@ -40,7 +40,7 @@ export function isPipelineRunRecord(value: unknown): value is PipelineRunRecord 
   return typeof run.id === "string"
     && typeof run.task_id === "string"
     && typeof run.stage === "string"
-    && ["scan", "worker", "review", "autofix"].includes(run.stage)
+    && ["scan", "rri", "vision", "blueprint", "contracts", "task_graph", "worker", "review", "autofix"].includes(run.stage)
     && typeof run.status === "string"
     && ["claimed", "running", "completed", "failed", "blocked", "cancelled", "expired"].includes(run.status)
     && typeof run.lease_token === "string";

@@ -82,6 +82,7 @@ test("formatWorkItemChecklist preserves archived checklist evidence", () => {
 
 test("executable continuation follows TIP execution gates", () => {
   assert.match(buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "implement" }, { title: "Leaf", type: "task" }), /work_on_work_item/);
+  assert.match(buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "task_graph" }, { title: "Leaf", type: "task" }), /exactly one.*existing Work Item/i);
   assert.match(buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "contractor_verification" }, { title: "Leaf", type: "task" }), /verify_work_item/);
   assert.match(buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "owner_acceptance" }, { title: "Feature", type: "feature" }), /accept_aggregate_work_item/);
   assert.match(buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "merge_pending" }, { title: "Feature", type: "feature" }), /merge_aggregate_work_item/);

@@ -185,6 +185,19 @@ test("pipeline run parsing rejects malformed pic records instead of silently dro
   assert.deepEqual(parsePipelineRuns([{ id: "run-1", task_id: "task-1", stage: "worker", status: "completed", lease_token: "lease-1" }]), [
     { id: "run-1", task_id: "task-1", stage: "worker", status: "completed", lease_token: "lease-1" },
   ]);
+  assert.deepEqual(parsePipelineRuns([{ id: "run-rri", task_id: "wi-1", stage: "rri", status: "claimed", lease_token: "lease-rri" }]), [
+    { id: "run-rri", task_id: "wi-1", stage: "rri", status: "claimed", lease_token: "lease-rri" },
+  ]);
+});
+
+test("planning pipeline stages use planning agents and prompts without an active TIP", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /rri: "task-rri"/);
+  assert.match(source, /vision: "task-planner"/);
+  assert.match(source, /contracts: "task-planner"/);
+  assert.match(source, /task_graph: "task-planner"/);
+  assert.match(source, /if \(isPlanningStage\(stage\)\) return buildWorkItemContinuePrompt/);
+  assert.match(source, /if \(planningStages\.includes\(workflow\.next_stage\)\)[\s\S]+launchGroup\(workflow\.next_stage, \[rootTaskId\]\)/);
 });
 
 test("review output is a single structured scheduler-owned verdict", () => {

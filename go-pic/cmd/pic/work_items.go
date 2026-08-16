@@ -914,11 +914,18 @@ func workItemArtifactApprove(db *sql.DB, args []string) error {
 		}
 		return err
 	}
-	stageIndex := indexOfWorkItemStage(args[1])
+	stages, err := planningStagesForWorkItem(tx, args[0])
+	if err != nil {
+		return err
+	}
+	stageIndex := indexOfStage(stages, args[1])
+	if stageIndex < 0 {
+		return fmt.Errorf("stage %s is not part of this Work Item planning profile", args[1])
+	}
 	if stageIndex > 0 {
 		var previous int
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, args[0], workItemStages[stageIndex-1]).Scan(&previous); err != nil || previous != 1 {
-			return fmt.Errorf("Previous stage %s is not approved", workItemStages[stageIndex-1])
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, args[0], stages[stageIndex-1]).Scan(&previous); err != nil || previous != 1 {
+			return fmt.Errorf("Previous stage %s is not approved", stages[stageIndex-1])
 		}
 	}
 	if args[1] == "task_graph" {
@@ -971,6 +978,13 @@ func workItemWorkflowStatus(db *sql.DB, args []string) error {
 		return nil
 	}
 	if contains([]string{"task", "bug", "chore"}, fmt.Sprint(item["type"])) {
+		if fmt.Sprint(item["parent_id"]) == "" {
+			var active int
+			_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, args[0]).Scan(&active)
+			if active == 0 {
+				return workItemStandalonePlanningStatus(db, args[0])
+			}
+		}
 		return workItemExecutionStatus(db, args[0])
 	}
 	checkpoints := map[string]any{}
@@ -999,6 +1013,50 @@ func workItemWorkflowStatus(db *sql.DB, args []string) error {
 		}
 	}
 	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "next_stage": next, "checkpoints": checkpoints})
+	return nil
+}
+
+func planningStagesForWorkItem(db databaseQueryer, id string) ([]string, error) {
+	var kind, parentID string
+	if err := db.QueryRow(`SELECT type,COALESCE(parent_id,'') FROM work_items WHERE id=?`, id).Scan(&kind, &parentID); err != nil {
+		return nil, err
+	}
+	if contains([]string{"task", "bug", "chore"}, kind) && parentID == "" {
+		return []string{"scan", "rri", "task_graph"}, nil
+	}
+	return workItemStages, nil
+}
+
+func indexOfStage(stages []string, stage string) int {
+	for index, candidate := range stages {
+		if candidate == stage {
+			return index
+		}
+	}
+	return -1
+}
+
+func workItemStandalonePlanningStatus(db *sql.DB, id string) error {
+	next := "materialize"
+	checkpoints := map[string]any{}
+	for _, stage := range []string{"scan", "rri", "task_graph"} {
+		approved, err := rowExists(db, `SELECT 1 FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, id, stage)
+		if err != nil {
+			return err
+		}
+		checkpoints[stage] = approved
+		if !approved && next == "materialize" {
+			next = stage
+		}
+	}
+	if next == "materialize" {
+		var mappings int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id=?`, id, id).Scan(&mappings)
+		if mappings > 0 {
+			next = "authorize"
+		}
+	}
+	writeJSON(os.Stdout, map[string]any{"work_item_id": id, "workflow_kind": "standalone_plan", "next_stage": next, "checkpoints": checkpoints})
 	return nil
 }
 
@@ -1081,6 +1139,28 @@ func workItemAggregateVerify(db *sql.DB, args []string) error {
 	if _, err = tx.Exec(`INSERT INTO work_item_verification_reports(id,work_item_id,checkpoint_id,status,summary,verified_by_role) VALUES(?,?,?,?,?,?)`, id, args[0], checkpointID, args[1], args[2], opts["actor-role"]); err != nil {
 		return err
 	}
+	correctiveBugID := ""
+	if args[1] != "passed" {
+		correctiveBugID = "wi-" + shortID()
+		if _, err = tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority) VALUES(?,'bug',?,?,?,'high')`, correctiveBugID, args[0], "Correct aggregate verification failure", args[2]); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO tasks(id,title,status,priority,origin) VALUES(?,?, 'open','high','materialized')`, correctiveBugID, "Correct aggregate verification failure"); err != nil {
+			return fmt.Errorf("create corrective task projection: %w", err)
+		}
+		requirementID := "req-" + shortID()
+		requirementKey := "CORRECTIVE-" + strings.ToUpper(strings.TrimPrefix(id, "wivr-"))
+		acceptance := "Given aggregate verification report " + id + " is not passed\nWhen the corrective work is implemented and verified\nThen the aggregate verification failure is resolved"
+		if _, err = tx.Exec(`INSERT INTO requirements(id,task_id,requirement_key,title,description,acceptance_criteria,priority,source) VALUES(?,?,?,?,?,?,'tier1',?)`, requirementID, correctiveBugID, requirementKey, "Resolve aggregate verification failure", args[2], acceptance, id); err != nil {
+			return fmt.Errorf("create corrective requirement: %w", err)
+		}
+		if _, err = tx.Exec(`INSERT INTO work_item_corrective_bugs(verification_report_id,bug_work_item_id) VALUES(?,?)`, id, correctiveBugID); err != nil {
+			return fmt.Errorf("link corrective bug: %w", err)
+		}
+		if _, err = tx.Exec(`INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES(?,?,'related',?)`, "wir-"+shortID(), args[0], correctiveBugID); err != nil {
+			return fmt.Errorf("relate corrective bug: %w", err)
+		}
+	}
 	if args[1] == "passed" {
 		if _, err = tx.Exec(`UPDATE requirements SET status='satisfied' WHERE (epic_id=? OR task_id=?) AND status='pending'`, args[0], args[0]); err != nil {
 			return err
@@ -1136,7 +1216,7 @@ func workItemAggregateVerify(db *sql.DB, args []string) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"id": id, "work_item_id": args[0], "checkpoint_id": checkpointID, "status": args[1], "summary": args[2]})
+	writeJSON(os.Stdout, map[string]any{"id": id, "work_item_id": args[0], "checkpoint_id": checkpointID, "status": args[1], "summary": args[2], "corrective_bug_id": correctiveBugID})
 	return nil
 }
 
@@ -1348,6 +1428,13 @@ func validateTaskGraphArtifact(db databaseQueryer, workItemID, content string) (
 	if _, err = validateTaskGraphRequirementCoverage(db, workItemID, plan); err != nil {
 		return taskPlanDocument{}, err
 	}
+	var kind, parentID string
+	if err = db.QueryRow(`SELECT type,COALESCE(parent_id,'') FROM work_items WHERE id=?`, workItemID).Scan(&kind, &parentID); err != nil {
+		return taskPlanDocument{}, err
+	}
+	if contains([]string{"task", "bug", "chore"}, kind) && parentID == "" && (len(plan.Nodes) != 1 || plan.Nodes[0].Type != kind || plan.Nodes[0].ParentKey != "" || len(plan.Nodes[0].DependsOn) != 0) {
+		return taskPlanDocument{}, errors.New("standalone task graph requires exactly one matching executable node without parent or dependencies")
+	}
 	return plan, nil
 }
 
@@ -1427,6 +1514,42 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 	requirements, err := validateTaskGraphRequirementCoverage(tx, args[0], plan)
 	if err != nil {
 		return err
+	}
+	var rootKind, rootParent string
+	if err = tx.QueryRow(`SELECT type,COALESCE(parent_id,'') FROM work_items WHERE id=?`, args[0]).Scan(&rootKind, &rootParent); err != nil {
+		return err
+	}
+	if contains([]string{"task", "bug", "chore"}, rootKind) && rootParent == "" {
+		if len(plan.Nodes) != 1 || plan.Nodes[0].Type != rootKind || plan.Nodes[0].ParentKey != "" || len(plan.Nodes[0].DependsOn) != 0 {
+			return errors.New("standalone task graph requires exactly one matching executable node without parent or dependencies")
+		}
+		var existing string
+		_ = tx.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND checkpoint_id=? AND node_key=?`, args[0], checkpointID, plan.Nodes[0].Key).Scan(&existing)
+		if existing == "" {
+			packContent, contentHash, marshalErr := materializedInstructionPack(plan.Nodes[0], plan.Version, requirements)
+			if marshalErr != nil {
+				return marshalErr
+			}
+			var version int
+			if err = tx.QueryRow(`SELECT COALESCE(MAX(version),0)+1 FROM work_item_instruction_packs WHERE work_item_id=?`, args[0]).Scan(&version); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(`INSERT INTO work_item_materializations(root_work_item_id,checkpoint_id,node_key,work_item_id) VALUES(?,?,?,?)`, args[0], checkpointID, plan.Nodes[0].Key, args[0]); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(`INSERT INTO work_item_instruction_packs(id,work_item_id,checkpoint_id,version,status,content_json,content_hash) VALUES(?,?,?,?,'inactive',?,?)`, "wip-"+shortID(), args[0], checkpointID, version, string(packContent), contentHash); err != nil {
+				return err
+			}
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+		reused := 0
+		if existing != "" {
+			reused = 1
+		}
+		writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "checkpoint_id": checkpointID, "created": 0, "reused": reused, "total": 1})
+		return nil
 	}
 	ids := map[string]string{}
 	created, reused := 0, 0
