@@ -66,11 +66,14 @@ test("Scan Scout returns section evidence for contractor synthesis", () => {
   const prompt = buildWorkItemScanPrompt({ id: "wi-1", title: "Canonical item" });
   assert.match(prompt, /read-only task-scout/i);
   assert.match(prompt, /assigned Scan section only/);
-  assert.match(prompt, /contractor validates all Scout evidence/i);
-  assert.match(prompt, /authors one canonical Scan Report/i);
-  assert.match(prompt, /reject_work_item_scan/);
-  assert.match(prompt, /owner decides whether to dispatch targeted follow-up Scouts/i);
+  assert.doesNotMatch(prompt, /<scan_report>|reject_work_item_scan/);
   assert.doesNotMatch(prompt, /approve_work_item_artifact/);
+});
+
+test("Scan contractor handoff requests canonical XML without presentation formatting", () => {
+  const prompt = buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "scan" }, { title: "Canonical item" });
+  assert.match(prompt, /canonical Scan Report[\s\S]+as structured XML/);
+  assert.doesNotMatch(prompt, /Markdown report format|TECH_STACK/);
 });
 
 test("formatWorkItemChecklist preserves archived checklist evidence", () => {

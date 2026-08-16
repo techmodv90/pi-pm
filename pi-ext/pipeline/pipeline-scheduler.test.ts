@@ -63,6 +63,16 @@ test("pipeline circuit reset tool forwards typed runner evidence", () => {
   assert.match(source, /"--change-type", params\.change_type, "--evidence-json", params\.evidence_json/);
 });
 
+test("Scan artifact saves render the owner-facing Markdown result", () => {
+  const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  assert.match(source, /import \{ Markdown, Text \} from "@mariozechner\/pi-tui"/);
+  assert.match(source, /import \{ getMarkdownTheme \} from "@mariozechner\/pi-coding-agent"/);
+  assert.match(source, /details: scanPresentation \? \{ \.\.\.result, scanPresentation \} : result/);
+  assert.match(source, /`Scan artifact \$\{result\.id\} saved\. Ask the owner to approve or reject this Scan Report\.`/);
+  assert.doesNotMatch(source, /terminate: Boolean\(scanPresentation\)/);
+  assert.match(source, /if \(details\?\.scanPresentation\) return new Markdown\(details\.scanPresentation, 0, 0, getMarkdownTheme\(\)\)/);
+});
+
 test("owner-only graph actions never synthesize owner authorization", () => {
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /params\.actor_role \|\| "owner"/);
@@ -129,22 +139,26 @@ test("full aggregate Scan fans out bounded evidence sections for contractor synt
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   for (const section of ["Architecture", "Lifecycle", "Authority", "Verification", "Reliability"]) assert.match(source, new RegExp(`\\["${section}"`));
   assert.match(source, /startFullScanFanout/);
-  assert.match(source, /do not compose the canonical Scan Report/i);
-  assert.match(source, /Include at least one non-empty <source path="relative\/file"/);
-  assert.match(source, /Use exactly one concise finding with at most two source citations and keep the complete document under 2,500 characters/);
+  assert.match(source, /compose the canonical Scan Report/i);
+  assert.match(source, /root must be <scout_evidence section="\$\{section\.toLowerCase\(\)\}"/i);
+  assert.match(source, /one evidence container with one or two non-empty <source path="relative\/file"/);
+  assert.match(source, /Use exactly one concise finding, at most one gap/);
+  assert.match(source, /Keep the complete document under 2,500 characters/);
   assert.match(source, /handoffs\.put\("scan"/);
   assert.match(source, /Load ephemeral handoff \$\{handoffId\}/);
   assert.doesNotMatch(source, /Scan evidence ready[^`]+\$\{output\}/);
 });
 
 test("Scout evidence requires structured XML rather than a Markdown wrapper", () => {
-  const valid = `<scout_evidence section="architecture" confidence="high"><scope><task>Map</task></scope><findings><finding><evidence><source path="main.go" line="1">package main</source></evidence></finding></findings><gaps></gaps><verification></verification><risks></risks><handoff_questions></handoff_questions><recommended_actions></recommended_actions></scout_evidence>`;
+  const valid = `<scout_evidence section="architecture" confidence="high"><scope><task>Map</task></scope><findings><finding><evidence><source path="main.go" line="1">package main</source></evidence></finding></findings><gaps></gaps><verification></verification><risks></risks></scout_evidence>`;
   assert.doesNotThrow(() => validateScoutEvidenceXml(valid, "Architecture"));
   assert.doesNotThrow(() => validateScoutEvidenceXml("```xml\n" + valid + "\n```", "Architecture"));
   assert.doesNotThrow(() => validateScoutEvidenceXml("I have comprehensive source evidence.\n\n" + valid + "\n\nDone.", "Architecture"));
   assert.doesNotThrow(() => validateScoutEvidenceXml(valid.replace('section="architecture" confidence="high"', 'run_id="scout-1" confidence="high" section="architecture"'), "Architecture"));
   assert.throws(() => validateScoutEvidenceXml(`<scout_evidence section="architecture" confidence="high"># Markdown</scout_evidence>`, "Architecture"), /missing <scope>/);
   assert.throws(() => validateScoutEvidenceXml(valid.replace(/<source[\s\S]*<\/source>/, "No citation"), "Architecture"), /source citation/);
+  const scoutPrompt = readFileSync(new URL("../agents/task-scout.md", import.meta.url), "utf8");
+  assert.doesNotMatch(scoutPrompt, /<handoff_questions>|<recommended_actions>/);
 });
 
 test("successful Scan Scout handoff completes without reporting a blocked attempt", () => {

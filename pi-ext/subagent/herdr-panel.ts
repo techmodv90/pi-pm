@@ -39,6 +39,7 @@ export function createHerdrPanel(options: HerdrPanelOptions = {}): HerdrPanel {
     execFileSync(command, args, { encoding: "utf8", env: commandEnv, stdio: ["ignore", "pipe", "pipe"] }));
   const commandEnv = { ...env, HERDR_SOCKET_PATH: env.HERDR_SOCKET_PATH };
   const execute = (args: string[]) => run("herdr", args, commandEnv);
+  const panes: string[] = [];
 
   return {
     available() {
@@ -54,15 +55,19 @@ export function createHerdrPanel(options: HerdrPanelOptions = {}): HerdrPanel {
       }
     },
     open(input) {
+      const paneCount = panes.length;
+      const target = paneCount === 0 ? "--current" : panes[Math.max(0, paneCount - 2)]!;
+      const direction = paneCount === 1 ? "down" : "right";
       const paneId = paneIdFrom(execute([
-        "pane", "split", "--current",
-        "--direction", "right",
+        "pane", "split", target,
+        "--direction", direction,
         "--cwd", input.cwd,
         "--no-focus",
       ]));
       try {
         execute(["pane", "rename", paneId, input.label]);
         execute(["pane", "run", paneId, "tail", "-n", "+1", "-f", input.logPath]);
+        panes.push(paneId);
         return { paneId };
       } catch (error) {
         try { execute(["pane", "close", paneId]); } catch {}
@@ -71,6 +76,8 @@ export function createHerdrPanel(options: HerdrPanelOptions = {}): HerdrPanel {
     },
     close(handle) {
       execute(["pane", "close", handle.paneId]);
+      const index = panes.indexOf(handle.paneId);
+      if (index >= 0) panes.splice(index, 1);
     },
   };
 }

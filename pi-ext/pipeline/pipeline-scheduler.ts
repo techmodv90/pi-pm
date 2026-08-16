@@ -11,7 +11,7 @@ import { EphemeralHandoffStore } from "../core/ephemeral-handoffs.ts";
 
 import { validateSkillFamilies } from "../subagent/skills.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
-import { buildTaskVerifyPrompt, buildWorkItemReviewerHandoff, buildWorkItemScanPrompt } from "../tasking/work-item-prompts.ts";
+import { buildTaskVerifyPrompt, buildWorkItemReviewerHandoff, buildWorkItemScanPrompt, CANONICAL_SCAN_REPORT_XML_FORMAT } from "../tasking/work-item-prompts.ts";
 import { getBlockingTaskDependencies } from "../tasking/workflow-gates.ts";
 import { discoverAgents } from "../subagent/agents.ts";
 import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, startSubagent, type SubagentHandle } from "../subagent/runner.ts";
@@ -506,7 +506,7 @@ const FULL_SCAN_SECTIONS = [
   ["Reliability", "Inspect the gap ledger, open invariants, operational risks, migrations, generated artifacts, and documentation drift. Report exact statuses only."],
 ] as const;
 
-const SCOUT_EVIDENCE_REQUIRED_ELEMENTS = ["scope", "findings", "gaps", "verification", "risks", "handoff_questions", "recommended_actions"] as const;
+const SCOUT_EVIDENCE_REQUIRED_ELEMENTS = ["scope", "findings", "gaps", "verification", "risks"] as const;
 
 export function validateScoutEvidenceXml(output: string, section: string): void {
   const normalized = normalizeScoutEvidenceXml(output);
@@ -537,7 +537,7 @@ function startFullScanFanout(spec: any, agent: any): SubagentHandle {
     ...spec,
     runId: undefined,
     agent,
-    task: `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nReturn exactly one XML document matching the schema in your system prompt. Include at least one non-empty <source path="relative/file"> citation. Use exactly one concise finding with at most two source citations and keep the complete document under 2,500 characters, including the closing </scout_evidence> tag. Do not use Markdown outside XML and do not compose the canonical Scan Report.`,
+    task: `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nThe root must be <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low">. Return exactly that one XML document. Use exactly one concise finding, at most one gap, and one evidence container with one or two non-empty <source path="relative/file"> citations. Keep the complete document under 2,500 characters, including </scout_evidence>. Do not use Markdown or compose the canonical Scan Report.`,
   }));
   const result = Promise.all(handles.map((handle) => handle.result)).then((results): SubagentResult => {
     const failed = results.filter((entry) => entry.exitCode !== 0);
@@ -1228,7 +1228,7 @@ export class PipelineScheduler {
         const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state, scan_report: output })], this.cwd);
         if (result.error) throw new Error(result.error);
         const handoffId = this.handoffs.put("scan", run.task_id, output);
-        this.pi.sendUserMessage(`Scan evidence ready for contractor synthesis for ${run.task_id}. Load ephemeral handoff ${handoffId}, validate every section against source, and save one canonical Scan Report or reject the scan. The handoff expires after five minutes and is never persisted.`, { deliverAs: "followUp" });
+        this.pi.sendUserMessage(`Scan evidence ready for contractor synthesis for ${run.task_id}. Load ephemeral handoff ${handoffId}, validate every section against source, resolve contradictions, and save one canonical Scan Report as structured XML matching this schema:\n\n${CANONICAL_SCAN_REPORT_XML_FORMAT}\n\nDo not format owner-facing Markdown; the task_manager tool renders the saved XML deterministically. Otherwise reject the scan. The handoff expires after five minutes and is never persisted.`, { deliverAs: "followUp" });
         checkpoint(run, "advanced", this.cwd);
         return;
       }

@@ -1,12 +1,14 @@
 import { execFileSync } from "node:child_process";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { Text } from "@mariozechner/pi-tui";
+import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
+import { Markdown, Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { execPic } from "../core/cli-helpers";
 import { buildReviewContext } from "../tasking/settings";
 import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemDebugPrompt } from "../tasking/work-item-prompts";
 import { assertTaskManagerActionAllowed } from "../tasking/agent-capabilities.ts";
+import { prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
 
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
 import type { PipelineScheduler } from "../pipeline/pipeline-scheduler.ts";
@@ -65,6 +67,8 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
   
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         let args: string[] = [];
+        let scanPresentation = "";
+        let scanContent = "";
 
         try { assertTaskManagerActionAllowed(process.env.PI_TASK_AGENT_NAME, params.action as string, params.stage); }
         catch (error) {
@@ -127,7 +131,18 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           }
           case "save_work_item_artifact": {
             if (!params.id || !params.stage || !params.content) return { content: [{ type: "text", text: "Error: id, stage, and content required" }], details: {}, isError: true };
-            args = ["work-item", "artifact-save", params.id, params.stage, params.content];
+            if (params.stage === "scan") {
+              try {
+                const prepared = prepareCanonicalScanReportArtifact(params.content);
+                scanPresentation = prepared.markdown;
+                scanContent = prepared.content;
+              }
+              catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
+              }
+            }
+            args = ["work-item", "artifact-save", params.id, params.stage, scanContent || params.content];
             break;
           }
           case "approve_work_item_artifact": {
@@ -298,7 +313,11 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             return { content: [{ type: "text", text: `Owner acceptance recorded; aggregate merge is pending: ${message}` }], details: { acceptance: result, error: message }, isError: true };
           }
         }
-        let text = result.error ? `Error: ${result.error}` : JSON.stringify(result, null, 2);
+        let text = result.error
+          ? `Error: ${result.error}`
+          : scanPresentation
+            ? `Scan artifact ${result.id} saved. Ask the owner to approve or reject this Scan Report.`
+            : JSON.stringify(result, null, 2);
         if (!result.error && params.id && ((params.action === "save_work_item_artifact" && params.stage === "scan") || params.action === "reject_work_item_scan")) {
           pipelineScheduler.finalizeHandoffs(params.id, "scan");
         }
@@ -311,7 +330,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
   
         return {
           content: [{ type: "text", text }],
-          details: result,
+          details: scanPresentation ? { ...result, scanPresentation } : result,
         };
       },
   
@@ -328,6 +347,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         if (details?.error) {
           return new Text(theme.fg("error", details?.error || "Error"), 0, 0);
         }
+        if (details?.scanPresentation) return new Markdown(details.scanPresentation, 0, 0, getMarkdownTheme());
         if (details?.id) {
           return new Text(theme.fg("success", `${details.id}`), 0, 0);
         }

@@ -15,6 +15,16 @@ export interface WorkItemArtifact {
   summary?: string;
 }
 
+export const CANONICAL_SCAN_REPORT_XML_FORMAT = `<scan_report>
+  <tech_stack><language>...</language><framework>...</framework><styling>...</styling><database>...</database><auth>...</auth><state>...</state><other>...</other></tech_stack>
+  <existing_modules><module><name>...</name><description>...</description></module></existing_modules>
+  <patterns_detected><pattern><name>...</name><location>...</location></pattern></patterns_detected>
+  <reusable_components><component><name>...</name><path>...</path><purpose>...</purpose></component></reusable_components>
+  <gaps_detected><gap><name>...</name><description>...</description></gap></gaps_detected>
+  <code_health><type_safety>...</type_safety><linting>...</linting><tests>...</tests><debug_artifacts>...</debug_artifacts><todo_fixme>...</todo_fixme></code_health>
+  <estimated_size><files>...</files><lines_of_code>...</lines_of_code><components_modules>...</components_modules><api_routes_endpoints>...</api_routes_endpoints></estimated_size>
+</scan_report>`;
+
 export function buildTaskVerifyPrompt(data: any): string {
   const item = data.work_item || {};
   const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
@@ -66,7 +76,7 @@ export function buildAggregateVerifyPrompt(data: any): string {
 
 export function buildWorkItemContinuePrompt(status: { work_item_id: string; next_stage: string }, item: Pick<WorkItemPrompt, "title" | "type">): string {
   const actions: Record<string, string> = {
-    scan: "Inspect the Scout report and existing drafts. If accurate, save the complete report verbatim exactly once with `save_work_item_artifact`. If inaccurate, call `reject_work_item_scan` with actor_role=contractor and a concrete reason; wait for the owner to decide whether to reset and rescan.",
+    scan: `Inspect the Scout report and existing drafts. Validate the evidence against source, resolve contradictions, and save the canonical Scan Report with \`save_work_item_artifact\` as structured XML matching this schema:\n\n${CANONICAL_SCAN_REPORT_XML_FORMAT}\n\nDo not format owner-facing Markdown; the tool renders the saved XML deterministically. If inaccurate, call \`reject_work_item_scan\` with actor_role=contractor and a concrete reason; wait for the owner to decide whether to reset and rescan.`,
     rri: "Publish the RRI artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
     vision: "Publish the Vision artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
     blueprint: "Publish the Blueprint artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
@@ -97,7 +107,6 @@ export function buildWorkItemScanPrompt(item: WorkItemPrompt, project?: { name?:
     item.description || "",
     "You are the read-only task-scout. Inspect the relevant repository scope without modifying files. Record stack, architecture, commands, reusable patterns, and risks with source evidence.",
     "Return evidence for your assigned Scan section only. Do not synthesize the canonical Scan Report or mutate Work Item state.",
-    "The contractor validates all Scout evidence, resolves contradictions against source, and authors one canonical Scan Report. Save that contractor-authored report exactly once. If evidence is insufficient, call `reject_work_item_scan` with actor_role=contractor and a concrete reason; the owner decides whether to dispatch targeted follow-up Scouts.",
   ].filter(Boolean).join("\n\n");
 }
 

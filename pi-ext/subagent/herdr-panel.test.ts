@@ -53,6 +53,35 @@ test("HerdR panel launches unfocused beside the parent and closes its pane", () 
   ]);
 });
 
+test("HerdR panels fill a grid in the right-side region", () => {
+  const calls: string[][] = [];
+  let nextPane = 2;
+  const panel = createHerdrPanel({
+    env: {
+      HERDR_ENV: "1",
+      HERDR_PANE_ID: "w1:p1",
+      HERDR_SOCKET_PATH: "/tmp/herdr.sock",
+    },
+    run: (_command, args) => {
+      calls.push(args);
+      return args[0] === "pane" && args[1] === "split"
+        ? JSON.stringify({ result: { pane: { pane_id: `w1:p${nextPane++}` } } })
+        : "";
+    },
+  });
+
+  for (let index = 0; index < 4; index++) {
+    panel.open({ cwd: "/tmp/worktree", label: `worker-${index}`, logPath: `/tmp/${index}.log` });
+  }
+
+  assert.deepEqual(calls.filter((args) => args[1] === "split"), [
+    ["pane", "split", "--current", "--direction", "right", "--cwd", "/tmp/worktree", "--no-focus"],
+    ["pane", "split", "w1:p2", "--direction", "down", "--cwd", "/tmp/worktree", "--no-focus"],
+    ["pane", "split", "w1:p2", "--direction", "right", "--cwd", "/tmp/worktree", "--no-focus"],
+    ["pane", "split", "w1:p3", "--direction", "right", "--cwd", "/tmp/worktree", "--no-focus"],
+  ]);
+});
+
 test("HerdR panel rejects an incompatible running server", () => {
   const panel = createHerdrPanel({
     env: { HERDR_ENV: "1", HERDR_PANE_ID: "w1:p1", HERDR_SOCKET_PATH: "/tmp/herdr.sock" },

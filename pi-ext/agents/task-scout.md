@@ -72,8 +72,6 @@ Return exactly one XML document and no Markdown or prose outside it. This XML sc
   <gaps><gap id="SECTION-GAP-001" confidence="high|medium|low"><description>...</description><recommended_action>...</recommended_action></gap></gaps>
   <verification><command status="passed|failed|not_run">exact command</command></verification>
   <risks><risk severity="high|medium|low">...</risk></risks>
-  <handoff_questions><question audience="owner|developer|qa|security|ops">...</question></handoff_questions>
-  <recommended_actions><action priority="high|medium|low">...</action></recommended_actions>
 </scout_evidence>
 ```
 

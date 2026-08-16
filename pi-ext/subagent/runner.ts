@@ -16,6 +16,7 @@ export type SpawnFunction = typeof spawn;
 export const MANAGED_WORKER_DEADLINE_MS = 30 * 60 * 1000;
 const WORKER_WRAP_UP_MS = 5_000;
 const execFileAsync = promisify(execFile);
+const defaultHerdrPanel = createHerdrPanel();
 
 const emptyUsage = (): SubagentUsage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 });
 const READ_ONLY_AGENTS = new Set(["task-scout", "task-reviewer", "task-rri", "rri-persona"]);
@@ -202,7 +203,7 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
   args.push(`Task: ${patchedTask}`);
   const invocation = buildPiInvocation(args);
   let child: ChildProcess | undefined;
-  const herdrPanel = spec.herdrPanel ?? createHerdrPanel();
+  const herdrPanel = spec.herdrPanel ?? defaultHerdrPanel;
   const herdrLogPath = join(runCwd, ".pi-subagents", "runs", id, "herdr.log");
   let herdrHandle: HerdrPanelHandle | undefined;
   let settled = false;
