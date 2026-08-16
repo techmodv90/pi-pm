@@ -40,3 +40,4 @@ Add concrete, project-specific corrections here when an agent mistake reveals a 
 - Present owner-facing Scan reports as rendered Markdown headings and lists; never wrap the report in a fenced `text` code block.
 
 - Never work around a workflow blocker by filtering, relabeling, or bypassing state. Trace the persisted state transition first; valid handoffs must use an explicit workflow state, and every fix requires a regression test before retrying.
+- Never infer an extension runtime reload from a repeated pipeline blocker notification; after scheduler source changes, require explicit reload confirmation before retrying.
