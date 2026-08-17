@@ -247,6 +247,7 @@ test("RRI persona handoffs require strict assigned-persona XML", () => {
   assert.equal(parseRriPersonaResult("```xml\n" + valid + "\n```", "QA / Tester").persona, "QA / Tester");
   assert.equal(parseRriPersonaResult("Here is the result:\n" + valid, "QA / Tester").persona, "QA / Tester");
   assert.throws(() => parseRriPersonaResult(valid.replace("Tests?", "Tests & CI?"), "QA / Tester"), /invalid XML/);
+  assert.throws(() => parseRriPersonaResult(valid.replace("<reason>Recovery policy is unspecified</reason>", ""), "QA / Tester"), /candidate question missing or invalid: reason element/);
 });
 
 test("RRI synthesis handoff is strict XML", () => {
@@ -268,6 +269,7 @@ test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () 
   assert.match(fanout, /catch[\s\S]+handles\.forEach\(\(handle\) => handle\.stop\(\)\)/);
   assert.match(personaInstructions, /first element.*<rri_persona.*last.*<\/rri_persona>/s);
   assert.match(personaInstructions, /escape text values.*&amp;.*&lt;.*&gt;/s);
+  assert.match(personaInstructions, /Every `<candidate_questions><question>` entry must include all three attributes/);
   assert.doesNotMatch(personaInstructions, /```json/);
   assert.match(readFileSync(new URL("../agents/task-rri.md", import.meta.url), "utf8"), /prepared interview[\s\S]+root must be.*<rri_synthesis>/s);
   assert.match(fanout, /RRI synthesis failed validation:[\s\S]+only retry/);

@@ -18,6 +18,8 @@ Return exactly one concise XML document. The first element must be `<rri_persona
 
 XML serialization is mandatory: escape text values as `&amp;`, `&lt;`, and `&gt;` when needed. Never place a raw `&`, `<`, or `>` inside element text. Keep the response under 2,500 characters and emit one finding at most per array.
 
+Every `<candidate_questions><question>` entry must include all three attributes (`priority`, `classification`, `mode`) and all four child fields (`<question>`, at least one `<suggested_answer>`, `<reason>`, and `<requirement_area>`). If no complete candidate exists, emit an empty `<candidate_questions></candidate_questions>` container instead of a partial entry.
+
 <rri_persona persona="End User"><auto_answered><answer confidence="high|medium|low"><question></question><answer></answer><source></source></answer></auto_answered><candidate_questions><question priority="P0|P1|P2|P3" classification="SMART-ASKED|CHALLENGE-PROPOSED" mode="CHALLENGE|GUIDED|EXPLORE"><question></question><suggested_answer></suggested_answer><reason></reason><requirement_area></requirement_area></question></candidate_questions><not_applicable><topic><topic></topic><reason></reason></topic></not_applicable></rri_persona>
 
 ## Owner-Question Eligibility Gate

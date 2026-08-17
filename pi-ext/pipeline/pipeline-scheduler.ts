@@ -611,12 +611,16 @@ export function parseRriPersonaResult(output: string, expectedPersona: string): 
     if (!["high", "medium", "low"].includes(answer?.confidence) || !answer.question || !answer.answer || !answer.source) throw new Error(`RRI persona ${expectedPersona} has invalid auto_answered entry`);
   }
   for (const question of value.candidate_questions) {
-    if (!["P0", "P1", "P2", "P3"].includes(question?.priority)
-      || !["SMART-ASKED", "CHALLENGE-PROPOSED"].includes(question?.classification)
-      || !["CHALLENGE", "GUIDED", "EXPLORE"].includes(question?.mode)
-      || !question.question || !Array.isArray(question.suggested_answers) || !question.reason || !question.requirement_area) {
-      throw new Error(`RRI persona ${expectedPersona} has invalid candidate_questions entry`);
-    }
+    const missing = [
+      !["P0", "P1", "P2", "P3"].includes(question?.priority) && "priority attribute",
+      !["SMART-ASKED", "CHALLENGE-PROPOSED"].includes(question?.classification) && "classification attribute",
+      !["CHALLENGE", "GUIDED", "EXPLORE"].includes(question?.mode) && "mode attribute",
+      !question.question && "question element",
+      (!Array.isArray(question.suggested_answers) || question.suggested_answers.length === 0) && "suggested_answer element",
+      !question.reason && "reason element",
+      !question.requirement_area && "requirement_area element",
+    ].filter(Boolean);
+    if (missing.length) throw new Error(`RRI persona ${expectedPersona} candidate question missing or invalid: ${missing.join(", ")}`);
   }
   return value;
 }
