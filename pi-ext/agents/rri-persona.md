@@ -16,6 +16,8 @@ Resolve `$HOME`, then read `$HOME/.pi/agent/methodologies/rri-personas.md` and `
 
 Return exactly one concise XML document. The first element must be `<rri_persona persona="...">` and the last element must be `</rri_persona>`. Do not use a Markdown fence, heading, introduction, or trailing explanation. Use this shape:
 
+XML serialization is mandatory: escape text values as `&amp;`, `&lt;`, and `&gt;` when needed. Never place a raw `&`, `<`, or `>` inside element text. Keep the response under 2,500 characters and emit one finding at most per array.
+
 <rri_persona persona="End User"><auto_answered><answer confidence="high|medium|low"><question></question><answer></answer><source></source></answer></auto_answered><candidate_questions><question priority="P0|P1|P2|P3" classification="SMART-ASKED|CHALLENGE-PROPOSED" mode="CHALLENGE|GUIDED|EXPLORE"><question></question><suggested_answer></suggested_answer><reason></reason><requirement_area></requirement_area></question></candidate_questions><not_applicable><topic><topic></topic><reason></reason></topic></not_applicable></rri_persona>
 
 ## Owner-Question Eligibility Gate

@@ -585,7 +585,8 @@ export function parseRriPersonaResult(output: string, expectedPersona: string): 
   const end = trimmed.lastIndexOf("</rri_persona>");
   if (start < 0 || end <= start) throw new Error(`RRI persona ${expectedPersona} must return one XML document`);
   const xml = trimmed.slice(start, end + "</rri_persona>".length);
-  if (XMLValidator.validate(xml) !== true) throw new Error(`RRI persona ${expectedPersona} returned invalid XML`);
+  const validation = XMLValidator.validate(xml);
+  if (validation !== true) throw new Error(`RRI persona ${expectedPersona} returned invalid XML: ${validation.err?.msg || "malformed document"}`);
   for (const tag of ["auto_answered", "candidate_questions", "not_applicable"]) if (!new RegExp(`<${tag}(?:\\s|>)`).test(xml)) throw new Error(`RRI persona ${expectedPersona} missing ${tag}`);
   const root: any = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" }).parse(xml).rri_persona;
   const value: any = { persona: root?.["@_persona"] };
