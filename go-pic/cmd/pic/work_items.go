@@ -80,6 +80,8 @@ func cmdWorkItem(args []string) error {
 		return workItemClaim(db, args[1:])
 	case "artifact-save":
 		return workItemArtifactSave(db, args[1:])
+	case "rri-finalize":
+		return workItemRriFinalize(db, args[1:])
 	case "artifact-approve":
 		return workItemArtifactApprove(db, args[1:])
 	case "planning-reset":
@@ -731,6 +733,106 @@ func workItemClaim(db *sql.DB, args []string) error {
 }
 
 var workItemStages = []string{"scan", "rri", "vision", "blueprint", "contracts", "task_graph"}
+
+type rriFinalization struct {
+	Requirements []struct {
+		Key                string `json:"key"`
+		Priority           string `json:"priority"`
+		Title              string `json:"title"`
+		Description        string `json:"description"`
+		AcceptanceCriteria string `json:"acceptanceCriteria"`
+	} `json:"requirements"`
+	Decisions []struct {
+		Key    string `json:"key"`
+		Answer string `json:"answer"`
+	} `json:"decisions"`
+	Report string `json:"report"`
+}
+
+func workItemRriFinalize(db *sql.DB, args []string) error {
+	if len(args) != 2 {
+		return errors.New("usage: pic work-item rri-finalize <id> <payload-json>")
+	}
+	var payload rriFinalization
+	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 || len(payload.Decisions) == 0 || strings.TrimSpace(payload.Report) == "" {
+		return errors.New("RRI finalization requires valid JSON with requirements, decisions, and report")
+	}
+	seenRequirements, seenDecisions := map[string]bool{}, map[string]bool{}
+	for _, requirement := range payload.Requirements {
+		if requirement.Key == "" || requirement.Title == "" || !contains([]string{"tier1", "tier2", "tier3"}, requirement.Priority) || seenRequirements[requirement.Key] {
+			return fmt.Errorf("invalid or duplicate RRI requirement %q", requirement.Key)
+		}
+		if err := validateGherkinSteps(requirement.AcceptanceCriteria); err != nil {
+			return fmt.Errorf("%s acceptance criteria %w", requirement.Key, err)
+		}
+		seenRequirements[requirement.Key] = true
+	}
+	for _, decision := range payload.Decisions {
+		if decision.Key == "" || strings.TrimSpace(decision.Answer) == "" || seenDecisions[decision.Key] {
+			return fmt.Errorf("invalid or duplicate RRI decision %q", decision.Key)
+		}
+		seenDecisions[decision.Key] = true
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	item, err := workItemByIDTx(tx, args[0])
+	if err != nil {
+		return err
+	}
+	var scanApproved, existing int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage='scan'`, args[0]).Scan(&scanApproved); err != nil || scanApproved != 1 {
+		return errors.New("RRI finalization requires one approved Scan checkpoint")
+	}
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&existing); err != nil {
+		return err
+	}
+	if existing != 0 {
+		return errors.New("RRI finalization already exists; reset planning before revising it")
+	}
+	itemType, title, description := fmt.Sprint(item["type"]), fmt.Sprint(item["title"]), fmt.Sprint(item["description"])
+	subjectColumn := "task_id"
+	if itemType == "epic" || itemType == "feature" {
+		subjectColumn = "epic_id"
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO epics(id,title,description,status) VALUES(?,?,?,?)`, args[0], title, description, item["status"]); err != nil {
+			return err
+		}
+	} else {
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO tasks(id,title,description,status,priority) VALUES(?,?,?,?,?)`, args[0], title, description, item["status"], item["priority"]); err != nil {
+			return err
+		}
+	}
+	artifactID, contentHash := "wia-"+shortID(), hashJSON(payload.Report)
+	if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?, 'rri',1,?,?)`, artifactID, args[0], payload.Report, contentHash); err != nil {
+		return err
+	}
+	inherit := 0
+	if subjectColumn == "epic_id" {
+		inherit = 1
+	}
+	for _, requirement := range payload.Requirements {
+		query := `INSERT INTO requirements(id,` + subjectColumn + `,requirement_key,inherit_to_descendants,priority,title,description,acceptance_criteria,source) VALUES(?,?,?,?,?,?,?,?,?)`
+		if _, err = tx.Exec(query, "req-"+shortID(), args[0], requirement.Key, inherit, requirement.Priority, requirement.Title, requirement.Description, requirement.AcceptanceCriteria, artifactID); err != nil {
+			return err
+		}
+	}
+	for _, decision := range payload.Decisions {
+		query := `INSERT INTO owner_decisions(id,` + subjectColumn + `,related_type,related_id,decision_type,decision) VALUES(?,?, 'rri',?,?,?)`
+		if _, err = tx.Exec(query, "od-"+shortID(), args[0], artifactID, decision.Key, decision.Answer); err != nil {
+			return err
+		}
+	}
+	if err = addEvent(tx, args[0], "rri_finalized", "contractor", "Owner-confirmed RRI requirements and decisions persisted", map[string]any{"artifact_id": artifactID, "requirements": len(payload.Requirements), "decisions": len(payload.Decisions)}); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	writeJSON(os.Stdout, map[string]any{"artifact_id": artifactID, "work_item_id": args[0], "stage": "rri", "content_hash": contentHash, "requirements": len(payload.Requirements), "decisions": len(payload.Decisions)})
+	return nil
+}
 
 func workItemArtifactSave(db *sql.DB, args []string) error {
 	if len(args) != 3 || !contains(workItemStages, args[1]) || args[2] == "" {

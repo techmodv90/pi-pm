@@ -841,6 +841,46 @@ Then it completes')`)
 	}
 }
 
+func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "RRI finalization"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	payload, _ := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-BASELINE", "priority": "tier1", "title": "Clean baseline", "description": "Verify one revision", "acceptanceCriteria": "Given release work is complete\nWhen verification starts\nThen the exact clean commit is recorded"}},
+		"decisions":    []map[string]any{{"key": "release_baseline", "answer": "Require a clean committed baseline"}},
+		"report":       "# RRI REPORT\n\nOwner confirmed.",
+	})
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload)))
+	if finalized["requirements"] != float64(1) || finalized["decisions"] != float64(1) || finalized["artifact_id"] == "" {
+		t.Fatalf("finalized = %#v", finalized)
+	}
+	shown := asObject(t, runPic(t, bin, root, home, "show", id))
+	requirements := shown["requirements"].([]any)
+	decisions := shown["planning_owner_decisions"].([]any)
+	if len(requirements) != 1 || requirements[0].(map[string]any)["requirement_key"] != "REQ-BASELINE" || len(decisions) != 1 || decisions[0].(map[string]any)["decision_type"] != "release_baseline" {
+		t.Fatalf("requirements=%#v decisions=%#v", requirements, decisions)
+	}
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var artifacts int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, id).Scan(&artifacts); err != nil || artifacts != 1 {
+		t.Fatalf("RRI artifacts=%d err=%v", artifacts, err)
+	}
+	runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload))
+	var requirementCount, decisionCount int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM requirements WHERE epic_id=?`, id).Scan(&requirementCount)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM owner_decisions WHERE epic_id=?`, id).Scan(&decisionCount)
+	if requirementCount != 1 || decisionCount != 1 {
+		t.Fatalf("duplicate finalization wrote requirements=%d decisions=%d", requirementCount, decisionCount)
+	}
+}
+
 func TestImplementationAuthorization(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)

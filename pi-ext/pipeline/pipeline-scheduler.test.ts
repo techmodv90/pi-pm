@@ -83,8 +83,10 @@ test("RRI interview checkpoints use disposable drafts and clean up after termina
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   assert.match(source, /checkpoint_rri_interview/);
   assert.match(source, /load_rri_interview/);
+  assert.match(source, /save_rri_interview/);
   assert.match(source, /saveRriDraft/);
   assert.match(source, /loadRriDraft/);
+  assert.match(source, /rri-finalize/);
   assert.match(source, /execPic\(\["project", "current"\]/);
   assert.match(source, /approve_work_item_artifact[\s\S]{0,700}deleteRriDraft/);
   assert.match(source, /reset_work_item_planning[\s\S]{0,700}deleteRriDraft/);

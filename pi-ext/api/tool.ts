@@ -46,7 +46,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
       promptSnippet: "Use Work Item actions for lifecycle mutations. Archived Task Items are read-only history.",
       parameters: Type.Object({
         action: StringEnum([
-          "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview",
+          "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview", "save_rri_interview",
           "save_work_item_artifact", "approve_work_item_artifact", "reject_work_item_scan", "reset_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
           "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
           "relate_work_items", "reset_pipeline_circuit",
@@ -115,6 +115,13 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
               const message = error instanceof Error ? error.message : String(error);
               return { content: [{ type: "text", text: `Error: ${message}` }], details: { error: message }, isError: true };
             }
+          }
+          case "save_rri_interview": {
+            if (!params.id || !params.content) return { content: [{ type: "text", text: "Error: id and final RRI JSON content required" }], details: {}, isError: true };
+            const result = execPic(["work-item", "rri-finalize", params.id, params.content], ctx.cwd);
+            if (result.error) return { content: [{ type: "text", text: `Error: ${result.error}` }], details: result, isError: true };
+            pipelineScheduler.finalizeHandoffs(params.id, "rri");
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
           }
           case "create_work_item": {
             if (!params.work_item_type || !params.title) return { content: [{ type: "text", text: "Error: work_item_type and title required" }], details: {}, isError: true };

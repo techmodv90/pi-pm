@@ -12,6 +12,7 @@ Requirements and TIPs:
 - Requirements returned by \`show_work_item\` are authoritative. Task-graph \`requirement_keys\` must reference and cover them; never invent requirement IDs.
 - Every acceptance criterion must contain separate \`Given\`, \`When\`, and \`Then\` steps before task-graph approval or TIP creation.
 - There is no \`task_manager\` action for direct requirement mutation. If a requirement is missing or malformed, stop before task_graph, report the blocker, and do not edit the database or invoke \`pic\` directly.
+- During RRI, checkpoint disposable interview state with \`checkpoint_rri_interview\`, then call \`save_rri_interview\` once to atomically persist confirmed requirements, owner decisions, and the final RRI artifact.
 - \`materialize_work_item\` creates or reuses only the approved Work Item DAG, metadata, and dependency relations. It does not generate TIPs. Do not create, edit, activate, or render TIPs through direct CLI commands.
 
 Execution order:
