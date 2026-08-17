@@ -1112,12 +1112,21 @@ func workItemArtifactApprove(db *sql.DB, args []string) error {
 		return err
 	}
 	defer tx.Rollback()
+	artifactID := args[2]
+	if artifactID == "current" {
+		if err = tx.QueryRow(`SELECT id FROM work_item_artifacts WHERE work_item_id=? AND stage=? ORDER BY revision DESC LIMIT 1`, args[0], args[1]).Scan(&artifactID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("No current %s artifact", args[1])
+			}
+			return err
+		}
+	}
 	var revision int
 	var contentHash string
-	err = tx.QueryRow(`SELECT revision,content_hash FROM work_item_artifacts WHERE id=? AND work_item_id=? AND stage=? AND revision=(SELECT MAX(revision) FROM work_item_artifacts WHERE work_item_id=? AND stage=?)`, args[2], args[0], args[1], args[0], args[1]).Scan(&revision, &contentHash)
+	err = tx.QueryRow(`SELECT revision,content_hash FROM work_item_artifacts WHERE id=? AND work_item_id=? AND stage=? AND revision=(SELECT MAX(revision) FROM work_item_artifacts WHERE work_item_id=? AND stage=?)`, artifactID, args[0], args[1], args[0], args[1]).Scan(&revision, &contentHash)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("Artifact %s is not current", args[2])
+			return fmt.Errorf("Artifact %s is not current", artifactID)
 		}
 		return err
 	}
@@ -1137,20 +1146,20 @@ func workItemArtifactApprove(db *sql.DB, args []string) error {
 	}
 	if args[1] == "task_graph" {
 		var graphContent string
-		if err = tx.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=? AND work_item_id=?`, args[2], args[0]).Scan(&graphContent); err != nil {
+		if err = tx.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=? AND work_item_id=?`, artifactID, args[0]).Scan(&graphContent); err != nil {
 			return err
 		}
 		if _, err = validateTaskGraphArtifact(tx, args[0], graphContent); err != nil {
 			return fmt.Errorf("task graph validation failed: %w", err)
 		}
 	}
-	if _, err = tx.Exec(`INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES(?,?,?,?,?,?,?)`, "wic-"+shortID(), args[0], args[1], args[2], revision, contentHash, args[3]); err != nil {
+	if _, err = tx.Exec(`INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES(?,?,?,?,?,?,?)`, "wic-"+shortID(), args[0], args[1], artifactID, revision, contentHash, args[3]); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": args[2], "revision": revision, "content_hash": contentHash, "decision": args[3]})
+	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3]})
 	return nil
 }
 

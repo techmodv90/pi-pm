@@ -885,7 +885,10 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	if revised["revised"] != true {
 		t.Fatalf("expected pre-approval RRI revision, got %#v", revised)
 	}
-	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", revised["artifact_id"].(string), "approved")
+	approved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", "current", "approved"))
+	if approved["artifact_id"] != revised["artifact_id"] {
+		t.Fatalf("current selector approved %v, want %v", approved["artifact_id"], revised["artifact_id"])
+	}
 	runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload))
 	var requirementCount, decisionCount int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM requirements WHERE epic_id=?`, id).Scan(&requirementCount)
