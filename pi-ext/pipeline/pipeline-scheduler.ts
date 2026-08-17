@@ -10,6 +10,7 @@ import { execGitIndexWrite, execPic, execPicText, withGitWriteLock } from "../co
 import { EphemeralHandoffStore } from "../core/ephemeral-handoffs.ts";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
 import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../reporting/blueprint-report.ts";
+import { parseTaskGraphReportJson, renderTaskGraphReportMarkdown } from "../reporting/task-graph-report.ts";
 
 import { validateSkillFamilies } from "../subagent/skills.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -1594,7 +1595,7 @@ export class PipelineScheduler {
   }
 
   private publishPlanningHandoff(run: PipelineRun, output: string): void {
-    const payload = run.stage === "blueprint" ? this.blueprintPresentation(run.task_id) : output;
+    const payload = run.stage === "blueprint" || run.stage === "task_graph" ? this.planningArtifactPresentation(run.task_id, run.stage) : output;
     const handoffId = this.handoffs.put(run.stage, run.task_id, payload);
     const action = run.stage === "rri"
       ? "conduct the owner interview, persist confirmed requirements and decisions, then save the owner-confirmed RRI artifact"
@@ -1602,13 +1603,16 @@ export class PipelineScheduler {
     this.pi.sendUserMessage(`${run.stage.toUpperCase()} analysis ready for ${run.task_id}. Load ephemeral handoff ${handoffId}, ${action}. The handoff expires after five minutes and is never persisted.`, { deliverAs: "followUp" });
   }
 
-  private blueprintPresentation(workItemId: string): string {
+  private planningArtifactPresentation(workItemId: string, stage: "blueprint" | "task_graph"): string {
     const data = execPic(["show", workItemId], this.cwd);
     const artifact = (Array.isArray(data.artifacts) ? data.artifacts : [])
-      .filter((entry: any) => entry.stage === "blueprint")
+      .filter((entry: any) => entry.stage === stage)
       .sort((a: any, b: any) => Number(b.revision || 0) - Number(a.revision || 0))[0];
-    if (!artifact?.id || typeof artifact.content !== "string") throw new Error(`Blueprint planner completed without a persisted Blueprint artifact for ${workItemId}`);
-    return `${renderBlueprintReportMarkdown(parseBlueprintReportJson(artifact.content))}\n\nBlueprint artifact: \`${artifact.id}\` (revision ${artifact.revision})`;
+    if (!artifact?.id || typeof artifact.content !== "string") throw new Error(`${stage} planner completed without a persisted ${stage} artifact for ${workItemId}`);
+    const markdown = stage === "blueprint"
+      ? renderBlueprintReportMarkdown(parseBlueprintReportJson(artifact.content))
+      : renderTaskGraphReportMarkdown(parseTaskGraphReportJson(artifact.content));
+    return `${markdown}\n\n${stage === "blueprint" ? "Blueprint" : "Task Graph"} artifact: \`${artifact.id}\` (revision ${artifact.revision})`;
   }
 
   private pipelineRuns(taskId: string): any[] {

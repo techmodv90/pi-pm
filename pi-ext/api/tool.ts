@@ -13,6 +13,7 @@ import { parseRriReportJson, renderRriReportMarkdown } from "../reporting/rri-re
 import { parseVisionReportJson, renderVisionReportMarkdown } from "../reporting/vision-report.ts";
 import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../reporting/blueprint-report.ts";
 import { parseContractReportJson, renderContractReportMarkdown } from "../reporting/contract-report.ts";
+import { parseTaskGraphReportJson, renderTaskGraphReportMarkdown } from "../reporting/task-graph-report.ts";
 import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
 
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -91,6 +92,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         let visionPresentation = "";
         let blueprintPresentation = "";
         let contractPresentation = "";
+        let taskGraphPresentation = "";
 
         try { assertTaskManagerActionAllowed(process.env.PI_TASK_AGENT_NAME, params.action as string, params.stage); }
         catch (error) {
@@ -214,6 +216,10 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             }
             if (params.stage === "contracts") {
               try { contractPresentation = renderContractReportMarkdown(parseContractReportJson(params.content)); }
+              catch (error) { const message = error instanceof Error ? error.message : String(error); return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true }; }
+            }
+            if (params.stage === "task_graph") {
+              try { taskGraphPresentation = renderTaskGraphReportMarkdown(parseTaskGraphReportJson(params.content)); }
               catch (error) { const message = error instanceof Error ? error.message : String(error); return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true }; }
             }
             args = ["work-item", "artifact-save", params.id, params.stage, scanContent || params.content];
@@ -405,6 +411,8 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           ? `Error: ${result.error}`
           : contractPresentation
             ? contractPresentation
+          : taskGraphPresentation
+            ? taskGraphPresentation
           : blueprintPresentation
             ? blueprintPresentation
           : visionPresentation
@@ -426,7 +434,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
   
         return {
           content: [{ type: "text", text }],
-          details: scanPresentation ? { ...result, scanPresentation } : contractPresentation ? { ...result, contractPresentation } : blueprintPresentation ? { ...result, blueprintPresentation } : visionPresentation ? { ...result, visionPresentation } : rriPresentation ? { ...result, rriPresentation } : result,
+          details: scanPresentation ? { ...result, scanPresentation } : contractPresentation ? { ...result, contractPresentation } : taskGraphPresentation ? { ...result, taskGraphPresentation } : blueprintPresentation ? { ...result, blueprintPresentation } : visionPresentation ? { ...result, visionPresentation } : rriPresentation ? { ...result, rriPresentation } : result,
         };
       },
   
@@ -445,6 +453,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         }
         if (details?.rriPresentation) return new Markdown(details.rriPresentation, 0, 0, getMarkdownTheme());
         if (details?.contractPresentation) return new Markdown(details.contractPresentation, 0, 0, getMarkdownTheme());
+        if (details?.taskGraphPresentation) return new Markdown(details.taskGraphPresentation, 0, 0, getMarkdownTheme());
         if (details?.blueprintPresentation) return new Markdown(details.blueprintPresentation, 0, 0, getMarkdownTheme());
         if (details?.visionPresentation) return new Markdown(details.visionPresentation, 0, 0, getMarkdownTheme());
         if (details?.scanPresentation) return new Markdown(details.scanPresentation, 0, 0, getMarkdownTheme());

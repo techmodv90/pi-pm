@@ -67,11 +67,12 @@ test("Scan artifact saves render the owner-facing Markdown result", () => {
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   assert.match(source, /import \{ Markdown, Text \} from "@mariozechner\/pi-tui"/);
   assert.match(source, /import \{ getMarkdownTheme \} from "@mariozechner\/pi-coding-agent"/);
-  assert.match(source, /details: scanPresentation \? \{ \.\.\.result, scanPresentation \} : contractPresentation \? \{ \.\.\.result, contractPresentation \} : blueprintPresentation \? \{ \.\.\.result, blueprintPresentation \} : visionPresentation \? \{ \.\.\.result, visionPresentation \} : rriPresentation \? \{ \.\.\.result, rriPresentation \} : result/);
+  assert.match(source, /details: scanPresentation \? \{ \.\.\.result, scanPresentation \} : contractPresentation \? \{ \.\.\.result, contractPresentation \} : taskGraphPresentation \? \{ \.\.\.result, taskGraphPresentation \} : blueprintPresentation \? \{ \.\.\.result, blueprintPresentation \} : visionPresentation \? \{ \.\.\.result, visionPresentation \} : rriPresentation \? \{ \.\.\.result, rriPresentation \} : result/);
   assert.match(source, /`Scan artifact \$\{result\.id\} saved\. Ask the owner to approve or reject this Scan Report\.`/);
   assert.doesNotMatch(source, /terminate: Boolean\(scanPresentation\)/);
   assert.match(source, /if \(details\?\.scanPresentation\) return new Markdown\(details\.scanPresentation, 0, 0, getMarkdownTheme\(\)\)/);
   assert.match(source, /if \(details\?\.visionPresentation\) return new Markdown\(details\.visionPresentation, 0, 0, getMarkdownTheme\(\)\)/);
+  assert.match(source, /if \(details\?\.taskGraphPresentation\) return new Markdown\(details\.taskGraphPresentation, 0, 0, getMarkdownTheme\(\)\)/);
 });
 
 test("owner-only graph actions never synthesize owner authorization", () => {
@@ -242,12 +243,13 @@ test("completed planning stages pause for main-agent synthesis instead of launch
   assert.match(resumeBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
 });
 
-test("Blueprint completion publishes the canonical saved artifact presentation", () => {
+test("planner completion publishes canonical Blueprint and Task Graph presentations", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /run\.stage === "blueprint" \? this\.blueprintPresentation\(run\.task_id\) : output/);
-  assert.match(source, /filter\(\(entry: any\) => entry\.stage === "blueprint"\)/);
+  assert.match(source, /run\.stage === "blueprint" \|\| run\.stage === "task_graph" \? this\.planningArtifactPresentation\(run\.task_id, run\.stage\) : output/);
+  assert.match(source, /filter\(\(entry: any\) => entry\.stage === stage\)/);
   assert.match(source, /renderBlueprintReportMarkdown\(parseBlueprintReportJson\(artifact\.content\)\)/);
-  assert.match(source, /completed without a persisted Blueprint artifact/);
+  assert.match(source, /renderTaskGraphReportMarkdown\(parseTaskGraphReportJson\(artifact\.content\)\)/);
+  assert.match(source, /planner completed without a persisted/);
 });
 
 test("RRI persona handoffs require strict assigned-persona XML", () => {
