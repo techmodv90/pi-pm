@@ -317,7 +317,15 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             break;
           }
           case "work_on_work_item": {
-            if (!params.id) return { content: [{ type: "text", text: "Error: id required" }], details: {}, isError: true };
+            if (!params.id) {
+              try {
+                const result = await pipelineScheduler.startReadyBatch(ctx);
+                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: { action: "work_on_work_item", pipeline: result } };
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Work batch blocked: ${message}` }], details: { action: "work_on_work_item", error: message }, isError: true };
+              }
+            }
             const data = execPic(["show", params.id], ctx.cwd);
             if (!data.work_item) return { content: [{ type: "text", text: `Error: ${data.error || "Work Item not found"}` }], details: {}, isError: true };
             const status = execPic(["work-item", "workflow-status", params.id], ctx.cwd);

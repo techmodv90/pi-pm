@@ -445,8 +445,9 @@ test("operator start reconciles bounded durable state without granting retry aut
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   assert.match(source, /if \(process\.env\.PI_TASK_PARENT_RUN_ID\) return scheduler/);
   const startBody = source.slice(source.indexOf("async start("), source.indexOf("status(taskId"));
-  assert.match(startBody, /setImmediate\([\s\S]+await this\.reconcile\(\)[\s\S]+await this\.scheduleReady\(rootTaskId\)/);
-  assert.match(startBody, /return \{ rootTaskId, status: "accepted" \}/);
+  assert.doesNotMatch(startBody, /setImmediate\(/);
+  assert.match(startBody, /await this\.reconcile\(\)[\s\S]+return await this\.scheduleReady\(rootTaskId\)/);
+  assert.doesNotMatch(startBody, /status: "accepted"/);
   assert.doesNotMatch(startBody, /scheduleReady\(rootTaskId, true\)/);
   const statusBody = source.slice(source.indexOf("status(taskId"), source.indexOf("async stop("));
   assert.match(statusBody, /lastError/);

@@ -1063,33 +1063,42 @@ export class PipelineScheduler {
     this.context = ctx;
     this.lastError = "";
     this.roots.add(rootTaskId);
-    setImmediate(() => {
-      void (async () => {
-        try {
-          const workflow = execPic(["work-item", "workflow-status", rootTaskId], ctx.cwd);
-          if (workflow.next_stage === "scan") {
-            const rejection = execPic(["work-item", "scan-rejection", rootTaskId], ctx.cwd);
-            if (rejection.rejected) {
-              throw new Error(`Scan report was rejected by the contractor: ${rejection.reason}. Owner decision required: call reset_work_item_planning with actor_role=owner to rescan, or leave the Work Item at Scan and do not retry.`);
-            }
-            await this.launchGroup("scan", [rootTaskId]);
-            return;
-          }
-          if (planningStages.includes(workflow.next_stage)) {
-            if (workflow.next_stage === "contracts") throw new Error("Contract drafting is Contractor-owned; use work_on_work_item to return the Contract prompt to the main session");
-            assertCleanGit(ctx.cwd);
-            await this.launchGroup(workflow.next_stage, [rootTaskId]);
-            return;
-          }
-          assertCleanGit(ctx.cwd);
-          await this.reconcile();
-          await this.scheduleReady(rootTaskId);
-        } catch (error) {
-          this.reportError(error, ctx);
-        }
-      })();
-    });
-    return { rootTaskId, status: "accepted" };
+    const workflow = execPic(["work-item", "workflow-status", rootTaskId], ctx.cwd);
+    if (workflow.next_stage === "scan") {
+      const rejection = execPic(["work-item", "scan-rejection", rootTaskId], ctx.cwd);
+      if (rejection.rejected) {
+        throw new Error(`Scan report was rejected by the contractor: ${rejection.reason}. Owner decision required: call reset_work_item_planning with actor_role=owner to rescan, or leave the Work Item at Scan and do not retry.`);
+      }
+      return await this.launchGroup("scan", [rootTaskId]);
+    }
+    if (planningStages.includes(workflow.next_stage)) {
+      if (workflow.next_stage === "contracts") throw new Error("Contract drafting is Contractor-owned; use work_on_work_item to return the Contract prompt to the main session");
+      assertCleanGit(ctx.cwd);
+      return await this.launchGroup(workflow.next_stage, [rootTaskId]);
+    }
+    assertCleanGit(ctx.cwd);
+    await this.reconcile();
+    return await this.scheduleReady(rootTaskId);
+  }
+
+  async startReadyBatch(ctx: ExtensionContext): Promise<any> {
+    this.cwd = ctx.cwd;
+    this.context = ctx;
+    this.lastError = "";
+    assertCleanGit(ctx.cwd);
+    await this.reconcile();
+    const ready = execPic(["work-item", "ready"], ctx.cwd);
+    const taskIds = Array.isArray(ready) ? ready.map((item: any) => item.id).filter((id: any): id is string => typeof id === "string") : [];
+    if (!taskIds.length) return { launches: [], blocked: "No authorized dependency-ready executable Work Items" };
+    const stages = new Map<PipelineStage, string[]>();
+    for (const taskId of taskIds) {
+      const data = normalizePipelineData(execPic(["show", taskId], ctx.cwd));
+      const stage = nextPipelineStage(data, this.pipelineRuns(taskId));
+      if (stage) stages.set(stage, [...(stages.get(stage) || []), taskId]);
+    }
+    const launches = [];
+    for (const [stage, ids] of stages) launches.push(await this.launchGroup(stage, ids));
+    return { taskIds, launches };
   }
 
   dryRun(rootTaskId: string, ctx: ExtensionContext): any {

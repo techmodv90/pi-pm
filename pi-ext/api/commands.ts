@@ -100,7 +100,16 @@ export function registerTaskCommand(pi: ExtensionAPI, pipelineScheduler: Pipelin
       }
 
       // Advance a Work Item through the persisted pipeline.
-      if (parts[0] === "work" && parts[1]) {
+          if (parts[0] === "work") {
+        if (!parts[1]) {
+          try {
+            const result = await pipelineScheduler.startReadyBatch(ctx);
+            ctx.ui.notify(result.blocked || `Started ${result.taskIds?.length || 0} ready Work Items.`, result.blocked ? "warning" : "info");
+          } catch (error) {
+            ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+          }
+          return;
+        }
         const workItemId = parts[1];
         const data = execPic(["show", workItemId], ctx.cwd);
         if (!data.work_item) { ctx.ui.notify(data.error || "Work Item not found", "error"); return; }
