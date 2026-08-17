@@ -12,11 +12,11 @@ Requirements and TIPs:
 - Requirements returned by \`show_work_item\` are authoritative. Task-graph \`requirement_keys\` must reference and cover them; never invent requirement IDs.
 - Every acceptance criterion must contain separate \`Given\`, \`When\`, and \`Then\` steps before task-graph approval or TIP creation.
 - There is no \`task_manager\` action for direct requirement mutation. If a requirement is missing or malformed, stop before task_graph, report the blocker, and do not edit the database or invoke \`pic\` directly.
-- \`materialize_work_item\` generates inactive TIPs from the approved task graph. Do not create, edit, activate, or render TIPs through direct CLI commands.
+- \`materialize_work_item\` creates or reuses only the approved Work Item DAG, metadata, and dependency relations. It does not generate TIPs. Do not create, edit, activate, or render TIPs through direct CLI commands.
 
 Execution order:
 - After explicit owner approval of the task graph, call \`materialize_work_item\`.
-- Ask for explicit owner authorization, then call \`authorize_work_item_implementation\` with \`actor_role=owner\`; this activates the generated TIPs.
+- Ask for explicit owner authorization, then call \`authorize_work_item_implementation\` with \`actor_role=owner\`; the scheduler generates and freezes each ready executable's TIP transactionally immediately before its first worker claim.
 - Launch only dependency-ready executable Work Items with \`work_on_work_item\`; the persisted scheduler owns worker and review execution.
 - Follow \`work_item_workflow_status\` for contractor verification and aggregate-only owner acceptance/merge actions. Passed executable children close automatically; never request owner acceptance for a child Task, Bug, or Chore.
 - Workflow debugging rule: never work around a blocker by filtering runtime state, relabeling a failure, or bypassing a gate. Trace the persisted state transition first; model valid handoffs explicitly and add regression evidence before retrying.

@@ -367,8 +367,13 @@ test("nextPipelineStage rejects completion reports without integrated worker evi
 
 test("pipelineWorkerBlockReason enforces worker prerequisites", () => {
   assert.match(pipelineWorkerBlockReason({ work_item: { title: "Missing pack" } }) || "", /exactly one active Task Instruction Pack/);
+  assert.equal(pipelineWorkerBlockReason({ canonical: true, ready: true, work_item: { title: "Authorized" }, instruction_packs: [], dependencies: [] }), null);
   assert.match(pipelineWorkerBlockReason({ work_item: { title: "Legacy" }, instruction_packs: [{ status: "active", content_schema_version: 2 }], dependencies: [] }) || "", /schema-v3.*effective contract/);
   assert.equal(pipelineWorkerBlockReason({ work_item: { title: "Ready" }, instruction_packs: [{ status: "active", content_schema_version: 3, skill_families_json: "[]", effective_contract_snapshot_id: "ecs-1", effective_contract_snapshot_hash: "hash-1" }], dependencies: [] }), null);
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const launchGroup = source.slice(source.indexOf("private async launchGroup"), source.indexOf("private async launchRri"));
+  assert.doesNotMatch(launchGroup.slice(0, launchGroup.indexOf("const claims:")), /stagePrompt\(/);
+  assert.match(launchGroup.slice(launchGroup.indexOf("const claims:")), /pipeline-claim[\s\S]+stagePrompt\(/);
 });
 
 test("worker output is rejected when its effective contract is stale", () => {

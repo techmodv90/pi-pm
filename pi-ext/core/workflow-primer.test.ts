@@ -9,5 +9,6 @@ test("workflow primer explains canonical tools, requirements, and stage order", 
   assert.match(WORKFLOW_PRIMER, /separate `Given`, `When`, and `Then` steps/);
   assert.match(WORKFLOW_PRIMER, /no `task_manager` action for direct requirement mutation/i);
   assert.match(WORKFLOW_PRIMER, /`materialize_work_item`.*`authorize_work_item_implementation`.*`work_on_work_item`/s);
+  assert.match(WORKFLOW_PRIMER, /materialize_work_item`.*does not generate TIPs.*immediately before its first worker claim/s);
   assert.match(WORKFLOW_PRIMER, /explicit owner approval/i);
 });

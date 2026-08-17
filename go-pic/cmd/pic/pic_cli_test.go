@@ -720,9 +720,9 @@ Then it completes')`)
 	if err = db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='T01'`, id).Scan(&firstTaskID); err != nil {
 		t.Fatal(err)
 	}
-	var generatedAcceptance string
-	if err = db.QueryRow(`SELECT json_extract(content_json,'$.requirements[0].acceptance_criteria') FROM work_item_instruction_packs WHERE work_item_id=? AND checkpoint_id=?`, firstTaskID, first["checkpoint_id"]).Scan(&generatedAcceptance); err != nil || generatedAcceptance != "Given valid context\nWhen work runs\nThen it completes" {
-		t.Fatalf("generated TIP acceptance criteria = %q, err=%v", generatedAcceptance, err)
+	var eagerPacks int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE checkpoint_id=?`, first["checkpoint_id"]).Scan(&eagerPacks); err != nil || eagerPacks != 0 {
+		t.Fatalf("materialization created %d eager TIPs, err=%v", eagerPacks, err)
 	}
 	content := `{"schemaVersion":3,"skillFamilies":[],"goal":"Correct materialized task","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}]}`
 	pack := asObject(t, runPic(t, bin, root, home, "workflow", "instruction-pack-save", firstTaskID, "--source-type", "standalone_task", "--content-json", content, "--requirement-ids-json", `["req-m"]`))
@@ -743,7 +743,7 @@ Then it completes')`)
 	}
 }
 
-func TestStandaloneWorkItemMaterializesTIPWithoutCreatingChild(t *testing.T) {
+func TestStandaloneWorkItemGeneratesTIPBeforeFirstClaim(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Standalone task"))
@@ -775,13 +775,25 @@ Then it completes')`)
 	var children, mappings, packs int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=?`, id).Scan(&children)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id=?`, id, id).Scan(&mappings)
-	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='inactive'`, id).Scan(&packs)
-	if children != 0 || mappings != 1 || packs != 1 {
-		t.Fatalf("standalone children=%d mappings=%d inactive packs=%d", children, mappings, packs)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=?`, id).Scan(&packs)
+	if children != 0 || mappings != 1 || packs != 0 {
+		t.Fatalf("standalone children=%d mappings=%d eager packs=%d", children, mappings, packs)
 	}
 	authorized := asObject(t, runPic(t, bin, root, home, "work-item", "authorize", id, "owner"))
-	if authorized["activated"] != float64(1) {
+	if authorized["activated"] != float64(0) {
 		t.Fatalf("standalone authorization = %#v", authorized)
+	}
+	ready := runPic(t, bin, root, home, "work-item", "ready").([]any)
+	if len(ready) != 1 || ready[0].(map[string]any)["id"] != id {
+		t.Fatalf("authorized item is not ready before TIP generation: %#v", ready)
+	}
+	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
+	var generatedAcceptance, packID string
+	if err = db.QueryRow(`SELECT id,json_extract(content_json,'$.requirements[0].acceptance_criteria') FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, id).Scan(&packID, &generatedAcceptance); err != nil {
+		t.Fatal(err)
+	}
+	if claim["instruction_pack_id"] != packID || generatedAcceptance != "Given valid context\nWhen work runs\nThen it completes" {
+		t.Fatalf("claim=%#v generated TIP=%s acceptance=%q", claim, packID, generatedAcceptance)
 	}
 }
 
@@ -854,7 +866,7 @@ Then it completes')`)
 		t.Fatalf("materialized item ready before authorization = %#v", ready)
 	}
 	authorized := asObject(t, runPic(t, bin, root, home, "work-item", "authorize", id, "owner"))
-	if authorized["activated"] != float64(1) || authorized["integration_mode"] != "coordination" {
+	if authorized["activated"] != float64(0) || authorized["integration_mode"] != "coordination" {
 		t.Fatalf("authorization = %#v", authorized)
 	}
 	if status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id)); status["next_stage"] != "implement" {
@@ -863,6 +875,20 @@ Then it completes')`)
 	ready := runPic(t, bin, root, home, "work-item", "ready").([]any)
 	if len(ready) != 1 || ready[0].(map[string]any)["type"] != "task" {
 		t.Fatalf("authorized ready = %#v", ready)
+	}
+	childID := ready[0].(map[string]any)["id"].(string)
+	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", childID, "worker"))
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var activePack, packCheckpoint string
+	if err = db.QueryRow(`SELECT id,checkpoint_id FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, childID).Scan(&activePack, &packCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	if claim["instruction_pack_id"] != activePack || packCheckpoint != authorized["checkpoint_id"] {
+		t.Fatalf("aggregate child claim=%#v active pack=%s checkpoint=%s", claim, activePack, packCheckpoint)
 	}
 }
 

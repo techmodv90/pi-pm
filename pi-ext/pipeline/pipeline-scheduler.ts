@@ -236,10 +236,12 @@ export function buildPipelineDryRun(root: any, load: (id: string) => any): any {
 
 export function pipelineWorkerBlockReason(data: any): string | null {
   const activePacks = (data.instruction_packs || []).filter((pack: any) => pack.status === "active");
-  if (activePacks.length !== 1) return `Work Item "${data.work_item?.title || data.work_item?.id || "unknown"}" requires exactly one active Task Instruction Pack before work.`;
+  const awaitingFirstClaimTIP = data.canonical && data.ready && activePacks.length === 0;
+  if (activePacks.length !== 1 && !awaitingFirstClaimTIP) return `Work Item "${data.work_item?.title || data.work_item?.id || "unknown"}" requires exactly one active Task Instruction Pack before work.`;
   const blockers = getBlockingTaskDependencies(data.dependencies || [], data.phase_metadata || null);
   if (blockers.length) return `Work Item "${data.work_item?.title || data.work_item?.id || "unknown"}" is blocked by incomplete dependencies: ${blockers.map((dependency: any) => dependency.depends_on_task_id).join(", ")}`;
   const activePack = activePacks[0];
+  if (!activePack) return null;
   if (!data.canonical && (Number(activePack.content_schema_version || 1) < 3 || !activePack.effective_contract_snapshot_id || !activePack.effective_contract_snapshot_hash)) return `Work Item "${data.work_item?.title || "unknown"}" requires a schema-v3 Task Instruction Pack with an effective contract snapshot; revise and activate the TIP before launch.`;
   try {
     const families = JSON.parse(activePack.skill_families_json || "[]");
@@ -1138,7 +1140,6 @@ export class PipelineScheduler {
         if (!data.work_item) throw new Error(data.error || `Task ${taskId} not found`);
         const blockReason = pipelineWorkerBlockReason(data);
         if (blockReason) throw new Error(blockReason);
-        workerPrompts.set(taskId, stagePrompt(stage, taskId, this.cwd));
         const runs = this.pipelineRuns(taskId);
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
         if (stage === "worker" && currentFailedReview(runs, activePack)) {

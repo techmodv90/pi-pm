@@ -640,9 +640,11 @@ func finalizeVerifiedExecutionState(db databaseQueryer, id string, state workIte
 	return state
 }
 
-const workItemReadySQL = `wi.type IN ('task','bug','chore') AND wi.status='open' AND wi.deferred=0 AND wi.claimed_at='' AND (
+const workItemReadySQL = `wi.type IN ('task','bug','chore') AND wi.status='open' AND wi.deferred=0 AND wi.claimed_at='' AND ((
 	SELECT COUNT(*) FROM work_item_instruction_packs p WHERE p.work_item_id=wi.id AND p.status='active'
-)=1 AND NOT EXISTS (
+)=1 OR EXISTS (
+	SELECT 1 FROM work_item_materializations m JOIN implementation_authorizations a ON a.work_item_id=m.root_work_item_id AND a.task_graph_checkpoint_id=m.checkpoint_id AND a.revoked_at='' WHERE m.work_item_id=wi.id
+)) AND NOT EXISTS (
 	SELECT 1 FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='blocks' AND blocker.status!='done'
 ) AND NOT EXISTS (
 	SELECT 1 FROM work_item_relations r JOIN work_items gate_item ON gate_item.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='gates' AND gate_item.status!='done'
@@ -1511,7 +1513,7 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	requirements, err := validateTaskGraphRequirementCoverage(tx, args[0], plan)
+	_, err = validateTaskGraphRequirementCoverage(tx, args[0], plan)
 	if err != nil {
 		return err
 	}
@@ -1526,18 +1528,7 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 		var existing string
 		_ = tx.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND checkpoint_id=? AND node_key=?`, args[0], checkpointID, plan.Nodes[0].Key).Scan(&existing)
 		if existing == "" {
-			packContent, contentHash, marshalErr := materializedInstructionPack(plan.Nodes[0], plan.Version, requirements)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			var version int
-			if err = tx.QueryRow(`SELECT COALESCE(MAX(version),0)+1 FROM work_item_instruction_packs WHERE work_item_id=?`, args[0]).Scan(&version); err != nil {
-				return err
-			}
 			if _, err = tx.Exec(`INSERT INTO work_item_materializations(root_work_item_id,checkpoint_id,node_key,work_item_id) VALUES(?,?,?,?)`, args[0], checkpointID, plan.Nodes[0].Key, args[0]); err != nil {
-				return err
-			}
-			if _, err = tx.Exec(`INSERT INTO work_item_instruction_packs(id,work_item_id,checkpoint_id,version,status,content_json,content_hash) VALUES(?,?,?,?,'inactive',?,?)`, "wip-"+shortID(), args[0], checkpointID, version, string(packContent), contentHash); err != nil {
 				return err
 			}
 		}
@@ -1565,23 +1556,6 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 			if _, err = tx.Exec(`INSERT INTO work_item_materializations(root_work_item_id,checkpoint_id,node_key,work_item_id) VALUES(?,?,?,?)`, args[0], checkpointID, node.Key, existing); err != nil {
 				return err
 			}
-			kind := node.Type
-			if kind == "" {
-				kind = "task"
-			}
-			if kind == "task" || kind == "bug" || kind == "chore" {
-				content, contentHash, marshalErr := materializedInstructionPack(node, plan.Version, requirements)
-				if marshalErr != nil {
-					return marshalErr
-				}
-				var version int
-				if err = tx.QueryRow(`SELECT COALESCE(MAX(version),0)+1 FROM work_item_instruction_packs WHERE work_item_id=?`, existing).Scan(&version); err != nil {
-					return err
-				}
-				if _, err = tx.Exec(`INSERT INTO work_item_instruction_packs(id,work_item_id,checkpoint_id,version,status,content_json,content_hash) VALUES(?,?,?,?,'inactive',?,?)`, "wip-"+shortID(), existing, checkpointID, version, string(content), contentHash); err != nil {
-					return err
-				}
-			}
 			ids[node.Key], reused = existing, reused+1
 			continue
 		}
@@ -1606,15 +1580,6 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 		}
 		if _, err = tx.Exec(`INSERT INTO work_item_materializations(root_work_item_id,checkpoint_id,node_key,work_item_id) VALUES(?,?,?,?)`, args[0], checkpointID, node.Key, workItemID); err != nil {
 			return err
-		}
-		if kind == "task" || kind == "bug" || kind == "chore" {
-			content, contentHash, marshalErr := materializedInstructionPack(node, plan.Version, requirements)
-			if marshalErr != nil {
-				return marshalErr
-			}
-			if _, err = tx.Exec(`INSERT INTO work_item_instruction_packs(id,work_item_id,checkpoint_id,version,status,content_json,content_hash) VALUES(?,?,?,1,'inactive',?,?)`, "wip-"+shortID(), workItemID, checkpointID, string(content), contentHash); err != nil {
-				return err
-			}
 		}
 		ids[node.Key], created = workItemID, created+1
 	}
@@ -1662,14 +1627,11 @@ func workItemAuthorize(db *sql.DB, args []string) error {
 	if _, err = validateTaskGraphRequirementCoverage(tx, args[0], plan); err != nil {
 		return err
 	}
-	var materialized, packs int
+	var materialized int
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id=? AND checkpoint_id=?`, args[0], checkpointID).Scan(&materialized); err != nil {
 		return err
 	}
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE checkpoint_id=?`, checkpointID).Scan(&packs); err != nil {
-		return err
-	}
-	if materialized == 0 || packs == 0 {
+	if materialized == 0 {
 		return errors.New("current task graph is not materialized")
 	}
 	if _, err = tx.Exec(`UPDATE implementation_authorizations SET revoked_at=datetime('now') WHERE work_item_id=? AND revoked_at='' AND task_graph_checkpoint_id!=?`, args[0], checkpointID); err != nil {
@@ -1688,27 +1650,10 @@ func workItemAuthorize(db *sql.DB, args []string) error {
 	if _, err = tx.Exec(`UPDATE implementation_authorizations SET revoked_at=datetime('now') WHERE work_item_id=? AND task_graph_checkpoint_id=? AND revoked_at='' AND id!=?`, args[0], checkpointID, authorizationID); err != nil {
 		return err
 	}
-	rows, err := tx.Query(`SELECT id FROM work_item_instruction_packs WHERE checkpoint_id=? AND status='inactive' ORDER BY rowid`, checkpointID)
-	if err != nil {
+	if _, err = tx.Exec(`UPDATE work_item_instruction_packs SET status='stale',stale_at=datetime('now') WHERE status='active' AND checkpoint_id!=? AND work_item_id IN (SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=?)`, checkpointID, args[0]); err != nil {
 		return err
 	}
-	packIDs := []string{}
-	for rows.Next() {
-		var packID string
-		if err = rows.Scan(&packID); err != nil {
-			rows.Close()
-			return err
-		}
-		packIDs = append(packIDs, packID)
-	}
-	if err = rows.Close(); err != nil {
-		return err
-	}
-	for _, packID := range packIDs {
-		if err = activateWorkItemInstructionPack(tx, packID); err != nil {
-			return err
-		}
-	}
+
 	var kind string
 	if err = tx.QueryRow(`SELECT type FROM work_items WHERE id=?`, args[0]).Scan(&kind); err != nil {
 		return err
@@ -1756,7 +1701,7 @@ func workItemAuthorize(db *sql.DB, args []string) error {
 	} else if deliveryErr != nil {
 		return deliveryErr
 	}
-	activated := int64(len(packIDs))
+	activated := int64(0)
 	if err = tx.Commit(); err != nil {
 		return err
 	}

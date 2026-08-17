@@ -87,7 +87,7 @@ export function buildWorkItemContinuePrompt(status: { work_item_id: string; next
     materialize: "Materialize the approved task graph with `materialize_work_item`; do not create child Work Items manually before this stage.",
     authorize: "Ask the owner for implementation authorization. Call `authorize_work_item_implementation` with `actor_role=owner` only after their explicit approval.",
     implement: ["task", "bug", "chore"].includes(item.type || "")
-      ? "Launch the executable Work Item from its active TIP with `work_on_work_item`."
+      ? "Launch the executable Work Item with `work_on_work_item`; its TIP is generated and frozen transactionally before the first worker claim."
       : `Launch only authorized dependency-ready executable descendants. Do not launch this ${item.type || "aggregate"} Work Item as a worker.`,
     contractor_verification: "Verify the integrated completion evidence and publish the verdict with `verify_work_item` using `actor_role=contractor`; a passed executable child closes automatically, while a passed aggregate advances to aggregate verification/owner acceptance.",
     aggregate_verification: "Run the aggregate's final verification over all completed descendants and publish it with `verify_aggregate_work_item` using `actor_role=contractor`.",
