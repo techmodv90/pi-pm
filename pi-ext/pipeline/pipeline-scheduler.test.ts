@@ -67,10 +67,11 @@ test("Scan artifact saves render the owner-facing Markdown result", () => {
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   assert.match(source, /import \{ Markdown, Text \} from "@mariozechner\/pi-tui"/);
   assert.match(source, /import \{ getMarkdownTheme \} from "@mariozechner\/pi-coding-agent"/);
-  assert.match(source, /details: scanPresentation \? \{ \.\.\.result, scanPresentation \} : rriPresentation \? \{ \.\.\.result, rriPresentation \} : result/);
+  assert.match(source, /details: scanPresentation \? \{ \.\.\.result, scanPresentation \} : visionPresentation \? \{ \.\.\.result, visionPresentation \} : rriPresentation \? \{ \.\.\.result, rriPresentation \} : result/);
   assert.match(source, /`Scan artifact \$\{result\.id\} saved\. Ask the owner to approve or reject this Scan Report\.`/);
   assert.doesNotMatch(source, /terminate: Boolean\(scanPresentation\)/);
   assert.match(source, /if \(details\?\.scanPresentation\) return new Markdown\(details\.scanPresentation, 0, 0, getMarkdownTheme\(\)\)/);
+  assert.match(source, /if \(details\?\.visionPresentation\) return new Markdown\(details\.visionPresentation, 0, 0, getMarkdownTheme\(\)\)/);
 });
 
 test("owner-only graph actions never synthesize owner authorization", () => {

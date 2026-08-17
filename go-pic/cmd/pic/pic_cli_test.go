@@ -131,7 +131,17 @@ func initProject(t *testing.T, bin string) (root string, home string) {
 	return root, home
 }
 
+const validVisionArtifact = `{"project_name":"Task System","nature":{"interface":"CLI","lifecycle":"Pipeline","scale":"Team"},"dimensions":{"interface":"CLI","data_flow":"SQLite","user_model":"Owner and agents","lifecycle":"Pipeline","scale":"Team","state":"Persistent DB"},"architecture":{"entry_points":["pic"],"core_modules":["scheduler"],"data_layer":["SQLite"],"integration_points":[],"cross_cutting_concerns":["audit"],"connection_summary":"Commands drive persisted stages."},"user_flows":[{"user_type":"Owner","entry":"CLI","core_loop":"Review","edge_cases":["Rejection"],"exit":"Approval"}],"non_ui_direction":{"type":"CLI","decisions":["JSON output"]},"tech_stack":[{"layer":"Runtime","choice":"Go","rationale":"Existing","reuse":"Current"}]}`
+
+func planningArtifactContent(stage string) string {
+	if stage == "vision" {
+		return validVisionArtifact
+	}
+	return stage
+}
+
 func TestWebAPIUsesGlobalProjectRegistry(t *testing.T) {
+
 	bin := buildPic(t)
 	home := t.TempDir()
 	rootA := t.TempDir()
@@ -569,6 +579,9 @@ func TestWorkItemArtifactGateSequence(t *testing.T) {
 	stages := []string{"scan", "rri", "vision", "blueprint", "contracts", "task_graph"}
 	for index, stage := range stages {
 		content := stage + " content"
+		if stage == "vision" {
+			content = validVisionArtifact
+		}
 		if stage == "task_graph" {
 			content = `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]}]}`
 		}
@@ -627,7 +640,7 @@ func TestApprovedTaskGraphValidation(t *testing.T) {
 When work runs
 Then it completes')`)
 	for _, stage := range []string{"scan", "rri", "vision", "blueprint", "contracts"} {
-		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, stage))
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
 		decision := "approved"
 		if stage == "scan" {
 			decision = "accepted"
@@ -679,7 +692,7 @@ func TestWorkItemGraphMaterialization(t *testing.T) {
 When work runs
 Then it completes')`)
 	for _, stage := range []string{"scan", "rri", "vision", "blueprint", "contracts"} {
-		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, stage))
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
 		decision := "approved"
 		if stage == "scan" {
 			decision = "accepted"
@@ -753,7 +766,7 @@ func TestStandaloneWorkItemGeneratesTIPBeforeFirstClaim(t *testing.T) {
 When work runs
 Then it completes')`)
 	for _, stage := range []string{"scan", "rri"} {
-		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, stage))
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
 		decision := "approved"
 		if stage == "scan" {
 			decision = "accepted"
@@ -807,7 +820,7 @@ func TestStandaloneGraphRevisionReusesRootWorkItem(t *testing.T) {
 When work runs
 Then it completes')`)
 	for _, stage := range []string{"scan", "rri"} {
-		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, stage))
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
 		decision := "approved"
 		if stage == "scan" {
 			decision = "accepted"
@@ -838,6 +851,16 @@ Then it completes')`)
 	}
 	if children != 0 || mappings != 2 {
 		t.Fatalf("children=%d mappings=%d", children, mappings)
+	}
+}
+
+func TestVisionArtifactRequiresStructuredJSON(t *testing.T) {
+	if err := validateVisionReport(`{"project_name":"Incomplete"}`); err == nil || !strings.Contains(err.Error(), "nature") {
+		t.Fatalf("expected incomplete Vision rejection, got %v", err)
+	}
+	valid := `{"project_name":"Task System","nature":{"interface":"CLI","lifecycle":"Pipeline","scale":"Team"},"dimensions":{"interface":"CLI","data_flow":"SQLite","user_model":"Owner and agents","lifecycle":"Pipeline","scale":"Team","state":"Persistent DB"},"architecture":{"entry_points":["pic"],"core_modules":["scheduler"],"data_layer":["SQLite"],"integration_points":[],"cross_cutting_concerns":["audit"],"connection_summary":"Commands drive persisted stages."},"user_flows":[{"user_type":"Owner","entry":"CLI","core_loop":"Review","edge_cases":["Rejection"],"exit":"Approval"}],"non_ui_direction":{"type":"CLI","decisions":["JSON output"]},"tech_stack":[{"layer":"Runtime","choice":"Go","rationale":"Existing","reuse":"Current"}]}`
+	if err := validateVisionReport(valid); err != nil {
+		t.Fatalf("expected valid Vision, got %v", err)
 	}
 }
 
@@ -908,7 +931,7 @@ func TestImplementationAuthorization(t *testing.T) {
 When work runs
 Then it completes')`)
 	for _, stage := range []string{"scan", "rri", "vision", "blueprint", "contracts"} {
-		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, stage))
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
 		decision := "approved"
 		if stage == "scan" {
 			decision = "accepted"

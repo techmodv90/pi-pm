@@ -78,7 +78,7 @@ export function buildWorkItemContinuePrompt(status: { work_item_id: string; next
   const actions: Record<string, string> = {
     scan: `Inspect the Scout report and existing drafts. Validate the evidence against source, resolve contradictions, and save the canonical Scan Report with \`save_work_item_artifact\` as structured XML matching this schema:\n\n${CANONICAL_SCAN_REPORT_XML_FORMAT}\n\nDo not format owner-facing Markdown; the tool renders the saved XML deterministically. If inaccurate, call \`reject_work_item_scan\` with actor_role=contractor and a concrete reason; wait for the owner to decide whether to reset and rescan.`,
     rri: "Publish the RRI artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
-    vision: "Publish the Vision artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
+    vision: "As Contractor, consume the approved Scan and RRI artifacts. Classify interface, data flow, user model, lifecycle, scale, and state; derive architecture and user flows; include UI design direction only for UI projects or non-UI direction otherwise; reuse the scanned stack. Save one validated JSON Vision artifact with `save_work_item_artifact`, then present its rendered Markdown to the owner. Do not approve it.",
     blueprint: "Publish the Blueprint artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
     contracts: "Publish the Contracts artifact with `save_work_item_artifact`, then request owner acceptance with `approve_work_item_artifact`.",
     task_graph: ["task", "bug", "chore"].includes(item.type || "")

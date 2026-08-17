@@ -944,6 +944,11 @@ func workItemArtifactSave(db *sql.DB, args []string) error {
 	if err := validateChildArtifactStage(os.Getenv("PI_TASK_AGENT_NAME"), args[1]); err != nil {
 		return err
 	}
+	if args[1] == "vision" {
+		if err := validateVisionReport(args[2]); err != nil {
+			return err
+		}
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -983,12 +988,95 @@ func validateChildArtifactStage(agent, stage string) error {
 	allowed := map[string][]string{
 		"task-scout":   {"scan"},
 		"task-rri":     {"rri"},
-		"task-planner": {"vision", "blueprint", "contracts", "task_graph"},
+		"task-planner": {"blueprint", "contracts", "task_graph"},
 	}
 	if contains(allowed[agent], stage) {
 		return nil
 	}
 	return fmt.Errorf("%s cannot save %s artifacts", agent, stage)
+}
+
+type visionReport struct {
+	ProjectName string `json:"project_name"`
+	Nature      struct {
+		Interface string `json:"interface"`
+		Lifecycle string `json:"lifecycle"`
+		Scale     string `json:"scale"`
+	} `json:"nature"`
+	Dimensions struct {
+		Interface string `json:"interface"`
+		DataFlow  string `json:"data_flow"`
+		UserModel string `json:"user_model"`
+		Lifecycle string `json:"lifecycle"`
+		Scale     string `json:"scale"`
+		State     string `json:"state"`
+	} `json:"dimensions"`
+	Architecture struct {
+		EntryPoints          []string `json:"entry_points"`
+		CoreModules          []string `json:"core_modules"`
+		DataLayer            []string `json:"data_layer"`
+		IntegrationPoints    []string `json:"integration_points"`
+		CrossCuttingConcerns []string `json:"cross_cutting_concerns"`
+		ConnectionSummary    string   `json:"connection_summary"`
+	} `json:"architecture"`
+	UserFlows []struct {
+		UserType  string   `json:"user_type"`
+		Entry     string   `json:"entry"`
+		CoreLoop  string   `json:"core_loop"`
+		EdgeCases []string `json:"edge_cases"`
+		Exit      string   `json:"exit"`
+	} `json:"user_flows"`
+	DesignDirection *struct {
+		LayoutASCII  string `json:"layout_ascii"`
+		FontPairing  string `json:"font_pairing"`
+		PrimaryColor string `json:"primary_color"`
+		Density      string `json:"density"`
+		Motion       string `json:"motion"`
+		Rationale    string `json:"rationale"`
+	} `json:"design_direction"`
+	NonUIDirection *struct {
+		Type      string   `json:"type"`
+		Decisions []string `json:"decisions"`
+	} `json:"non_ui_direction"`
+	TechStack []struct {
+		Layer     string `json:"layer"`
+		Choice    string `json:"choice"`
+		Rationale string `json:"rationale"`
+		Reuse     string `json:"reuse"`
+	} `json:"tech_stack"`
+}
+
+func validateVisionReport(content string) error {
+	var report visionReport
+	if err := json.Unmarshal([]byte(content), &report); err != nil {
+		return errors.New("Vision artifact must be valid JSON")
+	}
+	if report.ProjectName == "" || report.Nature.Interface == "" || report.Nature.Lifecycle == "" || report.Nature.Scale == "" {
+		return errors.New("Vision requires project_name and nature")
+	}
+	if report.Dimensions.Interface == "" || report.Dimensions.DataFlow == "" || report.Dimensions.UserModel == "" || report.Dimensions.Lifecycle == "" || report.Dimensions.Scale == "" || report.Dimensions.State == "" {
+		return errors.New("Vision requires all project dimensions")
+	}
+	if len(report.Architecture.EntryPoints) == 0 || len(report.Architecture.CoreModules) == 0 || len(report.Architecture.DataLayer) == 0 || len(report.Architecture.CrossCuttingConcerns) == 0 || report.Architecture.ConnectionSummary == "" {
+		return errors.New("Vision requires complete architecture")
+	}
+	if len(report.UserFlows) == 0 || len(report.TechStack) == 0 || (report.DesignDirection == nil && report.NonUIDirection == nil) {
+		return errors.New("Vision requires user flows, tech stack, and a UI or non-UI direction")
+	}
+	for _, flow := range report.UserFlows {
+		if flow.UserType == "" || flow.Entry == "" || flow.CoreLoop == "" || len(flow.EdgeCases) == 0 || flow.Exit == "" {
+			return errors.New("Vision user flows are incomplete")
+		}
+	}
+	for _, stack := range report.TechStack {
+		if stack.Layer == "" || stack.Choice == "" || stack.Rationale == "" || stack.Reuse == "" {
+			return errors.New("Vision tech stack rows are incomplete")
+		}
+	}
+	if report.NonUIDirection != nil && (report.NonUIDirection.Type == "" || len(report.NonUIDirection.Decisions) == 0) {
+		return errors.New("Vision non-UI direction is incomplete")
+	}
+	return nil
 }
 
 func workItemPlanningReset(db *sql.DB, args []string) error {
