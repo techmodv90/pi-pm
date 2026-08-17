@@ -11,12 +11,12 @@
 - Runtime / deployment target: Native `pic` binary with embedded/static dashboard; Node.js Pi extension
 
 ### Commands
-- Install: `cd go-pic && go mod download && cd web && npm ci && cd ../../pi-ext && npm ci`
-- Build: `cd pi-ext && npm run build`
-- Test (all): `cd go-pic && go test ./... && cd ../pi-ext && npm test`
+- Install: `cd go-pic && go mod download && cd web && npm ci && cd ../../pi-ext && pnpm install --frozen-lockfile`
+- Build: `cd pi-ext && pnpm run build`
+- Test (all): `cd go-pic && go test ./... && cd ../pi-ext && pnpm test`
 - Test (single file): `cd go-pic && go test ./cmd/pic -run <TestName>` or `cd pi-ext && node --experimental-strip-types --test <file>.test.ts`
 - Lint: None configured
-- Typecheck: `cd pi-ext && npm run check`
+- Typecheck: `cd pi-ext && pnpm run check`
 - Run locally: `cd go-pic && go run ./cmd/pic <command>`; dashboard: `cd go-pic/web && npm run dev`
 
 ### Layout

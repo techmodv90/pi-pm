@@ -1,5 +1,24 @@
 # Pi Task System Extension
 
+## Installation
+
+`pnpm-workspace.yaml` and `pnpm-lock.yaml` are the sole canonical installation authority for this extension. Install deterministically from the committed lockfile with a frozen pnpm install:
+
+```
+cd pi-ext
+pnpm install --frozen-lockfile
+```
+
+No `package-lock.json` or npm-specific lock authority is used. If a frozen install reports lock drift, update the package metadata and lockfile together through pnpm (re-run `pnpm install` and commit the regenerated `pnpm-lock.yaml`) rather than bypassing frozen validation.
+
+Scripts are invoked through pnpm and match the documented commands:
+
+```
+pnpm run build   # build the pi extension binary and dashboard
+pnpm test        # run the Node test suite
+pnpm run check   # TypeScript typecheck
+```
+
 `index.ts` is the package entry point. Implementation is grouped by feature and dependencies flow inward as follows:
 
 - `core/`: process adapters, extension lifecycle, dashboard launcher, and activity publishing. Does not depend on other feature folders.
