@@ -239,24 +239,19 @@ test("completed planning stages pause for main-agent synthesis instead of launch
   assert.match(resumeBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
 });
 
-test("RRI persona handoffs require strict assigned-persona JSON", () => {
-  const valid = JSON.stringify({
-    persona: "QA / Tester",
-    auto_answered: [{ question: "Tests?", answer: "Go and Node", source: "AGENTS.md", confidence: "high" }],
-    candidate_questions: [{ priority: "P1", classification: "SMART-ASKED", mode: "GUIDED", question: "Why this matters: failures block delivery. Which recovery outcome is required?", suggested_answers: ["Retry", "Stop"], reason: "Recovery policy is unspecified", requirement_area: "reliability" }],
-    not_applicable: [],
-  });
+test("RRI persona handoffs require strict assigned-persona XML", () => {
+  const valid = `<rri_persona persona="QA / Tester"><auto_answered><answer confidence="high"><question>Tests?</question><answer>Go and Node</answer><source>AGENTS.md</source></answer></auto_answered><candidate_questions><question priority="P1" classification="SMART-ASKED" mode="GUIDED"><question>Why this matters: failures block delivery. Which recovery outcome is required?</question><suggested_answer>Retry</suggested_answer><suggested_answer>Stop</suggested_answer><reason>Recovery policy is unspecified</reason><requirement_area>reliability</requirement_area></question></candidate_questions><not_applicable></not_applicable></rri_persona>`;
   assert.equal(parseRriPersonaResult(valid, "QA / Tester").persona, "QA / Tester");
   assert.throws(() => parseRriPersonaResult(valid, "Developer"), /expected Developer/);
-  assert.throws(() => parseRriPersonaResult('{"persona":"QA / Tester"}', "QA / Tester"), /auto_answered/);
-  assert.throws(() => parseRriPersonaResult("```json\n" + valid + "\n```", "QA / Tester"), /one JSON object/);
+  assert.throws(() => parseRriPersonaResult('<rri_persona persona="QA / Tester"></rri_persona>', "QA / Tester"), /auto_answered/);
+  assert.throws(() => parseRriPersonaResult("```xml\n" + valid + "\n```", "QA / Tester"), /one XML document/);
 });
 
-test("RRI synthesis handoff is strict JSON", () => {
-  const valid = JSON.stringify({ next_question: null, remaining_queue: [], auto_answered: [], not_applicable: [], open_blockers: [], final_report: null });
-  assert.deepEqual(parseRriSynthesisResult(valid), JSON.parse(valid));
-  assert.throws(() => parseRriSynthesisResult("Prepared interview"), /one JSON object/);
-  assert.throws(() => parseRriSynthesisResult('{"next_question":null}'), /remaining_queue/);
+test("RRI synthesis handoff is strict XML", () => {
+  const valid = "<rri_synthesis><remaining_queue></remaining_queue><auto_answered></auto_answered><not_applicable></not_applicable><open_blockers></open_blockers><final_report></final_report></rri_synthesis>";
+  assert.deepEqual(parseRriSynthesisResult(valid), { remaining_queue: [], auto_answered: [], not_applicable: [], open_blockers: [], next_question: null, final_report: null });
+  assert.throws(() => parseRriSynthesisResult("Prepared interview"), /one XML document/);
+  assert.throws(() => parseRriSynthesisResult("<rri_synthesis><next_question></next_question></rri_synthesis>"), /remaining_queue/);
 });
 
 test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () => {
@@ -269,9 +264,9 @@ test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () 
   assert.match(fanout, /handoffs\.put\("rri-persona"/);
   assert.match(fanout, /startSubagent\([\s\S]+agent: taskRriAgent/);
   assert.match(fanout, /catch[\s\S]+handles\.forEach\(\(handle\) => handle\.stop\(\)\)/);
-  assert.match(personaInstructions, /first character.*\{.*last character.*\}/s);
+  assert.match(personaInstructions, /first element.*<rri_persona.*last element.*<\/rri_persona>/s);
   assert.doesNotMatch(personaInstructions, /```json/);
-  assert.match(readFileSync(new URL("../agents/task-rri.md", import.meta.url), "utf8"), /prepared interview[\s\S]+first character.*\{.*last character.*\}/s);
+  assert.match(readFileSync(new URL("../agents/task-rri.md", import.meta.url), "utf8"), /prepared interview[\s\S]+root must be.*<rri_synthesis>/s);
   assert.match(fanout, /RRI synthesis failed validation:[\s\S]+only retry/);
 });
 

@@ -12,7 +12,7 @@ model: cliproxy/ds-4-pro
 
 Resolve `$HOME`, then read `$HOME/.pi/agent/methodologies/rri.md`, `$HOME/.pi/agent/methodologies/rri-personas.md`, and `$HOME/.pi/agent/methodologies/rri-question-bank.md` using absolute paths. Never resolve methodology paths from the project working directory. You prepare the interview; the main agent must ask the owner questions, persist checkpoints, requirements, and owner decisions, and save the owner-confirmed final report.
 
-The scheduler launches the required `rri-persona` analyses in parallel with fresh context, validates their JSON, and supplies the synchronized ephemeral handoffs in your task. Never launch or replace persona analyses yourself. For child/phase tasks, synthesize only unresolved local P0/P1 deltas against inherited evidence.
+The scheduler launches the required `rri-persona` analyses in parallel with fresh context, validates their XML, and supplies the synchronized ephemeral handoffs in your task. Never launch or replace persona analyses yourself. For child/phase tasks, synthesize only unresolved local P0/P1 deltas against inherited evidence.
 
 Treat the supplied persona handoffs as the complete validated fanout. If any required persona is absent, return it in `open_blockers`; do not synthesize an interview that implies complete coverage.
 
@@ -31,9 +31,9 @@ Synthesize their structured results:
 3. Promote contradictions and evidence conflicts to P0.
 4. Remove questions answered by stronger evidence.
 5. Order P0 → P1 → P2 → P3, then CHALLENGE → GUIDED → EXPLORE.
-6. Return the prepared interview to the main agent as exactly one JSON object, with one recommended next question first, followed by the remaining queue, auto-answered facts, N/A topics, and unresolved blockers. The first character must be `{` and the last character must be `}`. Do not use a Markdown fence, heading, introduction, or trailing explanation. Use this shape on one line:
+6. Return the prepared interview to the main agent as exactly one XML document, with one recommended next question first, followed by the remaining queue, auto-answered facts, N/A topics, and unresolved blockers. The root must be `<rri_synthesis>` and there must be no Markdown fence, heading, introduction, or trailing explanation. Use this shape:
 
-{"next_question":null,"remaining_queue":[],"auto_answered":[],"not_applicable":[],"open_blockers":[],"final_report":null}
+<rri_synthesis><next_question></next_question><remaining_queue></remaining_queue><auto_answered></auto_answered><not_applicable></not_applicable><open_blockers></open_blockers><final_report></final_report></rri_synthesis>
 
 Populate arrays with the evidence-backed objects from the persona handoffs.
 
@@ -41,15 +41,11 @@ Populate arrays with the evidence-backed objects from the persona handoffs.
 
 The main agent returns a checkpoint after 5–10 answered questions, or immediately when an answer changes scope, architecture, roles, workflow, or priorities. Accept this shape:
 
-```json
-{"answered_questions":[], "confirmed_decisions":[], "rejected_proposals":[], "scope_changes":[], "remaining_queue":[]}
-```
+<rri_checkpoint><answered_questions></answered_questions><confirmed_decisions></confirmed_decisions><rejected_proposals></rejected_proposals><scope_changes></scope_changes><remaining_queue></remaining_queue></rri_checkpoint>
 
 Re-evaluate all evidence and return:
 
-```json
-{"next_question":{}, "remaining_queue":[], "auto_answered":[], "questions_added":[], "questions_removed":[], "open_blockers":[], "final_report":null}
-```
+<rri_synthesis><next_question></next_question><remaining_queue></remaining_queue><auto_answered></auto_answered><questions_added></questions_added><questions_removed></questions_removed><open_blockers></open_blockers><final_report></final_report></rri_synthesis>
 
 Completion rules: No unresolved P0; every P1 is answered or explicitly deferred/escalated; confirmed requirements are testable. Then populate `final_report` using exactly the compact format from `buildRriReportFormatMarkdown`: REQUIREMENTS MATRIX, AUTO-ANSWERED, DECISIONS LOG, and OPEN QUESTIONS. Generate every requirement row, auto-answered item, decision row, and open question from supplied Scan evidence and owner answers; never copy placeholder or example values, and never force AUTH/DB/UI categories when they do not apply. Do not add sections. The report must reflect owner answers, not persona assumptions.
 

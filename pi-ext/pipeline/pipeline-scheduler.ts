@@ -8,6 +8,7 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { Type } from "typebox";
 import { execGitIndexWrite, execPic, execPicText, withGitWriteLock } from "../core/cli-helpers.ts";
 import { EphemeralHandoffStore } from "../core/ephemeral-handoffs.ts";
+import { XMLParser, XMLValidator } from "fast-xml-parser";
 
 import { validateSkillFamilies } from "../subagent/skills.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -579,10 +580,21 @@ const RRI_PERSONAS = ["End User", "Business Analyst", "QA / Tester", "Developer"
 
 export function parseRriPersonaResult(output: string, expectedPersona: string): any {
   const trimmed = output.trim();
-  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) throw new Error(`RRI persona ${expectedPersona} must return one JSON object`);
-  let value: any;
-  try { value = JSON.parse(trimmed); } catch { throw new Error(`RRI persona ${expectedPersona} returned invalid JSON`); }
+  if (!trimmed.startsWith("<rri_persona") || !trimmed.endsWith("</rri_persona>")) throw new Error(`RRI persona ${expectedPersona} must return one XML document`);
+  const start = trimmed.indexOf("<rri_persona");
+  const end = trimmed.lastIndexOf("</rri_persona>");
+  if (start < 0 || end <= start) throw new Error(`RRI persona ${expectedPersona} must return one XML document`);
+  const xml = trimmed.slice(start, end + "</rri_persona>".length);
+  if (XMLValidator.validate(xml) !== true) throw new Error(`RRI persona ${expectedPersona} returned invalid XML`);
+  for (const tag of ["auto_answered", "candidate_questions", "not_applicable"]) if (!new RegExp(`<${tag}(?:\\s|>)`).test(xml)) throw new Error(`RRI persona ${expectedPersona} missing ${tag}`);
+  const root: any = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" }).parse(xml).rri_persona;
+  const value: any = { persona: root?.["@_persona"] };
   if (value.persona !== expectedPersona) throw new Error(`RRI persona output expected ${expectedPersona}, got ${value.persona || "none"}`);
+  const list = (container: any, key: string) => { const value = container?.[key]; return value ? (Array.isArray(value) ? value : [value]) : []; };
+  for (const field of ["auto_answered", "candidate_questions", "not_applicable"]) if (!root || root[field] === undefined) throw new Error(`RRI persona ${expectedPersona} missing ${field}`);
+  value.auto_answered = list(root, "auto_answered").flatMap((container: any) => list(container, "answer").map((answer: any) => ({ question: answer.question, answer: answer.answer, source: answer.source, confidence: answer["@_confidence"] })));
+  value.candidate_questions = list(root, "candidate_questions").flatMap((container: any) => list(container, "question").map((question: any) => ({ priority: question["@_priority"], classification: question["@_classification"], mode: question["@_mode"], question: question.question, suggested_answers: list(question, "suggested_answer").map((entry: any) => entry), reason: question.reason, requirement_area: question.requirement_area })));
+  value.not_applicable = list(root, "not_applicable").flatMap((container: any) => list(container, "topic").map((topic: any) => ({ topic: topic.topic, reason: topic.reason })));
   for (const field of ["auto_answered", "candidate_questions", "not_applicable"]) {
     if (!Array.isArray(value[field])) throw new Error(`RRI persona ${expectedPersona} missing ${field} array`);
   }
@@ -602,9 +614,17 @@ export function parseRriPersonaResult(output: string, expectedPersona: string): 
 
 export function parseRriSynthesisResult(output: string): any {
   const trimmed = output.trim();
-  if (!trimmed.startsWith("{") || !trimmed.endsWith("}")) throw new Error("RRI synthesis must return one JSON object");
-  let value: any;
-  try { value = JSON.parse(trimmed); } catch { throw new Error("RRI synthesis returned invalid JSON"); }
+  if (!trimmed.startsWith("<rri_synthesis") || !trimmed.endsWith("</rri_synthesis>")) throw new Error("RRI synthesis must return one XML document");
+  const start = trimmed.indexOf("<rri_synthesis");
+  const end = trimmed.lastIndexOf("</rri_synthesis>");
+  if (start < 0 || end <= start) throw new Error("RRI synthesis must return one XML document");
+  const xml = trimmed.slice(start, end + "</rri_synthesis>".length);
+  if (XMLValidator.validate(xml) !== true) throw new Error("RRI synthesis returned invalid XML");
+  for (const tag of ["remaining_queue", "auto_answered", "not_applicable", "open_blockers"]) if (!new RegExp(`<${tag}(?:\\s|>)`).test(xml)) throw new Error(`RRI synthesis missing ${tag}`);
+  const root: any = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" }).parse(xml).rri_synthesis;
+  const list = (key: string) => { const value = root?.[key]; return value ? (Array.isArray(value) ? value : [value]) : []; };
+  for (const field of ["remaining_queue", "auto_answered", "not_applicable", "open_blockers"]) if (!root || root[field] === undefined) throw new Error(`RRI synthesis missing ${field}`);
+  const value: any = { remaining_queue: list("remaining_queue"), auto_answered: list("auto_answered"), not_applicable: list("not_applicable"), open_blockers: list("open_blockers"), next_question: root?.next_question || null, final_report: root?.final_report || null };
   for (const field of ["remaining_queue", "auto_answered", "not_applicable", "open_blockers"]) {
     if (!Array.isArray(value[field])) throw new Error(`RRI synthesis missing ${field} array`);
   }
@@ -625,7 +645,7 @@ function startRriFanout(spec: any, taskRriAgent: any, personaAgent: any, handoff
       ...spec,
       runId: undefined,
       agent: personaAgent,
-      task: `${spec.task}\n\nAssigned persona: ${persona}. Analyze only this persona and return exactly one JSON object matching your system contract.${correction ? ` Previous attempt failed validation: ${correction}. This is the only retry. The first output character must be { and the last must be }; emit no other text.` : ""}`,
+      task: `${spec.task}\n\nAssigned persona: ${persona}. Analyze only this persona and return exactly one XML document matching your system contract.${correction ? ` Previous attempt failed validation: ${correction}. This is the only retry. The first element must be <rri_persona> and the last must be </rri_persona>; emit no other text.` : ""}`,
     });
     handles.push(handle);
     const result = await handle.result;
@@ -645,7 +665,7 @@ function startRriFanout(spec: any, taskRriAgent: any, personaAgent: any, handoff
     const handoffPayloads = synchronized.map(({ handoffId }) => {
       const entry = handoffs.get(handoffId, spec.taskId);
       if (!entry) throw new Error(`RRI persona handoff unavailable: ${handoffId}`);
-      return { handoff_id: handoffId, evidence: JSON.parse(entry.payload) };
+      return `<handoff id="${handoffId}">${entry.payload}</handoff>`;
     });
     const synthesisAttempts: SubagentResult[] = [];
     const launchSynthesis = async (attempt = 0, correction = ""): Promise<SubagentResult> => {
@@ -653,7 +673,7 @@ function startRriFanout(spec: any, taskRriAgent: any, personaAgent: any, handoff
         ...spec,
         runId: undefined,
         agent: taskRriAgent,
-        task: `${spec.task}\n\nThe scheduler has completed and validated all required persona runs. Do not launch subagents. Synthesize the prepared owner interview from these ephemeral persona handoffs:\n${JSON.stringify(handoffPayloads)}${correction ? `\n\nRRI synthesis failed validation: ${correction}. This is the only retry. The first output character must be { and the last must be }; emit no other text.` : ""}`,
+        task: `${spec.task}\n\nThe scheduler has completed and validated all required persona runs. Do not launch subagents. Synthesize the prepared owner interview from these scheduler-provided XML handoffs:\n<rri_persona_handoffs>${handoffPayloads.join("\n")}</rri_persona_handoffs>${correction ? `\n\nRRI synthesis failed validation: ${correction}. This is the only retry. The first element must be <rri_synthesis> and the last must be </rri_synthesis>; emit no other text.` : ""}`,
       });
       handles.push(synthesis);
       const synthesisResult = await synthesis.result;

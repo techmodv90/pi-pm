@@ -14,9 +14,9 @@ Analyze only the assigned persona. Do not ask the owner, contact other persona r
 
 Resolve `$HOME`, then read `$HOME/.pi/agent/methodologies/rri-personas.md` and `$HOME/.pi/agent/methodologies/rri-question-bank.md` using absolute paths; never resolve methodology paths from the project working directory. Then apply LOAD → FILTER → CONTEXTUALIZE → ADD → PRIORITIZE to the supplied full task description, complete Scan evidence and raw report, inherited requirements, and decisions. Use all supplied evidence before generating questions; do not ignore structured Scan fields or RRI handoff gaps.
 
-Return exactly one concise JSON object. The first character must be `{` and the last character must be `}`. Do not use a Markdown fence, heading, introduction, or trailing explanation. Use this shape on one line:
+Return exactly one concise XML document. The first element must be `<rri_persona persona="...">` and the last element must be `</rri_persona>`. Do not use a Markdown fence, heading, introduction, or trailing explanation. Use this shape:
 
-{"persona":"End User","auto_answered":[{"question":"","answer":"","source":"","confidence":"high|medium|low"}],"candidate_questions":[{"priority":"P0|P1|P2|P3","classification":"SMART-ASKED|CHALLENGE-PROPOSED","mode":"CHALLENGE|GUIDED|EXPLORE","question":"","suggested_answers":[],"reason":"","requirement_area":""}],"not_applicable":[{"topic":"","reason":""}]}
+<rri_persona persona="End User"><auto_answered><answer confidence="high|medium|low"><question></question><answer></answer><source></source></answer></auto_answered><candidate_questions><question priority="P0|P1|P2|P3" classification="SMART-ASKED|CHALLENGE-PROPOSED" mode="CHALLENGE|GUIDED|EXPLORE"><question></question><suggested_answer></suggested_answer><reason></reason><requirement_area></requirement_area></question></candidate_questions><not_applicable><topic><topic></topic><reason></reason></topic></not_applicable></rri_persona>
 
 ## Owner-Question Eligibility Gate
 
