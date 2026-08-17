@@ -269,7 +269,10 @@ export function assertRunContractCurrent(data: any, run: Pick<PipelineRun, "inst
 }
 
 export function nextPipelineStage(data: any, runs: any[] = []): PipelineStage | null {
-  if (data.canonical && data.execution_state) return data.execution_state.pipeline_stage || null;
+  if (data.canonical && data.execution_state) {
+    if (data.execution_state.pipeline_stage) return data.execution_state.pipeline_stage;
+    return data.ready && data.execution_state.next_stage === "instruction_pack" ? "worker" : null;
+  }
   const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
   if (!activePack && (data.scan_reports || [])[0]?.status !== "completed") return "scan";
   if (!activePack) return null;
