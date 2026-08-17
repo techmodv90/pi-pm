@@ -782,15 +782,18 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	var scanApproved, existing int
+	var scanApproved, finalized, revision int
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage='scan'`, args[0]).Scan(&scanApproved); err != nil || scanApproved != 1 {
 		return errors.New("RRI finalization requires one approved Scan checkpoint")
 	}
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&existing); err != nil {
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='rri_finalized'`, args[0]).Scan(&finalized); err != nil {
 		return err
 	}
-	if existing != 0 {
+	if finalized != 0 {
 		return errors.New("RRI finalization already exists; reset planning before revising it")
+	}
+	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&revision); err != nil {
+		return err
 	}
 	itemType, title, description := fmt.Sprint(item["type"]), fmt.Sprint(item["title"]), fmt.Sprint(item["description"])
 	subjectColumn := "task_id"
@@ -805,7 +808,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		}
 	}
 	artifactID, contentHash := "wia-"+shortID(), hashJSON(payload.Report)
-	if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?, 'rri',1,?,?)`, artifactID, args[0], payload.Report, contentHash); err != nil {
+	if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?, 'rri',?,?,?)`, artifactID, args[0], revision, payload.Report, contentHash); err != nil {
 		return err
 	}
 	inherit := 0

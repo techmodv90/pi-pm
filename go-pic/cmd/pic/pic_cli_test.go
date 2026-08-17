@@ -848,6 +848,7 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	id := item["id"].(string)
 	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
 	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
 	payload, _ := json.Marshal(map[string]any{
 		"requirements": []map[string]any{{"key": "REQ-BASELINE", "priority": "tier1", "title": "Clean baseline", "description": "Verify one revision", "acceptanceCriteria": "Given release work is complete\nWhen verification starts\nThen the exact clean commit is recorded"}},
 		"decisions":    []map[string]any{{"key": "release_baseline", "answer": "Require a clean committed baseline"}},
@@ -869,8 +870,12 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	}
 	defer db.Close()
 	var artifacts int
-	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, id).Scan(&artifacts); err != nil || artifacts != 1 {
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, id).Scan(&artifacts); err != nil || artifacts != 2 {
 		t.Fatalf("RRI artifacts=%d err=%v", artifacts, err)
+	}
+	var canonicalRevision int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&canonicalRevision); err != nil || canonicalRevision != 1 {
+		t.Fatalf("canonical RRI revision 2 count=%d err=%v", canonicalRevision, err)
 	}
 	runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload))
 	var requirementCount, decisionCount int
