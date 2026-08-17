@@ -873,6 +873,10 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, id).Scan(&artifacts); err != nil || artifacts != 2 {
 		t.Fatalf("RRI artifacts=%d err=%v", artifacts, err)
 	}
+	var legacyEpic int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM epics WHERE id=?`, id).Scan(&legacyEpic); err != nil || legacyEpic != 1 {
+		t.Fatalf("legacy Epic projection count=%d err=%v", legacyEpic, err)
+	}
 	var canonicalRevision int
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&canonicalRevision); err != nil || canonicalRevision != 1 {
 		t.Fatalf("canonical RRI revision 2 count=%d err=%v", canonicalRevision, err)

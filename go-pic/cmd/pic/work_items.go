@@ -799,7 +799,20 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 	subjectColumn := "task_id"
 	if itemType == "epic" || itemType == "feature" {
 		subjectColumn = "epic_id"
-		if _, err = tx.Exec(`INSERT OR IGNORE INTO epics(id,title,description,status) VALUES(?,?,?,?)`, args[0], title, description, item["status"]); err != nil {
+		var projectColumn int
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('epics') WHERE name='project_id'`).Scan(&projectColumn); err != nil {
+			return err
+		}
+		if projectColumn == 1 {
+			var projectID string
+			if err = tx.QueryRow(`SELECT id FROM projects ORDER BY datetime(created_at),id LIMIT 1`).Scan(&projectID); err != nil {
+				return fmt.Errorf("RRI legacy Epic projection requires a project: %w", err)
+			}
+			_, err = tx.Exec(`INSERT OR IGNORE INTO epics(id,project_id,title,description,status) VALUES(?,?,?,?,?)`, args[0], projectID, title, description, item["status"])
+		} else {
+			_, err = tx.Exec(`INSERT OR IGNORE INTO epics(id,title,description,status) VALUES(?,?,?,?)`, args[0], title, description, item["status"])
+		}
+		if err != nil {
 			return err
 		}
 	} else {
