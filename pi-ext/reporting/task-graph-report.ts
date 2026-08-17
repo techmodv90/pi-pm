@@ -63,13 +63,69 @@ export function parseTaskGraphReportJson(content: string): TaskGraphReport {
 }
 
 const cell = (value: unknown) => String(value ?? "").replaceAll("|", "\\|").replaceAll("\n", " ");
+const mermaid = (value: unknown) => String(value ?? "").replaceAll('"', "'").replaceAll("\n", " ");
+
+function graphPresentation(report: TaskGraphReport): { diagram: string[]; waves: TaskGraphNode[][]; criticalPath: TaskGraphNode[] } {
+  const byKey = new Map(report.nodes.map((node) => [node.key, node]));
+  const index = new Map(report.nodes.map((node, position) => [node.key, `N${position}`]));
+  const levels = new Map<string, number>();
+  const durations = new Map<string, number>();
+  const predecessors = new Map<string, string>();
+  const visit = (node: TaskGraphNode): number => {
+    if (levels.has(node.key)) return levels.get(node.key)!;
+    let level = 0;
+    let duration = node.estimated_effort_minutes;
+    for (const dependency of node.depends_on) {
+      const dependencyNode = byKey.get(dependency)!;
+      level = Math.max(level, visit(dependencyNode) + 1);
+      const candidate = durations.get(dependency)! + node.estimated_effort_minutes;
+      if (candidate > duration) {
+        duration = candidate;
+        predecessors.set(node.key, dependency);
+      }
+    }
+    levels.set(node.key, level);
+    durations.set(node.key, duration);
+    return level;
+  };
+  report.nodes.forEach(visit);
+  const waves: TaskGraphNode[][] = [];
+  for (const node of report.nodes) (waves[levels.get(node.key)!] ||= []).push(node);
+  const terminal = report.nodes.reduce((longest, node) => durations.get(node.key)! > durations.get(longest.key)! ? node : longest);
+  const criticalPath: TaskGraphNode[] = [];
+  for (let key: string | undefined = terminal.key; key; key = predecessors.get(key)) criticalPath.unshift(byKey.get(key)!);
+  return {
+    diagram: [
+      "```mermaid",
+      "flowchart TD",
+      ...report.nodes.map((node) => `    ${index.get(node.key)}["${mermaid(node.key)}: ${mermaid(node.name)}"]`),
+      ...report.nodes.flatMap((node) => node.depends_on.map((dependency) => `    ${index.get(dependency)} --> ${index.get(node.key)}`)),
+      "```",
+    ],
+    waves,
+    criticalPath,
+  };
+}
 
 export function renderTaskGraphReportMarkdown(report: TaskGraphReport): string {
   const minutes = report.nodes.reduce((sum, node) => sum + node.estimated_effort_minutes, 0);
+  const graph = graphPresentation(report);
   return [
     "# TASK GRAPH",
     "",
     `Version ${report.version} | ${cell(report.execution_policy)} | ${report.nodes.length} nodes | ${minutes} estimated minutes`,
+    "",
+    "## DEPENDENCY DIAGRAM",
+    "",
+    ...graph.diagram,
+    "",
+    "## PARALLEL EXECUTION WAVES",
+    "",
+    "| Wave | Parallel Work | Starts When |",
+    "|------|---------------|-------------|",
+    ...graph.waves.map((wave, index) => `| ${index + 1} | ${wave.map((node) => `\`${cell(node.key)}\`: ${cell(node.name)}`).join("; ")} | ${index === 0 ? "Immediately" : `Wave ${index} completes`} |`),
+    "",
+    `**Critical path:** ${graph.criticalPath.map((node) => `\`${cell(node.key)}\``).join(" -> ")}`,
     "",
     "| Key | Type | Task | Module | Requirements | Depends On | Effort |",
     "|-----|------|------|--------|--------------|------------|--------|",

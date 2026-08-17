@@ -10,6 +10,9 @@ const graph = { version: 3, execution_policy: "parallel_allowed", nodes: [
 test("Task Graph validates dependencies and renders owner review content", () => {
   const markdown = renderTaskGraphReportMarkdown(parseTaskGraphReportJson(JSON.stringify(graph)));
   assert.match(markdown, /# TASK GRAPH/);
+  assert.match(markdown, /```mermaid[\s\S]*N0 --> N1[\s\S]*```/);
+  assert.match(markdown, /PARALLEL EXECUTION WAVES/);
+  assert.match(markdown, /Critical path:.*`T01` -> `VERIFY`/);
   assert.match(markdown, /VERIFY.*T01/);
   assert.match(markdown, /src\/core\.ts/);
 });
