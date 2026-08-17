@@ -6,7 +6,7 @@ export const WORKFLOW_PRIMER = `
 Use the task_manager tool as the canonical interface for tracked work.
 - Discover unblocked parallel work with action "ready_work_items".
 - Inspect with \`show_work_item\` and \`work_item_workflow_status\`. Follow the persisted \`next_stage\`; do not skip gates.
-- Planning order is scan -> rri -> vision -> blueprint -> contracts -> task_graph -> materialize -> authorize -> implement. Save each planning result with \`save_work_item_artifact\`. Call \`approve_work_item_artifact\` only after explicit owner approval.
+- Planning order is scan -> rri -> vision -> blueprint -> contracts -> task_graph -> materialize -> authorize -> implement. Task Planner owns Blueprint and Task Graph only; the Contractor owns Vision and Contract drafting. Save each planning result with \`save_work_item_artifact\`. Call \`approve_work_item_artifact\` only after explicit owner approval.
 
 Requirements and TIPs:
 - Requirements returned by \`show_work_item\` are authoritative. Task-graph \`requirement_keys\` must reference and cover them; never invent requirement IDs.

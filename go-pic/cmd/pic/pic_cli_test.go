@@ -135,12 +135,17 @@ const validVisionArtifact = `{"project_name":"Task System","nature":{"interface"
 
 const validBlueprintArtifact = `{"project_info":{"project":"Task System","nature":"CLI + pipeline + team","date":"2026-08-17"},"goals":{"primary_goal":"Reliable workflow","target_audience":"Owner and agents","key_message":"Every transition is durable"},"architecture":{"building_blocks":["CLI","Scheduler","SQLite"],"connection_summary":"CLI drives scheduler state","data_flow":"Inputs -> CLI -> SQLite"},"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing","reuse":"go-pic"}],"file_structure":[{"path":"go-pic/cmd/pic","purpose":"Workflow backend"}],"rri_requirements_matrix":[{"blueprint_section":"Lifecycle","requirements":["REQ-001"],"source_questions":["Q1"]}],"task_decomposition_preview":{"estimated_tasks":1,"tasks":[{"tip_id":"TIP-001","title":"Lifecycle","goal":"Enforce transitions"}],"estimated_effort_minutes":30}}`
 
+const validContractArtifact = `{"project_name":"Task System","deliverables":[{"item":"Lifecycle","details":"Persisted workflow","requirements":["REQ-001"]}],"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing stack"}],"task_graph_summary":{"tip_count":8,"estimated_minutes":240},"not_included":["Legacy migration"]}`
+
 func planningArtifactContent(stage string) string {
 	if stage == "vision" {
 		return validVisionArtifact
 	}
 	if stage == "blueprint" {
 		return validBlueprintArtifact
+	}
+	if stage == "contracts" {
+		return validContractArtifact
 	}
 	return stage
 }
@@ -589,6 +594,9 @@ func TestWorkItemArtifactGateSequence(t *testing.T) {
 		}
 		if stage == "blueprint" {
 			content = validBlueprintArtifact
+		}
+		if stage == "contracts" {
+			content = validContractArtifact
 		}
 		if stage == "task_graph" {
 			content = `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]}]}`

@@ -14,7 +14,7 @@ export function assertTaskManagerActionAllowed(agentName: string | undefined, ac
     const stages: Record<string, ReadonlySet<string>> = {
       "task-scout": new Set(["scan"]),
       "task-rri": new Set(["rri"]),
-      "task-planner": new Set(["blueprint", "contracts", "task_graph"]),
+      "task-planner": new Set(["blueprint", "task_graph"]),
     };
     if (!stage || !stages[agentName]?.has(stage)) throw new Error(`${agentName} cannot save ${stage || "unspecified"} artifacts`);
   }

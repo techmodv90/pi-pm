@@ -838,7 +838,8 @@ function saveWorkerReport(run: PipelineRun, cwd: string, taskReport: { status: "
 }
 
 function stageAgent(stage: PipelineStage): string {
-  return ({ scan: "task-scout", rri: "task-rri", vision: "task-planner", blueprint: "task-planner", contracts: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
+  if (stage === "contracts") throw new Error("Contract drafting is Contractor-owned");
+  return ({ scan: "task-scout", rri: "task-rri", vision: "task-planner", blueprint: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
 }
 
 export function buildWorkerCorrectionContext(data: any): string {
@@ -873,16 +874,16 @@ export function assertReviewFixChangedPatch(run: PipelineRun, patch: Buffer): vo
   if (patchHash === run.candidate_patch_hash) throw new Error("review-fix produced the unchanged rejected candidate patch");
 }
 
-function blueprintHandoff(raw: any, taskId: string): string {
+function planningHandoff(stage: "blueprint" | "task_graph", raw: any, taskId: string): string {
   const payload = JSON.stringify(raw).replaceAll("]]>", "]] ]>");
-  return `<blueprint_handoff schema_version="1" work_item_id="${taskId}"><approved_context><![CDATA[${payload}]]></approved_context></blueprint_handoff>`;
+  return `<${stage}_handoff schema_version="1" work_item_id="${taskId}"><approved_context><![CDATA[${payload}]]></approved_context></${stage}_handoff>`;
 }
 
 function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string {
   const raw = execPic(["show", taskId], cwd);
   if (raw.work_item) {
     if (stage === "scan") return buildWorkItemScanPrompt(raw.work_item, raw.project);
-    if (isPlanningStage(stage)) return `${stage === "blueprint" ? blueprintHandoff(raw, taskId) + "\n" : ""}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, raw.work_item)}`;
+    if (isPlanningStage(stage)) return `${stage === "blueprint" || stage === "task_graph" ? planningHandoff(stage, raw, taskId) + "\n" : ""}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, raw.work_item)}`;
     const data = normalizePipelineData(raw);
     const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
     if (!activePack) throw new Error(`Work Item ${taskId} requires one active instruction pack`);
@@ -1073,6 +1074,7 @@ export class PipelineScheduler {
             return;
           }
           if (planningStages.includes(workflow.next_stage)) {
+            if (workflow.next_stage === "contracts") throw new Error("Contract drafting is Contractor-owned; use work_on_work_item to return the Contract prompt to the main session");
             assertCleanGit(ctx.cwd);
             await this.launchGroup(workflow.next_stage, [rootTaskId]);
             return;

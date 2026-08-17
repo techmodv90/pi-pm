@@ -67,7 +67,7 @@ test("Scan artifact saves render the owner-facing Markdown result", () => {
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   assert.match(source, /import \{ Markdown, Text \} from "@mariozechner\/pi-tui"/);
   assert.match(source, /import \{ getMarkdownTheme \} from "@mariozechner\/pi-coding-agent"/);
-  assert.match(source, /details: scanPresentation \? \{ \.\.\.result, scanPresentation \} : blueprintPresentation \? \{ \.\.\.result, blueprintPresentation \} : visionPresentation \? \{ \.\.\.result, visionPresentation \} : rriPresentation \? \{ \.\.\.result, rriPresentation \} : result/);
+  assert.match(source, /details: scanPresentation \? \{ \.\.\.result, scanPresentation \} : contractPresentation \? \{ \.\.\.result, contractPresentation \} : blueprintPresentation \? \{ \.\.\.result, blueprintPresentation \} : visionPresentation \? \{ \.\.\.result, visionPresentation \} : rriPresentation \? \{ \.\.\.result, rriPresentation \} : result/);
   assert.match(source, /`Scan artifact \$\{result\.id\} saved\. Ask the owner to approve or reject this Scan Report\.`/);
   assert.doesNotMatch(source, /terminate: Boolean\(scanPresentation\)/);
   assert.match(source, /if \(details\?\.scanPresentation\) return new Markdown\(details\.scanPresentation, 0, 0, getMarkdownTheme\(\)\)/);
@@ -225,10 +225,11 @@ test("planning pipeline stages use planning agents and prompts without an active
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   assert.match(source, /rri: "task-rri"/);
   assert.match(source, /vision: "task-planner"/);
-  assert.match(source, /contracts: "task-planner"/);
+  assert.doesNotMatch(source, /contracts: "task-planner"/);
+  assert.match(source, /stage === "contracts".*Contract drafting is Contractor-owned/);
   assert.match(source, /task_graph: "task-planner"/);
   assert.match(source, /if \(isPlanningStage\(stage\)\) return/);
-  assert.match(source, /blueprintHandoff\(raw, taskId\)/);
+  assert.match(source, /planningHandoff\(stage, raw, taskId\)/);
   assert.match(source, /if \(planningStages\.includes\(workflow\.next_stage\)\)[\s\S]+launchGroup\(workflow\.next_stage, \[rootTaskId\]\)/);
 });
 

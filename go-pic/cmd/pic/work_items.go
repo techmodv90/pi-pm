@@ -949,8 +949,8 @@ func workItemArtifactSave(db *sql.DB, args []string) error {
 			return err
 		}
 	}
-	if args[1] == "blueprint" {
-		if err := validateBlueprintReport(args[2]); err != nil {
+	if args[1] == "contracts" {
+		if err := validateContractReport(args[2]); err != nil {
 			return err
 		}
 	}
@@ -993,7 +993,7 @@ func validateChildArtifactStage(agent, stage string) error {
 	allowed := map[string][]string{
 		"task-scout":   {"scan"},
 		"task-rri":     {"rri"},
-		"task-planner": {"blueprint", "contracts", "task_graph"},
+		"task-planner": {"blueprint", "task_graph"},
 	}
 	if contains(allowed[agent], stage) {
 		return nil
@@ -1080,6 +1080,32 @@ func validateVisionReport(content string) error {
 	}
 	if report.NonUIDirection != nil && (report.NonUIDirection.Type == "" || len(report.NonUIDirection.Decisions) == 0) {
 		return errors.New("Vision non-UI direction is incomplete")
+	}
+	return nil
+}
+
+func validateContractReport(content string) error {
+	var report struct {
+		ProjectName  string `json:"project_name"`
+		Deliverables []struct {
+			Item         string   `json:"item"`
+			Details      string   `json:"details"`
+			Requirements []string `json:"requirements"`
+		} `json:"deliverables"`
+		TechStack []any `json:"tech_stack"`
+		Summary   struct {
+			Tips    int `json:"tip_count"`
+			Minutes int `json:"estimated_minutes"`
+		} `json:"task_graph_summary"`
+		NotIncluded []string `json:"not_included"`
+	}
+	if err := json.Unmarshal([]byte(content), &report); err != nil || report.ProjectName == "" || len(report.Deliverables) == 0 || len(report.TechStack) == 0 || len(report.NotIncluded) == 0 || report.Summary.Tips < 1 || report.Summary.Minutes < 1 {
+		return errors.New("Contract artifact must contain valid project, deliverables, stack, task graph summary, and exclusions")
+	}
+	for _, item := range report.Deliverables {
+		if item.Item == "" || item.Details == "" || len(item.Requirements) == 0 {
+			return errors.New("Contract deliverables are incomplete")
+		}
 	}
 	return nil
 }

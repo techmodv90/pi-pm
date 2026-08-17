@@ -1,0 +1,6 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { parseContractReportJson, renderContractReportMarkdown } from "./contract-report.ts";
+const contract = { project_name: "Task System", deliverables: [{ item: "Lifecycle", details: "Persisted workflow", requirements: ["REQ-001"] }], tech_stack: [{ layer: "Backend", choice: "Go", rationale: "Existing stack" }], task_graph_summary: { tip_count: 8, estimated_minutes: 240 }, not_included: ["Unapproved legacy migration"] };
+test("Contract renders confirmation checkpoint", () => { const markdown = renderContractReportMarkdown(parseContractReportJson(JSON.stringify(contract))); assert.match(markdown, /# CONTRACT:/); assert.match(markdown, /Reply `CONFIRM` to receive Task Graph/); });
+test("Contract rejects missing deliverable requirements", () => { assert.throws(() => parseContractReportJson(JSON.stringify({ ...contract, deliverables: [{ item: "x", details: "y", requirements: [] }] })), /deliverables/); });

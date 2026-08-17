@@ -12,6 +12,7 @@ import { prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts"
 import { parseRriReportJson, renderRriReportMarkdown } from "../reporting/rri-report.ts";
 import { parseVisionReportJson, renderVisionReportMarkdown } from "../reporting/vision-report.ts";
 import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../reporting/blueprint-report.ts";
+import { parseContractReportJson, renderContractReportMarkdown } from "../reporting/contract-report.ts";
 import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
 
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -89,6 +90,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         let rriPresentation = "";
         let visionPresentation = "";
         let blueprintPresentation = "";
+        let contractPresentation = "";
 
         try { assertTaskManagerActionAllowed(process.env.PI_TASK_AGENT_NAME, params.action as string, params.stage); }
         catch (error) {
@@ -210,6 +212,10 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
               try { blueprintPresentation = renderBlueprintReportMarkdown(parseBlueprintReportJson(params.content)); }
               catch (error) { const message = error instanceof Error ? error.message : String(error); return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true }; }
             }
+            if (params.stage === "contracts") {
+              try { contractPresentation = renderContractReportMarkdown(parseContractReportJson(params.content)); }
+              catch (error) { const message = error instanceof Error ? error.message : String(error); return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true }; }
+            }
             args = ["work-item", "artifact-save", params.id, params.stage, scanContent || params.content];
             break;
           }
@@ -309,9 +315,9 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             const data = execPic(["show", params.id], ctx.cwd);
             if (!data.work_item) return { content: [{ type: "text", text: `Error: ${data.error || "Work Item not found"}` }], details: {}, isError: true };
             const status = execPic(["work-item", "workflow-status", params.id], ctx.cwd);
-            if (!status.error && status.next_stage === "vision") {
+            if (!status.error && (status.next_stage === "vision" || status.next_stage === "contracts")) {
               const prompt = buildWorkItemContinuePrompt(status, data.work_item);
-              return { content: [{ type: "text", text: prompt }], details: { action: "work_on_work_item", workItem: data.work_item, next_stage: "vision", contractor: true } };
+              return { content: [{ type: "text", text: prompt }], details: { action: "work_on_work_item", workItem: data.work_item, next_stage: status.next_stage, contractor: true } };
             }
             try {
               const result = await pipelineScheduler.start(params.id, ctx);
@@ -364,9 +370,9 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             result.orchestration = await pipelineScheduler.start(result.id, ctx);
           }
         }
-        if (!result.error && params.action === "approve_work_item_artifact" && params.stage === "vision" && params.id) {
+        if (!result.error && params.action === "approve_work_item_artifact" && ["vision", "contracts"].includes(params.stage || "") && params.id) {
           const workflow = execPic(["work-item", "workflow-status", params.id], ctx.cwd);
-          if (workflow.next_stage === "blueprint") result.orchestration = await pipelineScheduler.start(params.id, ctx);
+          if ((params.stage === "vision" && workflow.next_stage === "blueprint") || (params.stage === "contracts" && workflow.next_stage === "task_graph")) result.orchestration = await pipelineScheduler.start(params.id, ctx);
         }
         if (!result.error && params.action === "verify_work_item" && params.verification_status === "passed") {
           const child = execPic(["show", params.id!], ctx.cwd);
@@ -397,6 +403,8 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         }
         let text = result.error
           ? `Error: ${result.error}`
+          : contractPresentation
+            ? contractPresentation
           : blueprintPresentation
             ? blueprintPresentation
           : visionPresentation
@@ -418,7 +426,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
   
         return {
           content: [{ type: "text", text }],
-          details: scanPresentation ? { ...result, scanPresentation } : blueprintPresentation ? { ...result, blueprintPresentation } : visionPresentation ? { ...result, visionPresentation } : rriPresentation ? { ...result, rriPresentation } : result,
+          details: scanPresentation ? { ...result, scanPresentation } : contractPresentation ? { ...result, contractPresentation } : blueprintPresentation ? { ...result, blueprintPresentation } : visionPresentation ? { ...result, visionPresentation } : rriPresentation ? { ...result, rriPresentation } : result,
         };
       },
   
@@ -436,6 +444,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           return new Text(theme.fg("error", details?.error || "Error"), 0, 0);
         }
         if (details?.rriPresentation) return new Markdown(details.rriPresentation, 0, 0, getMarkdownTheme());
+        if (details?.contractPresentation) return new Markdown(details.contractPresentation, 0, 0, getMarkdownTheme());
         if (details?.blueprintPresentation) return new Markdown(details.blueprintPresentation, 0, 0, getMarkdownTheme());
         if (details?.visionPresentation) return new Markdown(details.visionPresentation, 0, 0, getMarkdownTheme());
         if (details?.scanPresentation) return new Markdown(details.scanPresentation, 0, 0, getMarkdownTheme());
