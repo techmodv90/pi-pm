@@ -244,7 +244,8 @@ test("RRI persona handoffs require strict assigned-persona XML", () => {
   assert.equal(parseRriPersonaResult(valid, "QA / Tester").persona, "QA / Tester");
   assert.throws(() => parseRriPersonaResult(valid, "Developer"), /expected Developer/);
   assert.throws(() => parseRriPersonaResult('<rri_persona persona="QA / Tester"></rri_persona>', "QA / Tester"), /auto_answered/);
-  assert.throws(() => parseRriPersonaResult("```xml\n" + valid + "\n```", "QA / Tester"), /one XML document/);
+  assert.equal(parseRriPersonaResult("```xml\n" + valid + "\n```", "QA / Tester").persona, "QA / Tester");
+  assert.equal(parseRriPersonaResult("Here is the result:\n" + valid, "QA / Tester").persona, "QA / Tester");
   assert.throws(() => parseRriPersonaResult(valid.replace("Tests?", "Tests & CI?"), "QA / Tester"), /invalid XML/);
 });
 

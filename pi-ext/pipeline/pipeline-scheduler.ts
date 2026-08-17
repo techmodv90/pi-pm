@@ -578,8 +578,16 @@ function startFullScanFanout(spec: any, agent: any): SubagentHandle {
 
 const RRI_PERSONAS = ["End User", "Business Analyst", "QA / Tester", "Developer"] as const;
 
+function normalizeRriPersonaXml(output: string): string {
+  const trimmed = output.trim().replace(/^```(?:xml)?\s*([\s\S]*?)\s*```$/, "$1").trim();
+  const start = trimmed.indexOf("<rri_persona");
+  const end = trimmed.lastIndexOf("</rri_persona>");
+  if (start >= 0 && end > start) return trimmed.slice(start, end + "</rri_persona>".length).trim();
+  return trimmed;
+}
+
 export function parseRriPersonaResult(output: string, expectedPersona: string): any {
-  const trimmed = output.trim();
+  const trimmed = normalizeRriPersonaXml(output);
   if (!trimmed.startsWith("<rri_persona") || !trimmed.endsWith("</rri_persona>")) throw new Error(`RRI persona ${expectedPersona} must return one XML document`);
   const start = trimmed.indexOf("<rri_persona");
   const end = trimmed.lastIndexOf("</rri_persona>");
