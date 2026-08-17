@@ -242,6 +242,14 @@ test("completed planning stages pause for main-agent synthesis instead of launch
   assert.match(resumeBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
 });
 
+test("Blueprint completion publishes the canonical saved artifact presentation", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /run\.stage === "blueprint" \? this\.blueprintPresentation\(run\.task_id\) : output/);
+  assert.match(source, /filter\(\(entry: any\) => entry\.stage === "blueprint"\)/);
+  assert.match(source, /renderBlueprintReportMarkdown\(parseBlueprintReportJson\(artifact\.content\)\)/);
+  assert.match(source, /completed without a persisted Blueprint artifact/);
+});
+
 test("RRI persona handoffs require strict assigned-persona XML", () => {
   const valid = `<rri_persona persona="QA / Tester"><auto_answered><answer confidence="high"><question>Tests?</question><answer>Go and Node</answer><source>AGENTS.md</source></answer></auto_answered><candidate_questions><question priority="P1" classification="SMART-ASKED" mode="GUIDED"><question>Why this matters: failures block delivery. Which recovery outcome is required?</question><suggested_answer>Retry</suggested_answer><suggested_answer>Stop</suggested_answer><reason>Recovery policy is unspecified</reason><requirement_area>reliability</requirement_area></question></candidate_questions><not_applicable></not_applicable></rri_persona>`;
   assert.equal(parseRriPersonaResult(valid, "QA / Tester").persona, "QA / Tester");
