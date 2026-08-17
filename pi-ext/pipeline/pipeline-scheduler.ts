@@ -1098,7 +1098,12 @@ export class PipelineScheduler {
     }
     const launches = [];
     for (const [stage, ids] of stages) launches.push(await this.launchGroup(stage, ids));
-    return { taskIds, launches };
+    const pipelineRunIds = launches.flatMap((launch: any) => launch.pipelineRunIds || []);
+    const subagentRunIds = launches.flatMap((launch: any) => launch.subagentRunIds || []);
+    if (!pipelineRunIds.length || !subagentRunIds.length) {
+      return { taskIds, launches, blocked: "Ready Work Items were found, but no persisted pipeline or subagent runs were created." };
+    }
+    return { taskIds, launches, pipelineRunIds, subagentRunIds };
   }
 
   dryRun(rootTaskId: string, ctx: ExtensionContext): any {

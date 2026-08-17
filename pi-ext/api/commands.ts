@@ -104,7 +104,8 @@ export function registerTaskCommand(pi: ExtensionAPI, pipelineScheduler: Pipelin
         if (!parts[1]) {
           try {
             const result = await pipelineScheduler.startReadyBatch(ctx);
-            ctx.ui.notify(result.blocked || `Started ${result.taskIds?.length || 0} ready Work Items.`, result.blocked ? "warning" : "info");
+            const started = result.pipelineRunIds?.length || 0;
+            ctx.ui.notify(result.blocked || `Started ${started} ready Work Items.`, result.blocked ? "warning" : "info");
           } catch (error) {
             ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
           }
