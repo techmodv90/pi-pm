@@ -746,7 +746,65 @@ type rriFinalization struct {
 		Key    string `json:"key"`
 		Answer string `json:"answer"`
 	} `json:"decisions"`
-	Report string `json:"report"`
+	Report rriReport `json:"report"`
+}
+
+type rriReport struct {
+	ProjectName        string              `json:"project_name"`
+	Generated          string              `json:"generated"`
+	RequirementsMatrix []rriRequirementRow `json:"requirements_matrix"`
+	AutoAnswered       []rriAutoAnswerRow  `json:"auto_answered"`
+	DecisionsLog       []rriDecisionRow    `json:"decisions_log"`
+	OpenQuestions      []rriOpenQuestion   `json:"open_questions"`
+}
+type rriRequirementRow struct {
+	ReqID       string `json:"req_id"`
+	Requirement string `json:"requirement"`
+	Source      string `json:"source"`
+	Priority    string `json:"priority"`
+	Persona     string `json:"persona"`
+}
+type rriAutoAnswerRow struct {
+	Topic      string `json:"topic"`
+	Details    string `json:"details"`
+	Resolution string `json:"resolution"`
+}
+type rriDecisionRow struct {
+	Decision          string `json:"decision"`
+	OptionsConsidered string `json:"options_considered"`
+	Chosen            string `json:"chosen"`
+	Rationale         string `json:"rationale"`
+}
+type rriOpenQuestion struct {
+	ID       string `json:"id"`
+	Question string `json:"question"`
+}
+
+func validateRriReport(report rriReport) error {
+	if strings.TrimSpace(report.ProjectName) == "" || strings.TrimSpace(report.Generated) == "" {
+		return errors.New("RRI report requires project_name and generated")
+	}
+	for _, row := range report.RequirementsMatrix {
+		if row.ReqID == "" || row.Requirement == "" || row.Source == "" || row.Priority == "" || row.Persona == "" {
+			return errors.New("RRI requirements_matrix rows require req_id, requirement, source, priority, and persona")
+		}
+	}
+	for _, row := range report.AutoAnswered {
+		if row.Topic == "" || row.Details == "" || row.Resolution == "" {
+			return errors.New("RRI auto_answered rows require topic, details, and resolution")
+		}
+	}
+	for _, row := range report.DecisionsLog {
+		if row.Decision == "" || row.OptionsConsidered == "" || row.Chosen == "" || row.Rationale == "" {
+			return errors.New("RRI decisions_log rows require decision, options_considered, chosen, and rationale")
+		}
+	}
+	for _, row := range report.OpenQuestions {
+		if row.ID == "" || row.Question == "" {
+			return errors.New("RRI open_questions rows require id and question")
+		}
+	}
+	return nil
 }
 
 func workItemRriFinalize(db *sql.DB, args []string) error {
@@ -754,7 +812,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		return errors.New("usage: pic work-item rri-finalize <id> <payload-json>")
 	}
 	var payload rriFinalization
-	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 || len(payload.Decisions) == 0 || strings.TrimSpace(payload.Report) == "" {
+	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 || len(payload.Decisions) == 0 || validateRriReport(payload.Report) != nil {
 		return errors.New("RRI finalization requires valid JSON with requirements, decisions, and report")
 	}
 	seenRequirements, seenDecisions := map[string]bool{}, map[string]bool{}
@@ -790,7 +848,32 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		return err
 	}
 	if finalized != 0 {
-		return errors.New("RRI finalization already exists; reset planning before revising it")
+		var approved int
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&approved); err != nil {
+			return err
+		}
+		if approved != 0 {
+			return errors.New("RRI finalization already approved; reset planning before revising it")
+		}
+		reportJSON, marshalErr := json.Marshal(payload.Report)
+		if marshalErr != nil {
+			return marshalErr
+		}
+		artifactID, contentHash := "wia-"+shortID(), hashJSON(string(reportJSON))
+		if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&revision); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?, 'rri',?,?,?)`, artifactID, args[0], revision, string(reportJSON), contentHash); err != nil {
+			return err
+		}
+		if err = addEvent(tx, args[0], "rri_report_revised", "contractor", "Owner-confirmed RRI report revised before approval", map[string]any{"artifact_id": artifactID}); err != nil {
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, map[string]any{"artifact_id": artifactID, "work_item_id": args[0], "stage": "rri", "content_hash": contentHash, "requirements": 0, "decisions": 0, "revised": true})
+		return nil
 	}
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&revision); err != nil {
 		return err
@@ -820,8 +903,12 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 			return err
 		}
 	}
-	artifactID, contentHash := "wia-"+shortID(), hashJSON(payload.Report)
-	if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?, 'rri',?,?,?)`, artifactID, args[0], revision, payload.Report, contentHash); err != nil {
+	reportJSON, err := json.Marshal(payload.Report)
+	if err != nil {
+		return err
+	}
+	artifactID, contentHash := "wia-"+shortID(), hashJSON(string(reportJSON))
+	if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?, 'rri',?,?,?)`, artifactID, args[0], revision, string(reportJSON), contentHash); err != nil {
 		return err
 	}
 	inherit := 0

@@ -852,7 +852,7 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{
 		"requirements": []map[string]any{{"key": "REQ-BASELINE", "priority": "tier1", "title": "Clean baseline", "description": "Verify one revision", "acceptanceCriteria": "Given release work is complete\nWhen verification starts\nThen the exact clean commit is recorded"}},
 		"decisions":    []map[string]any{{"key": "release_baseline", "answer": "Require a clean committed baseline"}},
-		"report":       "# RRI REPORT\n\nOwner confirmed.",
+		"report":       map[string]any{"project_name": "RRI finalization", "generated": "2026-08-17", "requirements_matrix": []map[string]string{{"req_id": "REQ-BASELINE", "requirement": "Clean baseline", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}}, "auto_answered": []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Release baseline", "options_considered": "Clean vs dirty", "chosen": "Clean", "rationale": "Reproducibility"}}, "open_questions": []map[string]string{}},
 	})
 	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload)))
 	if finalized["requirements"] != float64(1) || finalized["decisions"] != float64(1) || finalized["artifact_id"] == "" {
@@ -881,6 +881,11 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&canonicalRevision); err != nil || canonicalRevision != 1 {
 		t.Fatalf("canonical RRI revision 2 count=%d err=%v", canonicalRevision, err)
 	}
+	revised := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload)))
+	if revised["revised"] != true {
+		t.Fatalf("expected pre-approval RRI revision, got %#v", revised)
+	}
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", revised["artifact_id"].(string), "approved")
 	runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload))
 	var requirementCount, decisionCount int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM requirements WHERE epic_id=?`, id).Scan(&requirementCount)

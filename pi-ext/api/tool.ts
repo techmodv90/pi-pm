@@ -9,6 +9,7 @@ import { buildReviewContext } from "../tasking/settings";
 import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemDebugPrompt } from "../tasking/work-item-prompts";
 import { assertTaskManagerActionAllowed } from "../tasking/agent-capabilities.ts";
 import { prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
+import { parseRriReportJson, renderRriReportMarkdown } from "../reporting/rri-report.ts";
 import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
 
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -83,6 +84,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         let args: string[] = [];
         let scanPresentation = "";
         let scanContent = "";
+        let rriPresentation = "";
 
         try { assertTaskManagerActionAllowed(process.env.PI_TASK_AGENT_NAME, params.action as string, params.stage); }
         catch (error) {
@@ -118,10 +120,18 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           }
           case "save_rri_interview": {
             if (!params.id || !params.content) return { content: [{ type: "text", text: "Error: id and final RRI JSON content required" }], details: {}, isError: true };
+            try {
+              const payload = JSON.parse(params.content) as { report?: unknown };
+              if (!payload.report) throw new Error("RRI finalization requires a structured report object");
+              rriPresentation = renderRriReportMarkdown(parseRriReportJson(JSON.stringify(payload.report)));
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
+            }
             const result = execPic(["work-item", "rri-finalize", params.id, params.content], ctx.cwd);
             if (result.error) return { content: [{ type: "text", text: `Error: ${result.error}` }], details: result, isError: true };
             pipelineScheduler.finalizeHandoffs(params.id, "rri");
-            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
+            return { content: [{ type: "text", text: rriPresentation }], details: { ...result, rriPresentation } };
           }
           case "create_work_item": {
             if (!params.work_item_type || !params.title) return { content: [{ type: "text", text: "Error: work_item_type and title required" }], details: {}, isError: true };
@@ -366,6 +376,8 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         }
         let text = result.error
           ? `Error: ${result.error}`
+          : rriPresentation
+            ? rriPresentation
           : scanPresentation
             ? `Scan artifact ${result.id} saved. Ask the owner to approve or reject this Scan Report.`
             : JSON.stringify(result, null, 2);
@@ -381,7 +393,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
   
         return {
           content: [{ type: "text", text }],
-          details: scanPresentation ? { ...result, scanPresentation } : result,
+          details: scanPresentation ? { ...result, scanPresentation } : rriPresentation ? { ...result, rriPresentation } : result,
         };
       },
   
@@ -398,6 +410,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         if (details?.error) {
           return new Text(theme.fg("error", details?.error || "Error"), 0, 0);
         }
+        if (details?.rriPresentation) return new Markdown(details.rriPresentation, 0, 0, getMarkdownTheme());
         if (details?.scanPresentation) return new Markdown(details.scanPresentation, 0, 0, getMarkdownTheme());
         if (details?.id) {
           return new Text(theme.fg("success", `${details.id}`), 0, 0);

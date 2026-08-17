@@ -67,7 +67,7 @@ test("Scan artifact saves render the owner-facing Markdown result", () => {
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   assert.match(source, /import \{ Markdown, Text \} from "@mariozechner\/pi-tui"/);
   assert.match(source, /import \{ getMarkdownTheme \} from "@mariozechner\/pi-coding-agent"/);
-  assert.match(source, /details: scanPresentation \? \{ \.\.\.result, scanPresentation \} : result/);
+  assert.match(source, /details: scanPresentation \? \{ \.\.\.result, scanPresentation \} : rriPresentation \? \{ \.\.\.result, rriPresentation \} : result/);
   assert.match(source, /`Scan artifact \$\{result\.id\} saved\. Ask the owner to approve or reject this Scan Report\.`/);
   assert.doesNotMatch(source, /terminate: Boolean\(scanPresentation\)/);
   assert.match(source, /if \(details\?\.scanPresentation\) return new Markdown\(details\.scanPresentation, 0, 0, getMarkdownTheme\(\)\)/);
@@ -92,6 +92,22 @@ test("RRI interview checkpoints use disposable drafts and clean up after termina
   assert.match(source, /reset_work_item_planning[\s\S]{0,700}deleteRriDraft/);
   assert.match(source, /update_work_item_status[\s\S]{0,700}deleteRriDraft/);
 });
+
+test("RRI reports persist structured JSON and render the owner-facing matrix", async () => {
+  const { parseRriReportJson, renderRriReportMarkdown } = await import("../reporting/rri-report.ts");
+  const markdown = renderRriReportMarkdown(parseRriReportJson(JSON.stringify({
+    project_name: "Project", generated: "2026-08-17",
+    requirements_matrix: [{ req_id: "REQ-001", requirement: "Clean baseline", source: "RRI Q#1", priority: "P0", persona: "Developer" }],
+    auto_answered: [], decisions_log: [], open_questions: [],
+  })));
+  assert.match(markdown, /# RRI REPORT: Project/);
+  assert.match(markdown, /## REQUIREMENTS MATRIX/);
+  assert.match(markdown, /REQ-001.*Clean baseline/);
+  assert.match(markdown, /## AUTO-ANSWERED \(from Scan\)/);
+  assert.match(markdown, /## DECISIONS LOG/);
+  assert.match(markdown, /## OPEN QUESTIONS/);
+});
+
 
 test("child task-manager capabilities are restricted by the launched agent role", () => {
   const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
