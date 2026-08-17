@@ -949,6 +949,11 @@ func workItemArtifactSave(db *sql.DB, args []string) error {
 			return err
 		}
 	}
+	if args[1] == "blueprint" {
+		if err := validateBlueprintReport(args[2]); err != nil {
+			return err
+		}
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -1075,6 +1080,32 @@ func validateVisionReport(content string) error {
 	}
 	if report.NonUIDirection != nil && (report.NonUIDirection.Type == "" || len(report.NonUIDirection.Decisions) == 0) {
 		return errors.New("Vision non-UI direction is incomplete")
+	}
+	return nil
+}
+
+func validateBlueprintReport(content string) error {
+	var report struct {
+		ProjectInfo   map[string]any `json:"project_info"`
+		Goals         map[string]any `json:"goals"`
+		Architecture  map[string]any `json:"architecture"`
+		TechStack     []any          `json:"tech_stack"`
+		FileStructure []any          `json:"file_structure"`
+		Requirements  []any          `json:"rri_requirements_matrix"`
+		Preview       struct {
+			EstimatedTasks  int   `json:"estimated_tasks"`
+			Tasks           []any `json:"tasks"`
+			EstimatedEffort int   `json:"estimated_effort_minutes"`
+		} `json:"task_decomposition_preview"`
+	}
+	if err := json.Unmarshal([]byte(content), &report); err != nil {
+		return errors.New("Blueprint artifact must be valid JSON")
+	}
+	if len(report.ProjectInfo) == 0 || len(report.Goals) == 0 || len(report.Architecture) == 0 {
+		return errors.New("Blueprint requires project_info, goals, and architecture")
+	}
+	if len(report.TechStack) == 0 || len(report.FileStructure) == 0 || len(report.Requirements) == 0 || len(report.Preview.Tasks) == 0 || report.Preview.EstimatedTasks != len(report.Preview.Tasks) || report.Preview.EstimatedEffort < 1 {
+		return errors.New("Blueprint requires complete stack, file structure, RRI matrix, and task preview")
 	}
 	return nil
 }

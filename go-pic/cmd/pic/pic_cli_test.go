@@ -133,9 +133,14 @@ func initProject(t *testing.T, bin string) (root string, home string) {
 
 const validVisionArtifact = `{"project_name":"Task System","nature":{"interface":"CLI","lifecycle":"Pipeline","scale":"Team"},"dimensions":{"interface":"CLI","data_flow":"SQLite","user_model":"Owner and agents","lifecycle":"Pipeline","scale":"Team","state":"Persistent DB"},"architecture":{"entry_points":["pic"],"core_modules":["scheduler"],"data_layer":["SQLite"],"integration_points":[],"cross_cutting_concerns":["audit"],"connection_summary":"Commands drive persisted stages."},"user_flows":[{"user_type":"Owner","entry":"CLI","core_loop":"Review","edge_cases":["Rejection"],"exit":"Approval"}],"non_ui_direction":{"type":"CLI","decisions":["JSON output"]},"tech_stack":[{"layer":"Runtime","choice":"Go","rationale":"Existing","reuse":"Current"}]}`
 
+const validBlueprintArtifact = `{"project_info":{"project":"Task System","nature":"CLI + pipeline + team","date":"2026-08-17"},"goals":{"primary_goal":"Reliable workflow","target_audience":"Owner and agents","key_message":"Every transition is durable"},"architecture":{"building_blocks":["CLI","Scheduler","SQLite"],"connection_summary":"CLI drives scheduler state","data_flow":"Inputs -> CLI -> SQLite"},"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing","reuse":"go-pic"}],"file_structure":[{"path":"go-pic/cmd/pic","purpose":"Workflow backend"}],"rri_requirements_matrix":[{"blueprint_section":"Lifecycle","requirements":["REQ-001"],"source_questions":["Q1"]}],"task_decomposition_preview":{"estimated_tasks":1,"tasks":[{"tip_id":"TIP-001","title":"Lifecycle","goal":"Enforce transitions"}],"estimated_effort_minutes":30}}`
+
 func planningArtifactContent(stage string) string {
 	if stage == "vision" {
 		return validVisionArtifact
+	}
+	if stage == "blueprint" {
+		return validBlueprintArtifact
 	}
 	return stage
 }
@@ -582,6 +587,9 @@ func TestWorkItemArtifactGateSequence(t *testing.T) {
 		if stage == "vision" {
 			content = validVisionArtifact
 		}
+		if stage == "blueprint" {
+			content = validBlueprintArtifact
+		}
 		if stage == "task_graph" {
 			content = `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]}]}`
 		}
@@ -608,7 +616,8 @@ func TestWorkItemArtifactGateSequence(t *testing.T) {
 		}
 	}
 
-	blueprint2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", "revised blueprint"))
+	revisedBlueprint := strings.Replace(validBlueprintArtifact, "Reliable workflow", "Revised reliable workflow", 1)
+	blueprint2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", revisedBlueprint))
 	if blueprint2["revision"] != float64(2) {
 		t.Fatalf("revised blueprint = %#v", blueprint2)
 	}

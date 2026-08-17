@@ -11,6 +11,7 @@ import { assertTaskManagerActionAllowed } from "../tasking/agent-capabilities.ts
 import { prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
 import { parseRriReportJson, renderRriReportMarkdown } from "../reporting/rri-report.ts";
 import { parseVisionReportJson, renderVisionReportMarkdown } from "../reporting/vision-report.ts";
+import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../reporting/blueprint-report.ts";
 import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
 
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -87,6 +88,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         let scanContent = "";
         let rriPresentation = "";
         let visionPresentation = "";
+        let blueprintPresentation = "";
 
         try { assertTaskManagerActionAllowed(process.env.PI_TASK_AGENT_NAME, params.action as string, params.stage); }
         catch (error) {
@@ -202,6 +204,10 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             }
             if (params.stage === "vision") {
               try { visionPresentation = renderVisionReportMarkdown(parseVisionReportJson(params.content)); }
+              catch (error) { const message = error instanceof Error ? error.message : String(error); return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true }; }
+            }
+            if (params.stage === "blueprint") {
+              try { blueprintPresentation = renderBlueprintReportMarkdown(parseBlueprintReportJson(params.content)); }
               catch (error) { const message = error instanceof Error ? error.message : String(error); return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true }; }
             }
             args = ["work-item", "artifact-save", params.id, params.stage, scanContent || params.content];
@@ -358,6 +364,10 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             result.orchestration = await pipelineScheduler.start(result.id, ctx);
           }
         }
+        if (!result.error && params.action === "approve_work_item_artifact" && params.stage === "vision" && params.id) {
+          const workflow = execPic(["work-item", "workflow-status", params.id], ctx.cwd);
+          if (workflow.next_stage === "blueprint") result.orchestration = await pipelineScheduler.start(params.id, ctx);
+        }
         if (!result.error && params.action === "verify_work_item" && params.verification_status === "passed") {
           const child = execPic(["show", params.id!], ctx.cwd);
           const parentID = child.work_item?.parent_id;
@@ -387,6 +397,8 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         }
         let text = result.error
           ? `Error: ${result.error}`
+          : blueprintPresentation
+            ? blueprintPresentation
           : visionPresentation
             ? visionPresentation
           : rriPresentation
@@ -406,7 +418,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
   
         return {
           content: [{ type: "text", text }],
-          details: scanPresentation ? { ...result, scanPresentation } : visionPresentation ? { ...result, visionPresentation } : rriPresentation ? { ...result, rriPresentation } : result,
+          details: scanPresentation ? { ...result, scanPresentation } : blueprintPresentation ? { ...result, blueprintPresentation } : visionPresentation ? { ...result, visionPresentation } : rriPresentation ? { ...result, rriPresentation } : result,
         };
       },
   
@@ -424,6 +436,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           return new Text(theme.fg("error", details?.error || "Error"), 0, 0);
         }
         if (details?.rriPresentation) return new Markdown(details.rriPresentation, 0, 0, getMarkdownTheme());
+        if (details?.blueprintPresentation) return new Markdown(details.blueprintPresentation, 0, 0, getMarkdownTheme());
         if (details?.visionPresentation) return new Markdown(details.visionPresentation, 0, 0, getMarkdownTheme());
         if (details?.scanPresentation) return new Markdown(details.scanPresentation, 0, 0, getMarkdownTheme());
         if (details?.id) {

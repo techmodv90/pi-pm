@@ -873,11 +873,16 @@ export function assertReviewFixChangedPatch(run: PipelineRun, patch: Buffer): vo
   if (patchHash === run.candidate_patch_hash) throw new Error("review-fix produced the unchanged rejected candidate patch");
 }
 
+function blueprintHandoff(raw: any, taskId: string): string {
+  const payload = JSON.stringify(raw).replaceAll("]]>", "]] ]>");
+  return `<blueprint_handoff schema_version="1" work_item_id="${taskId}"><approved_context><![CDATA[${payload}]]></approved_context></blueprint_handoff>`;
+}
+
 function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string {
   const raw = execPic(["show", taskId], cwd);
   if (raw.work_item) {
     if (stage === "scan") return buildWorkItemScanPrompt(raw.work_item, raw.project);
-    if (isPlanningStage(stage)) return buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, raw.work_item);
+    if (isPlanningStage(stage)) return `${stage === "blueprint" ? blueprintHandoff(raw, taskId) + "\n" : ""}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, raw.work_item)}`;
     const data = normalizePipelineData(raw);
     const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
     if (!activePack) throw new Error(`Work Item ${taskId} requires one active instruction pack`);
