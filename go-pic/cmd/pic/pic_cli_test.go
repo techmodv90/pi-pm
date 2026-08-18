@@ -1492,6 +1492,7 @@ func TestPipelineReviewRetryAcceptsReopenedCandidate(t *testing.T) {
 	activateTestWorkItemTIP(t, dbPath, id)
 	worker := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
 	runSQLite(t, dbPath, `UPDATE pipeline_runs SET status='completed',artifact_saved_at=datetime('now'),integrated_patch_path='candidate.patch',integrated_patch_hash='patch-hash',completed_at=datetime('now') WHERE id='`+worker["id"].(string)+`';`)
+	runPic(t, bin, root, home, "work-item", "status", id, "open")
 
 	review := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "review"))
 	if review["candidate_run_id"] != worker["id"] || review["candidate_patch_hash"] != "patch-hash" {
