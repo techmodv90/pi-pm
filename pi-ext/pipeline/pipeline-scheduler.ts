@@ -269,7 +269,7 @@ export function canonicalReadyLeafIds(root: any, load: (id: string) => any): str
       return;
     }
     if (["task", "bug", "chore"].includes(item.type)) {
-      if (data.ready) ready.push(item.id);
+      if (data.ready || (data.execution_state?.review_status === "failed" && data.execution_state?.next_stage === "implement")) ready.push(item.id);
     }
   };
   visit(root);
@@ -1179,7 +1179,14 @@ export class PipelineScheduler {
     assertCleanGit(ctx.cwd);
     await this.reconcile();
     const ready = execPic(["work-item", "ready"], ctx.cwd);
-    const taskIds = Array.isArray(ready) ? ready.map((item: any) => item.id).filter((id: any): id is string => typeof id === "string") : [];
+    const listed = execPic(["work-item", "list"], ctx.cwd);
+    const taskIds = [...new Set([
+      ...(Array.isArray(ready) ? ready.map((item: any) => item.id) : []),
+      ...(Array.isArray(listed) ? listed.filter((item: any) => ["task", "bug", "chore"].includes(item.type) && item.status === "in_progress").map((item: any) => item.id).filter((id: any) => {
+        const state = execPic(["work-item", "workflow-status", id], ctx.cwd);
+        return state.review_status === "failed" && state.next_stage === "implement";
+      }) : []),
+    ])].filter((id: any): id is string => typeof id === "string");
     if (!taskIds.length) return { launches: [], blocked: "No authorized dependency-ready executable Work Items" };
     const stages = new Map<PipelineStage, string[]>();
     for (const taskId of taskIds) {

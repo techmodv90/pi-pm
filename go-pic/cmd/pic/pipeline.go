@@ -176,7 +176,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 			return fmt.Errorf("Work Item %s requires exactly one active instruction pack", taskID)
 		}
 		eligibility := workItemReadySQL
-		if stage == "review" {
+		if stage == "review" || (stage == "worker" && opts["review-fix"] == "1") {
 			eligibility = `wi.type IN ('task','bug','chore') AND wi.status IN ('open','in_progress') AND wi.deferred=0 AND wi.claimed_at='' AND NOT EXISTS (
 				SELECT 1 FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='blocks' AND blocker.status!='done'
 			) AND NOT EXISTS (
