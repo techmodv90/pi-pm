@@ -1499,25 +1499,58 @@ func workItemAggregateVerify(db *sql.DB, args []string) error {
 		return err
 	}
 	correctiveBugID := ""
+	approvalRequired := 0
 	if args[1] != "passed" {
-		correctiveBugID = "wi-" + shortID()
-		if _, err = tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority) VALUES(?,'bug',?,?,?,'high')`, correctiveBugID, args[0], "Correct aggregate verification failure", args[2]); err != nil {
+		// Ambiguous retry after an atomic result already linked a Bug returns the
+		// existing linked Bug instead of creating a duplicate. Dedup on a stable
+		// identity (the aggregate's unresolved corrective Bug for the same
+		// work_item_id and status) because the freshly-random report id can never
+		// match across invocations.
+		existing := ""
+		err = tx.QueryRow(`SELECT c.bug_work_item_id,c.owner_approval_required
+			FROM work_item_corrective_bugs c
+			JOIN work_item_verification_reports r ON r.id=c.verification_report_id
+			JOIN work_items b ON b.id=c.bug_work_item_id
+			WHERE r.work_item_id=? AND r.status=? AND b.status NOT IN ('done','cancelled')
+			ORDER BY c.created_at DESC LIMIT 1`, args[0], args[1]).Scan(&existing, &approvalRequired)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return err
 		}
-		if _, err = tx.Exec(`INSERT INTO tasks(id,title,status,priority,origin) VALUES(?,?, 'open','high','materialized')`, correctiveBugID, "Correct aggregate verification failure"); err != nil {
-			return fmt.Errorf("create corrective task projection: %w", err)
-		}
-		requirementID := "req-" + shortID()
-		requirementKey := "CORRECTIVE-" + strings.ToUpper(strings.TrimPrefix(id, "wivr-"))
-		acceptance := "Given aggregate verification report " + id + " is not passed\nWhen the corrective work is implemented and verified\nThen the aggregate verification failure is resolved"
-		if _, err = tx.Exec(`INSERT INTO requirements(id,task_id,requirement_key,title,description,acceptance_criteria,priority,source) VALUES(?,?,?,?,?,?,'tier1',?)`, requirementID, correctiveBugID, requirementKey, "Resolve aggregate verification failure", args[2], acceptance, id); err != nil {
-			return fmt.Errorf("create corrective requirement: %w", err)
-		}
-		if _, err = tx.Exec(`INSERT INTO work_item_corrective_bugs(verification_report_id,bug_work_item_id) VALUES(?,?)`, id, correctiveBugID); err != nil {
-			return fmt.Errorf("link corrective bug: %w", err)
-		}
-		if _, err = tx.Exec(`INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES(?,?,'related',?)`, "wir-"+shortID(), args[0], correctiveBugID); err != nil {
-			return fmt.Errorf("relate corrective bug: %w", err)
+		if err == nil {
+			correctiveBugID = existing
+		} else {
+			correctiveBugID = "wi-" + shortID()
+			if _, err = tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority) VALUES(?,'bug',?,?,?,'high')`, correctiveBugID, args[0], "Correct aggregate verification failure", args[2]); err != nil {
+				return err
+			}
+			if _, err = tx.Exec(`INSERT INTO tasks(id,title,status,priority,origin) VALUES(?,?, 'open','high','materialized')`, correctiveBugID, "Correct aggregate verification failure"); err != nil {
+				return fmt.Errorf("create corrective task projection: %w", err)
+			}
+			requirementID := "req-" + shortID()
+			requirementKey := "CORRECTIVE-" + strings.ToUpper(strings.TrimPrefix(id, "wivr-"))
+			acceptance := "Given aggregate verification report " + id + " is not passed\nWhen the corrective work is implemented and verified\nThen the aggregate verification failure is resolved"
+			if _, err = tx.Exec(`INSERT INTO requirements(id,task_id,requirement_key,title,description,acceptance_criteria,priority,source) VALUES(?,?,?,?,?,?,'tier1',?)`, requirementID, correctiveBugID, requirementKey, "Resolve aggregate verification failure", args[2], acceptance, id); err != nil {
+				return fmt.Errorf("create corrective requirement: %w", err)
+			}
+			// Partial and blocked outcomes need no owner approval before scheduling;
+			// failed outcomes retain evidence and wait for an explicit owner decision.
+			approvalRequired = 0
+			if args[1] == "failed" {
+				approvalRequired = 1
+			}
+			if _, err = tx.Exec(`INSERT INTO work_item_corrective_bugs(verification_report_id,bug_work_item_id,owner_approval_required) VALUES(?,?,?)`, id, correctiveBugID, approvalRequired); err != nil {
+				return fmt.Errorf("link corrective bug: %w", err)
+			}
+			if _, err = tx.Exec(`INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES(?,?,'related',?)`, "wir-"+shortID(), args[0], correctiveBugID); err != nil {
+				return fmt.Errorf("relate corrective bug: %w", err)
+			}
+			eventType, eventSummary := "corrective_scheduled", "Corrective Bug scheduled automatically (owner notified)"
+			if args[1] == "failed" {
+				eventType, eventSummary = "corrective_owner_decision_pending", "Corrective Bug awaits explicit owner decision"
+			}
+			if err = addEvent(tx, args[0], eventType, opts["actor-role"], eventSummary, map[string]any{"verification_report_id": id, "corrective_bug_id": correctiveBugID, "status": args[1], "owner_approval_required": approvalRequired, "summary": args[2]}); err != nil {
+				return fmt.Errorf("record corrective owner notification: %w", err)
+			}
 		}
 	}
 	if args[1] == "passed" {
@@ -1575,7 +1608,7 @@ func workItemAggregateVerify(db *sql.DB, args []string) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"id": id, "work_item_id": args[0], "checkpoint_id": checkpointID, "status": args[1], "summary": args[2], "corrective_bug_id": correctiveBugID})
+	writeJSON(os.Stdout, map[string]any{"id": id, "work_item_id": args[0], "checkpoint_id": checkpointID, "status": args[1], "summary": args[2], "corrective_bug_id": correctiveBugID, "owner_approval_required": approvalRequired})
 	return nil
 }
 
