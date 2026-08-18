@@ -456,8 +456,15 @@ export function recoverReviewedPatch(patch: string, cwd: string, commitMessage: 
   const unrelated = [...dirtyFiles].filter((file) => !candidateFiles.has(file));
   if (unrelated.length) throw new Error(`integration recovery found unrelated repository changes: ${unrelated.join(", ")}`);
   if (!dirtyFiles.size) {
-    assertCommitMatchesReviewedPatch(patch, cwd, commitMessage, "HEAD^", "HEAD");
-    return true;
+    const commits = execFileSync("git", ["log", "--format=%H", "--fixed-strings", `--grep=${commitMessage}`, "HEAD"], { cwd, encoding: "utf8" }).trim().split("\n").filter(Boolean);
+    for (const commit of commits) {
+      const parent = execFileSync("git", ["rev-parse", `${commit}^`], { cwd, encoding: "utf8" }).trim();
+      try {
+        assertCommitMatchesReviewedPatch(patch, cwd, commitMessage, parent, commit);
+        return true;
+      } catch {}
+    }
+    throw new Error("existing HEAD is not the reviewed integration commit");
   }
   execGitIndexWrite(["add", "-A", "--", ...candidateFiles], cwd);
   assertIndexMatchesReviewedPatch(patch, cwd);
