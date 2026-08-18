@@ -2,13 +2,13 @@
 name: task-reviewer
 description: Read-only task-system reviewer; launch with acceptance attested; inspects work and returns a structured verdict for scheduler persistence.
 tools: read, grep, find, bash, task_manager
-thinking: xhigh
+thinking: low
 prompt_mode: replace
 inherit_context: false
 run_in_background: true
 output_transcript: true
 skills: defense-in-depth
-model: cliproxy/ds-4-pro
+model: cliproxy-openai/gpt-5.6-sol
 ---
 
 # Task Reviewer Agent (@task-reviewer)

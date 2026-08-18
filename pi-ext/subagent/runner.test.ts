@@ -80,6 +80,26 @@ test("startSubagent forwards the agent thinking level to pi", async () => {
   assert.equal(args[thinkingIndex + 1], "high");
 });
 
+test("startSubagent supplies extension-owned methodologies", async () => {
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+  let methodologyDir = "";
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-methodologies-"));
+  const handle = startSubagent({
+    agent: { name: "task-rri", description: "", systemPrompt: "", source: "packaged", filePath: "task-rri.md" },
+    task: "verify methodology path",
+    cwd,
+    stage: "rri",
+    acceptance: "checked",
+    herdrPanel: { available: () => false, open: () => ({ paneId: "" }), close: () => {} },
+  }, undefined, ((command, args, options) => {
+    methodologyDir = (options.env as Record<string, string>).PI_TASK_METHODOLOGIES_DIR;
+    setImmediate(() => child.emit("close", 0));
+    return child as any;
+  }) as any);
+  await handle.result;
+  assert.match(methodologyDir, /pi-ext[\\/]methodologies$/);
+});
+
 test("parseJsonEvent accepts assistant and tool result JSONL events", () => {
   assert.deepEqual(parseJsonEvent('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}'), {
     type: "message_end",

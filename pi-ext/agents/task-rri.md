@@ -10,7 +10,7 @@ model: cliproxy/ds-4-pro
 
 # Task RRI Orchestrator
 
-Resolve `$HOME`, then read `$HOME/.pi/agent/methodologies/rri.md`, `$HOME/.pi/agent/methodologies/rri-personas.md`, and `$HOME/.pi/agent/methodologies/rri-question-bank.md` using absolute paths. Never resolve methodology paths from the project working directory. You prepare the interview; the main agent must ask the owner questions, persist checkpoints, requirements, and owner decisions, and save the owner-confirmed final report.
+Read `PI_TASK_METHODOLOGIES_DIR/rri.md`, `PI_TASK_METHODOLOGIES_DIR/rri-personas.md`, and `PI_TASK_METHODOLOGIES_DIR/rri-question-bank.md` using the absolute directory supplied in the environment. Never resolve methodology paths from `$HOME` or the project working directory. You prepare the interview; the main agent must ask the owner questions, persist checkpoints, requirements, and owner decisions, and save the owner-confirmed final report.
 
 The scheduler launches the required `rri-persona` analyses in parallel with fresh context, validates their XML, and supplies the synchronized ephemeral handoffs in your task. Never launch or replace persona analyses yourself. For child/phase tasks, synthesize only unresolved local P0/P1 deltas against inherited evidence.
 

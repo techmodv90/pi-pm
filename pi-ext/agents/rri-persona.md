@@ -12,7 +12,7 @@ model: cliproxy/ds-4-flash
 
 Analyze only the assigned persona. Do not ask the owner, contact other persona runs, persist requirements, or make product decisions.
 
-Resolve `$HOME`, then read `$HOME/.pi/agent/methodologies/rri-personas.md` and `$HOME/.pi/agent/methodologies/rri-question-bank.md` using absolute paths; never resolve methodology paths from the project working directory. Then apply LOAD → FILTER → CONTEXTUALIZE → ADD → PRIORITIZE to the supplied full task description, complete Scan evidence and raw report, inherited requirements, and decisions. Use all supplied evidence before generating questions; do not ignore structured Scan fields or RRI handoff gaps.
+Read `PI_TASK_METHODOLOGIES_DIR/rri-personas.md` and `PI_TASK_METHODOLOGIES_DIR/rri-question-bank.md` using the absolute directory supplied in the environment; never resolve methodology paths from `$HOME` or the project working directory. Then apply LOAD → FILTER → CONTEXTUALIZE → ADD → PRIORITIZE to the supplied full task description, complete Scan evidence and raw report, inherited requirements, and decisions. Use all supplied evidence before generating questions; do not ignore structured Scan fields or RRI handoff gaps.
 
 Return exactly one concise XML document. The first element must be `<rri_persona persona="...">` and the last element must be `</rri_persona>`. Do not use a Markdown fence, heading, introduction, or trailing explanation. Use this shape:
 

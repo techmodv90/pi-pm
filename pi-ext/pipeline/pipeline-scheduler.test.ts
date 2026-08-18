@@ -360,6 +360,8 @@ test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () 
   assert.match(personaInstructions, /Every `<candidate_questions><question>` entry must include all three attributes/);
   assert.doesNotMatch(personaInstructions, /```json/);
   assert.match(readFileSync(new URL("../agents/task-rri.md", import.meta.url), "utf8"), /prepared interview[\s\S]+root must be.*<rri_synthesis>/s);
+  assert.doesNotMatch(readFileSync(new URL("../agents/task-rri.md", import.meta.url), "utf8"), /\.pi\/agent\/methodologies/);
+  assert.doesNotMatch(readFileSync(new URL("../agents/rri-persona.md", import.meta.url), "utf8"), /\.pi\/agent\/methodologies/);
   assert.match(fanout, /RRI synthesis failed validation:[\s\S]+only retry/);
 });
 

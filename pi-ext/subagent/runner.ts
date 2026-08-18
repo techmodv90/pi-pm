@@ -17,6 +17,7 @@ export const MANAGED_WORKER_DEADLINE_MS = 30 * 60 * 1000;
 const WORKER_WRAP_UP_MS = 5_000;
 const execFileAsync = promisify(execFile);
 const defaultHerdrPanel = createHerdrPanel();
+const methodologiesDirectory = fileURLToPath(new URL("../methodologies", import.meta.url));
 
 const emptyUsage = (): SubagentUsage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 });
 const READ_ONLY_AGENTS = new Set(["task-scout", "task-reviewer", "task-rri", "rri-persona"]);
@@ -262,7 +263,7 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
     try {
       child = spawnProcess(invocation.command, invocation.args, {
         cwd: runCwd,
-        env: { ...process.env, PI_TASK_PARENT_RUN_ID: id, PI_TASK_AGENT_NAME: spec.agent.name, ...(result.workspace ? { PI_TASK_WORKTREE: result.workspace.assignedWorktree } : {}) },
+        env: { ...process.env, PI_TASK_PARENT_RUN_ID: id, PI_TASK_AGENT_NAME: spec.agent.name, PI_TASK_METHODOLOGIES_DIR: methodologiesDirectory, ...(result.workspace ? { PI_TASK_WORKTREE: result.workspace.assignedWorktree } : {}) },
         shell: false,
         stdio: ["ignore", "pipe", "pipe"],
         detached: true,
