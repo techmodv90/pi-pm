@@ -35,6 +35,7 @@ function loadAgentsFromDir(dir: string, source: AgentSource): AgentConfig[] {
         tools: frontmatter.tools?.split(",").map((tool) => tool.trim()).filter(Boolean),
         skills: frontmatter.skills?.split(",").map((skill) => skill.trim()).filter(Boolean),
         model: frontmatter.model,
+        thinking: frontmatter.thinking,
         systemPrompt: body,
         source,
         filePath,

@@ -3,8 +3,8 @@ import test from "node:test";
 import { discoverAgents, parseFrontmatter, packagedAgentsDir } from "./agents.ts";
 
 test("parseFrontmatter separates agent metadata from its prompt", () => {
-  const parsed = parseFrontmatter("---\nname: worker\ntools: read, bash\n---\nDo work.");
-  assert.deepEqual(parsed.frontmatter, { name: "worker", tools: "read, bash" });
+  const parsed = parseFrontmatter("---\nname: worker\ntools: read, bash\nthinking: high\n---\nDo work.");
+  assert.deepEqual(parsed.frontmatter, { name: "worker", tools: "read, bash", thinking: "high" });
   assert.equal(parsed.body, "Do work.");
 });
 

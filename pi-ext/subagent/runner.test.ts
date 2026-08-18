@@ -53,6 +53,33 @@ test("buildPiInvocation runs the installed pi command outside a node script", ()
   assert.deepEqual(buildPiInvocation(["--mode", "json"], "/$bunfs/root/pi"), { command: "pi", args: ["--mode", "json"] });
 });
 
+test("startSubagent forwards the agent thinking level to pi", async () => {
+  const child = Object.assign(new EventEmitter(), {
+    stdout: new EventEmitter(),
+    stderr: new EventEmitter(),
+    kill: () => true,
+  });
+  let args: string[] = [];
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-thinking-"));
+  const handle = startSubagent({
+    agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "task-worker.md", thinking: "high" },
+    task: "verify thinking",
+    cwd,
+    stage: "worker",
+    acceptance: "checked",
+    herdrPanel: { available: () => false, open: () => ({ paneId: "" }), close: () => {} },
+  }, undefined, ((command, childArgs) => {
+    assert.equal(command, process.execPath);
+    args = childArgs;
+    setImmediate(() => child.emit("close", 0));
+    return child as any;
+  }) as any);
+  await handle.result;
+  const thinkingIndex = args.indexOf("--thinking");
+  assert.ok(thinkingIndex >= 0);
+  assert.equal(args[thinkingIndex + 1], "high");
+});
+
 test("parseJsonEvent accepts assistant and tool result JSONL events", () => {
   assert.deepEqual(parseJsonEvent('{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}'), {
     type: "message_end",

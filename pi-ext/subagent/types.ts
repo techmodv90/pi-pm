@@ -6,6 +6,7 @@ export interface AgentConfig {
   tools?: string[];
   skills?: string[];
   model?: string;
+  thinking?: string;
   systemPrompt: string;
   source: AgentSource;
   filePath: string;

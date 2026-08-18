@@ -192,6 +192,7 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
   const skillDirectories = spec.skillDirectories ?? resolveSkillDirectories({ baselineSkills: spec.agent.skills || [], skillFamilies: spec.skillFamilies || [], cwd: spec.cwd });
   const args = ["--mode", "json", "-p", "--no-session", "-ne", "--extension", fileURLToPath(new URL("../index.ts", import.meta.url))];
   if (spec.agent.model) args.push("--model", spec.agent.model);
+  if (spec.agent.thinking) args.push("--thinking", spec.agent.thinking);
   if (spec.agent.tools?.length) args.push("--tools", spec.agent.tools.join(","));
   for (const directory of skillDirectories) args.push("--skill", directory);
   if (spec.agent.systemPrompt.trim()) args.push("--append-system-prompt", promptPath);
