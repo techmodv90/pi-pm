@@ -430,9 +430,22 @@ export function assertIndexMatchesReviewedPatch(patch: string, cwd: string): voi
 
 function assertCommitMatchesReviewedPatch(patch: string, cwd: string, commitMessage: string, parent: string, commit: string): void {
   const actualMessage = execFileSync("git", ["log", "-1", "--format=%s", commit], { cwd, encoding: "utf8" }).trim();
-  const committed = execFileSync("git", ["diff", "--binary", parent, commit, "--", "."], { cwd });
-  if (actualMessage !== commitMessage || !readFileSync(patch).equals(committed)) {
+  if (actualMessage !== commitMessage) {
     throw new Error("existing HEAD is not the reviewed integration commit");
+  }
+  const indexDir = mkdtempSync(join(tmpdir(), "task-system-review-index-"));
+  const indexPath = join(indexDir, "index");
+  try {
+    const env = { ...process.env, GIT_INDEX_FILE: indexPath };
+    execFileSync("git", ["read-tree", parent], { cwd, env });
+    execFileSync("git", ["apply", "--cached", "--3way", patch], { cwd, env, stdio: "pipe" });
+    const reviewedTree = execFileSync("git", ["write-tree"], { cwd, env, encoding: "utf8" }).trim();
+    const committedTree = execFileSync("git", ["rev-parse", `${commit}^{tree}`], { cwd, encoding: "utf8" }).trim();
+    if (reviewedTree !== committedTree) throw new Error("existing HEAD is not the reviewed integration commit");
+  } catch {
+    throw new Error("existing HEAD is not the reviewed integration commit");
+  } finally {
+    rmSync(indexDir, { recursive: true, force: true });
   }
 }
 
