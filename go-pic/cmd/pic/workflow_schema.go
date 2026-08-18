@@ -44,6 +44,7 @@ const workItemsTableSQL = `CREATE TABLE IF NOT EXISTS work_items (
 	claimed_by TEXT DEFAULT '',
 	review_status TEXT DEFAULT 'pending' CHECK(review_status IN ('pending','passed','failed')),
 	review_notes TEXT DEFAULT '',
+	planning_depth TEXT DEFAULT 'full' CHECK(planning_depth IN ('quick','standard','designed','full')),
 	created_at TEXT DEFAULT (datetime('now'))
 )`
 

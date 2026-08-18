@@ -14,7 +14,7 @@ import (
 var pipelineStages = []string{"scan", "rri", "vision", "blueprint", "contracts", "task_graph", "worker", "review", "autofix"}
 var pipelineTerminalStatuses = []string{"completed", "failed", "blocked", "cancelled"}
 
-const pipelineRunsTableSQL = `CREATE TABLE IF NOT EXISTS pipeline_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','vision','blueprint','contracts','task_graph','worker','review','autofix')), attempt INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'claimed' CHECK(status IN ('claimed','running','completed','failed','blocked','cancelled','expired')), lease_token TEXT NOT NULL, lease_expires_at TEXT NOT NULL, instruction_pack_id TEXT DEFAULT '', instruction_pack_version INTEGER DEFAULT 0, instruction_pack_hash TEXT DEFAULT '', effective_contract_snapshot_id TEXT DEFAULT '', effective_contract_snapshot_hash TEXT DEFAULT '', agent_model TEXT DEFAULT '', environment_fingerprint TEXT DEFAULT '', base_commit TEXT DEFAULT '', subagent_run_id TEXT DEFAULT '', child_index INTEGER DEFAULT 0, async_dir TEXT DEFAULT '', result_json TEXT DEFAULT '', error TEXT DEFAULT '', integrated_patch_path TEXT DEFAULT '', integrated_patch_hash TEXT DEFAULT '', integrated_at TEXT DEFAULT '', artifact_saved_at TEXT DEFAULT '', candidate_run_id TEXT DEFAULT '', candidate_patch_hash TEXT DEFAULT '', review_fix_cycle INTEGER DEFAULT 0, advanced_at TEXT DEFAULT '', migration_status TEXT DEFAULT 'legacy', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '', UNIQUE(task_id, stage, attempt))`
+const pipelineRunsTableSQL = `CREATE TABLE IF NOT EXISTS pipeline_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','vision','blueprint','contracts','task_graph','worker','review','autofix')), attempt INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'claimed' CHECK(status IN ('claimed','running','completed','failed','blocked','cancelled','expired')), lease_token TEXT NOT NULL, lease_expires_at TEXT NOT NULL, instruction_pack_id TEXT DEFAULT '', instruction_pack_version INTEGER DEFAULT 0, instruction_pack_hash TEXT DEFAULT '', effective_contract_snapshot_id TEXT DEFAULT '', effective_contract_snapshot_hash TEXT DEFAULT '', agent_model TEXT DEFAULT '', environment_fingerprint TEXT DEFAULT '', base_commit TEXT DEFAULT '', subagent_run_id TEXT DEFAULT '', child_index INTEGER DEFAULT 0, async_dir TEXT DEFAULT '', result_json TEXT DEFAULT '', error TEXT DEFAULT '', integrated_patch_path TEXT DEFAULT '', integrated_patch_hash TEXT DEFAULT '', integrated_at TEXT DEFAULT '', artifact_saved_at TEXT DEFAULT '', candidate_run_id TEXT DEFAULT '', candidate_patch_hash TEXT DEFAULT '', review_fix_cycle INTEGER DEFAULT 0, profile_version INTEGER DEFAULT 0, profile_hash TEXT DEFAULT '', advanced_at TEXT DEFAULT '', migration_status TEXT DEFAULT 'legacy', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '', UNIQUE(task_id, stage, attempt))`
 
 const workItemCompletionReportsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_completion_reports (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, pipeline_run_id TEXT NOT NULL UNIQUE REFERENCES pipeline_runs(id), instruction_pack_id TEXT NOT NULL, instruction_pack_version INTEGER NOT NULL, instruction_pack_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('done','partial','blocked')), summary TEXT DEFAULT '', report_markdown TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`
 
@@ -111,6 +111,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	}
 	packID, packVersion, packHash := "", 0, ""
 	candidateRunID, candidatePatchHash, reviewFixCycle := "", "", 0
+	profileVersion, profileHash := 0, ""
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -119,28 +120,45 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	if err = expirePipelineLeases(tx, taskID, stage); err != nil {
 		return err
 	}
-	if planningIndex := indexOfWorkItemStage(stage); planningIndex > 0 {
-		stages, stageErr := planningStagesForWorkItem(tx, taskID)
-		if stageErr != nil {
-			return stageErr
-		}
-		planningIndex = indexOfStage(stages, stage)
+	// Resolve the versioned Plan/Implement/QA profile exactly once at the first
+	// claim and bind this claim to the persisted profile version and hash.
+	lifecycle := lifecycleForStage(stage)
+	if lifecycle == "" {
+		return fmt.Errorf("invalid pipeline stage: %s", stage)
+	}
+	profiles, err := ensureWorkItemProfiles(tx, taskID)
+	if err != nil {
+		return fmt.Errorf("pipeline claim rejected: resolve lifecycle profiles: %w", err)
+	}
+	currentProfile := profiles[lifecycle]
+	if opts["profile-version"] != "" && opts["profile-version"] != strconv.Itoa(currentProfile.Version) {
+		return fmt.Errorf("pipeline claim rejected: stale %s profile version %s (current %d)", lifecycle, opts["profile-version"], currentProfile.Version)
+	}
+	if opts["profile-hash"] != "" && opts["profile-hash"] != currentProfile.ContentHash {
+		return errors.New("pipeline claim rejected: profile hash changed")
+	}
+	profileVersion, profileHash = currentProfile.Version, currentProfile.ContentHash
+	if lifecycle == "plan" {
+		planStages := currentProfile.Stages
+		planningIndex := indexOfStage(planStages, stage)
 		if planningIndex < 0 {
 			return fmt.Errorf("pipeline claim rejected: stage %s is not part of this Work Item planning profile", stage)
 		}
-		for index, requiredStage := range stages {
-			var approved int
-			if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_checkpoints WHERE work_item_id=? AND stage=?)`, taskID, requiredStage).Scan(&approved); err != nil {
-				return err
-			}
-			if index < planningIndex && approved == 0 {
-				return fmt.Errorf("pipeline claim rejected: current planning stage is %s", requiredStage)
-			}
-			if index == planningIndex {
-				if approved != 0 {
-					return fmt.Errorf("pipeline claim rejected: planning stage %s is already approved", stage)
+		if planningIndex > 0 {
+			for index, requiredStage := range planStages {
+				var approved int
+				if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_checkpoints WHERE work_item_id=? AND stage=?)`, taskID, requiredStage).Scan(&approved); err != nil {
+					return err
 				}
-				break
+				if index < planningIndex && approved == 0 {
+					return fmt.Errorf("pipeline claim rejected: current planning stage is %s", requiredStage)
+				}
+				if index == planningIndex {
+					if approved != 0 {
+						return fmt.Errorf("pipeline claim rejected: planning stage %s is already approved", stage)
+					}
+					break
+				}
 			}
 		}
 	}
@@ -296,7 +314,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 		}
 	}
 	id, token := "pr-"+shortID(), "lease-"+shortID()
-	if _, err = tx.Exec(`INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,agent_model,environment_fingerprint,base_commit,candidate_run_id,candidate_patch_hash,review_fix_cycle) VALUES(?,?,?,?, 'claimed', ?, datetime('now', ?),?,?,?,?,?,?,?,?,?)`, id, taskID, stage, attempt, token, fmt.Sprintf("+%d seconds", leaseSeconds), packID, packVersion, packHash, opts["agent-model"], opts["environment-fingerprint"], opts["base-commit"], candidateRunID, candidatePatchHash, reviewFixCycle); err != nil {
+	if _, err = tx.Exec(`INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,agent_model,environment_fingerprint,base_commit,candidate_run_id,candidate_patch_hash,review_fix_cycle,profile_version,profile_hash) VALUES(?,?,?,?, 'claimed', ?, datetime('now', ?),?,?,?,?,?,?,?,?,?,?,?)`, id, taskID, stage, attempt, token, fmt.Sprintf("+%d seconds", leaseSeconds), packID, packVersion, packHash, opts["agent-model"], opts["environment-fingerprint"], opts["base-commit"], candidateRunID, candidatePatchHash, reviewFixCycle, profileVersion, profileHash); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {

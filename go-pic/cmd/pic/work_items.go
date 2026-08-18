@@ -11,7 +11,7 @@ import (
 	"strings"
 )
 
-const workItemColumns = `id,type,parent_id,title,description,status,priority,deferred,claimed_at,claimed_by,review_status,review_notes,created_at`
+const workItemColumns = `id,type,parent_id,title,description,status,priority,deferred,claimed_at,claimed_by,review_status,review_notes,planning_depth,created_at`
 
 var workItemLabelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,254}$`)
 
@@ -327,7 +327,7 @@ func workItemList(db *sql.DB, args []string) ([]map[string]any, error) {
 
 func workItemCreate(db *sql.DB, args []string) error {
 	if len(args) < 2 || !contains([]string{"epic", "feature", "task", "bug", "chore", "gate"}, args[0]) {
-		return errors.New("usage: pic work-item create <epic|feature|task|bug|chore|gate> <title> [--parent <id>] [--description <text>] [--priority <level>] [--labels <a,b>]")
+		return errors.New("usage: pic work-item create <epic|feature|task|bug|chore|gate> <title> [--parent <id>] [--description <text>] [--priority <level>] [--labels <a,b>] [--planning-depth <level>]")
 	}
 	opts, err := parseOptions(args[2:])
 	if err != nil {
@@ -336,6 +336,10 @@ func workItemCreate(db *sql.DB, args []string) error {
 	priority := firstNonEmpty(opts["priority"], "medium")
 	if !contains([]string{"low", "medium", "high"}, priority) {
 		return fmt.Errorf("invalid priority: %s", priority)
+	}
+	planningDepth := firstNonEmpty(opts["planning-depth"], "full")
+	if !validPlanningDepth(planningDepth) {
+		return fmt.Errorf("invalid planning depth %s: must be quick|standard|designed|full", planningDepth)
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -355,7 +359,7 @@ func workItemCreate(db *sql.DB, args []string) error {
 	if opts["deferred"] == "1" || opts["deferred"] == "true" {
 		deferred = 1
 	}
-	if _, err = tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority,deferred) VALUES(?,?,NULLIF(?,''),?,?,?,?)`, id, args[0], parent, args[1], opts["description"], priority, deferred); err != nil {
+	if _, err = tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority,deferred,planning_depth) VALUES(?,?,NULLIF(?,''),?,?,?,?,?)`, id, args[0], parent, args[1], opts["description"], priority, deferred, planningDepth); err != nil {
 		return err
 	}
 	if parent != "" {
@@ -1378,14 +1382,8 @@ func workItemWorkflowStatus(db *sql.DB, args []string) error {
 }
 
 func planningStagesForWorkItem(db databaseQueryer, id string) ([]string, error) {
-	var kind, parentID string
-	if err := db.QueryRow(`SELECT type,COALESCE(parent_id,'') FROM work_items WHERE id=?`, id).Scan(&kind, &parentID); err != nil {
-		return nil, err
-	}
-	if contains([]string{"task", "bug", "chore"}, kind) && parentID == "" {
-		return []string{"scan", "rri", "task_graph"}, nil
-	}
-	return workItemStages, nil
+	stages, _, _, _, err := computePlanStagesForWorkItem(db, id)
+	return stages, err
 }
 
 func indexOfStage(stages []string, stage string) int {

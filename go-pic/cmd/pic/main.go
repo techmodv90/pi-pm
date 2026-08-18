@@ -456,6 +456,7 @@ func initDB(path string) error {
 		`CREATE TABLE IF NOT EXISTS session_activity (session_id TEXT PRIMARY KEY, task_id TEXT DEFAULT '', status TEXT DEFAULT 'idle' CHECK(status IN ('active','idle')), current_step_label TEXT DEFAULT '', last_skill TEXT DEFAULT '', updated_at TEXT DEFAULT (datetime('now')))`,
 		`CREATE TABLE IF NOT EXISTS task_phase_metadata (task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE, parent_task_id TEXT REFERENCES tasks(id) ON DELETE SET NULL, phase_number INTEGER NOT NULL, phase_title TEXT DEFAULT '', execution_policy TEXT DEFAULT 'strict_sequential' CHECK(execution_policy IN ('strict_sequential','partially_parallel','parallel_allowed','deferred_optional')), is_deferrable INTEGER DEFAULT 0, can_start_before_previous INTEGER DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))`,
 		pipelineRunsTableSQL,
+		workItemProfilesTableSQL,
 		`UPDATE work_items SET review_status='passed' WHERE status='done' AND type IN ('task','bug','chore') AND EXISTS (
 			SELECT 1 FROM work_item_owner_decisions decision
 			JOIN work_item_completion_reports completion ON completion.id=decision.completion_report_id AND completion.work_item_id=decision.work_item_id AND completion.status='done'
@@ -513,6 +514,7 @@ func initDB(path string) error {
 		`CREATE INDEX IF NOT EXISTS idx_task_dependencies_depends_on ON task_dependencies(depends_on_task_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_task_phase_metadata_parent ON task_phase_metadata(parent_task_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_pipeline_runs_task ON pipeline_runs(task_id, created_at DESC)`,
+		`CREATE INDEX IF NOT EXISTS idx_work_item_profiles_item ON work_item_profiles(work_item_id,profile_name)`,
 		`CREATE INDEX IF NOT EXISTS idx_pipeline_runs_pending ON pipeline_runs(advanced_at,status,task_id)`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_pipeline_runs_active_stage ON pipeline_runs(task_id, stage) WHERE status IN ('claimed','running')`,
 		`DROP TRIGGER IF EXISTS trg_instruction_pack_content_immutable`,
@@ -584,6 +586,9 @@ func initDB(path string) error {
 				{"pipeline_runs", "migration_status", "TEXT DEFAULT 'legacy'"},
 				{"work_items", "review_status", "TEXT DEFAULT 'pending'"},
 				{"work_items", "review_notes", "TEXT DEFAULT ''"},
+				{"work_items", "planning_depth", "TEXT DEFAULT 'full'"},
+				{"pipeline_runs", "profile_version", "INTEGER DEFAULT 0"},
+				{"pipeline_runs", "profile_hash", "TEXT DEFAULT ''"},
 			} {
 				if !hasColumn(db, migration.table, migration.column) {
 					if _, err := db.Exec(`ALTER TABLE ` + migration.table + ` ADD COLUMN ` + migration.column + ` ` + migration.definition); err != nil && !hasColumn(db, migration.table, migration.column) {
