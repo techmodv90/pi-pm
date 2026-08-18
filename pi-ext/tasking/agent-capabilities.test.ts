@@ -12,4 +12,26 @@ test("child agent task-manager capabilities exclude lifecycle authority", () => 
   assert.throws(() => assertTaskManagerActionAllowed("task-planner", "approve_work_item_artifact"), /cannot call/);
   assert.throws(() => assertTaskManagerActionAllowed("task-planner", "save_work_item_artifact", "vision"), /cannot save vision/);
   assert.throws(() => assertTaskManagerActionAllowed("task-planner", "save_work_item_artifact", "contracts"), /cannot save contracts/);
+  // task-worker and task-debugger are least-privilege observers; they may view
+  // read-only state but never mutate workflow lifecycle.
+  assert.doesNotThrow(() => assertTaskManagerActionAllowed("task-worker", "show_work_item"));
+  assert.doesNotThrow(() => assertTaskManagerActionAllowed("task-debugger", "work_item_workflow_status"));
+});
+
+test("unknown child agents are denied by default (defense in depth)", () => {
+  assert.throws(() => assertTaskManagerActionAllowed("task-cop", "show_work_item", "scan"), /is not provisioned/);
+  assert.throws(() => assertTaskManagerActionAllowed("task-cop", "accept_work_item"), /is not provisioned/);
+});
+
+test("task-worker and task-debugger cannot invoke owner, contractor, or scheduler lifecycle actions", () => {
+  const lifecycleActions = [
+    "accept_work_item", "approve_work_item_artifact", "reset_pipeline_circuit",
+    "claim_work_item", "merge_aggregate_work_item", "update_work_item_status",
+    "close_aggregate_work_item",
+  ];
+  for (const child of ["task-worker", "task-debugger"]) {
+    for (const action of lifecycleActions) {
+      assert.throws(() => assertTaskManagerActionAllowed(child, action), /cannot call/, `${child} must be blocked from ${action}`);
+    }
+  }
 });

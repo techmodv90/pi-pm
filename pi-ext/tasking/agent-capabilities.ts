@@ -4,12 +4,19 @@ const childTaskManagerActions: Record<string, ReadonlySet<string>> = {
   "task-planner": new Set(["list_work_items", "show_work_item", "work_item_workflow_status", "save_work_item_artifact", "validate_work_item_graph", "search"]),
   "task-rri": new Set(["show_work_item", "work_item_workflow_status", "save_work_item_artifact", "search"]),
   "rri-persona": new Set(["show_work_item", "work_item_workflow_status", "search"]),
+  // Worker, autofix, and debugger subagents implement within the isolated worktree
+  // and never transition workflow lifecycle; persist nothing through task_manager,
+  // and may only observe. Least privilege: read-only observation, no owner,
+  // contractor, or scheduler lifecycle authority.
+  "task-worker": new Set(["show_work_item", "work_item_workflow_status", "search"]),
+  "task-debugger": new Set(["show_work_item", "work_item_workflow_status", "search"]),
 };
 
 export function assertTaskManagerActionAllowed(agentName: string | undefined, action: string, stage?: string): void {
   if (!agentName) return;
   const allowed = childTaskManagerActions[agentName];
-  if (allowed && !allowed.has(action)) throw new Error(`${agentName} cannot call task_manager action ${action}`);
+  if (!allowed) throw new Error(`${agentName} is not provisioned for task_manager action ${action}`);
+  if (!allowed.has(action)) throw new Error(`${agentName} cannot call task_manager action ${action}`);
   if (action === "save_work_item_artifact") {
     const stages: Record<string, ReadonlySet<string>> = {
       "task-scout": new Set(["scan"]),
