@@ -14,7 +14,8 @@ import { parseTaskGraphReportJson, renderTaskGraphReportMarkdown } from "../repo
 
 import { validateSkillFamilies } from "../subagent/skills.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
-import { buildTaskVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemReviewerHandoff, buildWorkItemScanPrompt, CANONICAL_SCAN_REPORT_XML_FORMAT } from "../tasking/work-item-prompts.ts";
+import { buildTaskVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemReviewerHandoff, buildWorkItemScanPrompt, buildPlanningHandoffXml, CANONICAL_SCAN_REPORT_XML_FORMAT } from "../tasking/work-item-prompts.ts";
+import { planStagesForProfile, normalizePlanningDepth, type PlanningDepth, type PlanningStage } from "../tasking/workflow-modes.ts";
 import { getBlockingTaskDependencies } from "../tasking/workflow-gates.ts";
 import { discoverAgents } from "../subagent/agents.ts";
 import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, startSubagent, type SubagentHandle } from "../subagent/runner.ts";
@@ -24,9 +25,62 @@ import { parsePipelineRuns, type PipelineRunRecord, type PipelineStage } from ".
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_GENERATED_FILES = ["test-results/**", "playwright-report/**", "coverage/**", ".nyc_output/**"];
+// Known planning stages the scheduler can route and map to a bounded agent.
+// This is a stage/agent registry only; dispatch eligibility is decided by the
+// persisted Plan profile, never by this list (see resolvePlanProfile).
 const planningStages: PipelineStage[] = ["rri", "vision", "blueprint", "contracts", "task_graph"];
 
 function isPlanningStage(stage: PipelineStage): boolean { return planningStages.includes(stage); }
+
+// Planning profile constraint: dispatch authority for planning stages comes from
+// the persisted Plan profile (work_item_profiles), falling back to deterministic
+// kind/depth resolution only when no profile has been persisted yet (e.g. before
+// the first claim resolves it).
+export interface PlanningProfileState {
+  depth: PlanningDepth;
+  version: number;
+  contentHash: string;
+  stages: string[];
+  resolved: boolean;
+}
+
+const PLANNING_STAGE_ORDER: string[] = ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"];
+
+function persistedProfileDepth(value: unknown): PlanningDepth {
+  return normalizePlanningDepth(value);
+}
+
+export function resolvePlanProfile(data: any): PlanningProfileState {
+  const item = data?.work_item || {};
+  const rawProfiles = Array.isArray(data?.profiles) ? data.profiles : [];
+  const plan = rawProfiles
+    .filter((entry: any) => entry.profile_name === "plan")
+    .sort((a: any, b: any) => Number(b.profile_version || 0) - Number(a.profile_version || 0))[0];
+  if (plan) {
+    let stages: string[] = [];
+    try {
+      const parsed = JSON.parse(plan.stages_json || "[]");
+      if (Array.isArray(parsed)) stages = parsed.filter((entry: unknown): entry is PlanningStage => PLANNING_STAGE_ORDER.includes(String(entry)));
+    } catch {}
+    if (stages.length) {
+      return {
+        depth: persistedProfileDepth(plan.planning_depth),
+        version: Number(plan.profile_version || 0),
+        contentHash: plan.content_hash || "",
+        stages,
+        resolved: true,
+      };
+    }
+  }
+  const depth = persistedProfileDepth(item.planning_depth);
+  return {
+    depth,
+    version: 0,
+    contentHash: "",
+    stages: planStagesForProfile(item.type || "", item.parent_id || "", depth),
+    resolved: false,
+  };
+}
 
 function verificationEnvironmentFingerprint(cwd: string): string {
   const values = ["NODE_ENV", "CI", "DATABASE_URL", "TEST_DATABASE_URL", "PGHOST", "PGPORT", "PGDATABASE", "PGUSER"]
@@ -107,6 +161,7 @@ export function normalizePipelineData(data: any): any {
   return {
     ...data,
     canonical: true,
+    plan_profile: resolvePlanProfile(data),
     dependencies: (data.dependencies || []).map((dependency: any) => ({
       ...dependency,
       depends_on_task_id: dependency.depends_on_task_id || dependency.depends_on_work_item_id,
@@ -904,6 +959,19 @@ function planningHandoff(stage: "blueprint" | "task_graph", raw: any, taskId: st
   return `<${stage}_handoff schema_version="1" work_item_id="${taskId}"><approved_context><![CDATA[${payload}]]></approved_context></${stage}_handoff>`;
 }
 
+// Planning profile constraint: a handoff must name the approved checkpoint of
+// the immediately precedent stage in the Plan profile so the consumer can tie
+// the dispatched stage to its persisted predecessor.
+export function predecessorCheckpointFor(data: any, stage: string, profileStages: string[]): any {
+  const index = profileStages.indexOf(stage);
+  if (index <= 0) return undefined;
+  const prior = profileStages[index - 1];
+  return (Array.isArray(data?.checkpoints) ? data.checkpoints : [])
+    .filter((checkpoint: any) => checkpoint.stage === prior)
+    .sort((a: any, b: any) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0)
+      || String(b.created_at || "").localeCompare(String(a.created_at || "")))[0];
+}
+
 function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string {
   const raw = execPic(["show", taskId], cwd);
   if (raw.work_item) {
@@ -1202,6 +1270,24 @@ export class PipelineScheduler {
   }
 
 
+  // Planning profile constraint: refuse to dispatch a planning stage that the
+  // persisted Plan profile (or the kind/depth contract before it is persisted)
+  // does not include, and bind the claim to the persisted profile version/hash
+  // so a stale Go/TypeScript profile view cannot dispatch an unapproved stage.
+  // A stage must not dispatch before the Plan profile is persisted: the handoff
+  // envelope requires a profile version/hash, so a resolved:false profile would
+  // publish an invalid envelope with no recovery.
+  private planEligibility(taskId: string, stage: PipelineStage): { profile: PlanningProfileState } {
+    const profile = resolvePlanProfile(normalizePipelineData(execPic(["show", taskId], this.cwd)));
+    if (!profile.resolved || !profile.contentHash) {
+      throw new Error(`planning stage ${stage} cannot dispatch for ${taskId} before the Plan profile is persisted; persist the approved profile before dispatch`);
+    }
+    if (!profile.stages.includes(stage)) {
+      throw new Error(`planning stage ${stage} is not in the persisted plan profile for ${taskId} (depth ${profile.depth}); revise the profile before dispatch`);
+    }
+    return { profile };
+  }
+
   private async launchGroup(stage: PipelineStage, taskIds: string[], explicitRetry = false): Promise<any> {
     const active = execPic(["workflow", "pipeline-active"], this.cwd);
     const activeRuns = Array.isArray(active) ? active.filter((run: PipelineRun) => run.stage === stage && taskIds.includes(run.task_id)) : [];
@@ -1233,6 +1319,10 @@ export class PipelineScheduler {
         const data = execPic(["show", taskId], this.cwd);
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
         const claimArgs = ["workflow", "pipeline-claim", taskId, stage, "--lease-seconds", "14400", "--environment-fingerprint", verificationEnvironmentFingerprint(this.cwd), "--base-commit", repositoryHead(this.cwd)];
+        if (isPlanningStage(stage)) {
+          const { profile } = this.planEligibility(taskId, stage);
+          if (profile.resolved && profile.version > 0) claimArgs.push("--profile-version", String(profile.version), "--profile-hash", profile.contentHash);
+        }
         if (stage === "worker" && reviewFixTaskIds.has(taskId)) claimArgs.push("--review-fix", "1");
         if (stage === "worker" && explicitRetry) claimArgs.push("--explicit-retry", "1");
         if (activePack && (isMutationStage(stage) || stage === "review")) claimArgs.push("--instruction-pack-id", activePack.id, "--instruction-pack-hash", activePack.content_hash);
@@ -1633,7 +1723,17 @@ export class PipelineScheduler {
 
   private publishPlanningHandoff(run: PipelineRun, output: string): void {
     const payload = run.stage === "blueprint" || run.stage === "task_graph" ? this.planningArtifactPresentation(run.task_id, run.stage) : output;
-    const handoffId = this.handoffs.put(run.stage, run.task_id, payload);
+    const data = execPic(["show", run.task_id], this.cwd);
+    const profile = resolvePlanProfile(data);
+    const predecessor = predecessorCheckpointFor(data, run.stage, profile.stages);
+    const envelope = buildPlanningHandoffXml({
+      work_item_id: run.task_id,
+      stage: run.stage,
+      predecessor_checkpoint: predecessor?.artifact_id ? String(predecessor.artifact_id) : "",
+      profile_version: String(profile.version),
+      profile_hash: profile.contentHash,
+    }, payload);
+    const handoffId = this.handoffs.put(run.stage, run.task_id, envelope);
     const action = run.stage === "rri"
       ? "conduct the owner interview, persist confirmed requirements and decisions, then save the owner-confirmed RRI artifact"
       : `validate the result, save the ${run.stage} artifact, and present it for owner approval`;

@@ -2,6 +2,16 @@ export type WorkflowMode = "quick" | "standard" | "designed" | "full";
 export type DesignStatus = "" | "pending" | "approved" | "rejected";
 export type OwnerStatus = "" | "pending" | "accepted" | "rejected";
 
+// Planning profile constraint: the durable planning stages the scheduler may
+// dispatch for a Work Item, derived in the same order as the persisted Plan
+// profile. Contracts stays a contractor main-session gate and never launches a
+// bounded child agent, so it is listed only as a known planning stage.
+export const PLANNING_STAGES = ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"] as const;
+export type PlanningStage = typeof PLANNING_STAGES[number];
+
+export const PLANNING_DEPTHS = ["quick", "standard", "designed", "full"] as const;
+export type PlanningDepth = typeof PLANNING_DEPTHS[number];
+
 export const WORKFLOW_MODES: WorkflowMode[] = ["quick", "standard", "designed", "full"];
 export const DESIGN_STATUSES: DesignStatus[] = ["", "pending", "approved", "rejected"];
 export const OWNER_STATUSES: OwnerStatus[] = ["", "pending", "accepted", "rejected"];
@@ -53,6 +63,48 @@ export function normalizeWorkflowMode(mode: unknown): WorkflowMode {
   return typeof mode === "string" && WORKFLOW_MODES.includes(mode as WorkflowMode)
     ? mode as WorkflowMode
     : "standard";
+}
+
+/**
+ * Normalize a persisted planning depth to a supported depth.
+ * Planning depth defaults to 'full' to match the persisted schema, distinct
+ * from the 'standard' default used for interactive workflow-mode gating.
+ */
+export function normalizePlanningDepth(depth: unknown): PlanningDepth {
+  return typeof depth === "string" && PLANNING_DEPTHS.includes(depth as PlanningDepth)
+    ? depth as PlanningDepth
+    : "full";
+}
+
+/**
+ * Select the durable planning stages for a Work Item from its kind, parent, and
+ * planning depth. Mirrors the persisted Plan profile contract: RRI and Task
+ * Graph are always selected; Vision, Blueprint, and Contracts are depth-gated;
+ * a standalone leaf (task/bug/chore with no parent) never selects aggregate-only
+ * design stages. This is a fallback for the scheduler before a Plan profile is
+ * persisted; once persisted, the profile is the sole authority.
+ */
+export function planStagesForProfile(kind: unknown, parentId: unknown, depth: unknown): PlanningStage[] {
+  const normalizedKind = String(kind || "");
+  const normalizedParent = String(parentId || "");
+  if (["task", "bug", "chore"].includes(normalizedKind) && !normalizedParent) {
+    return ["scan", "rri", "task_graph"];
+  }
+  switch (normalizePlanningDepth(depth)) {
+    case "full":
+      return ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"];
+    case "designed":
+      return ["scan", "rri", "blueprint", "task_graph"];
+    default: // quick, standard
+      return ["scan", "rri", "task_graph"];
+  }
+}
+
+/**
+ * Return true when a planning stage is known to the scheduler plan registry.
+ */
+export function isKnownPlanningStage(stage: unknown): stage is PlanningStage {
+  return typeof stage === "string" && PLANNING_STAGES.includes(stage as PlanningStage);
 }
 
 /**

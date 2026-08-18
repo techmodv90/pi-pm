@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  assertPlanningHandoffAttributes,
   buildAggregateVerifyPrompt,
+  buildPlanningHandoffXml,
   buildReviewInstructions,
   buildTaskVerifyPrompt,
   buildWorkItemContinuePrompt,
@@ -10,7 +12,44 @@ import {
   buildWorkItemReviewerHandoff,
   buildWorkItemScanPrompt,
   formatWorkItemChecklist,
+  normalizePlanningHandoffAttributes,
+  parsePlanningHandoffAttributes,
 } from "./work-item-prompts.ts";
+
+test("planning handoff binds identity, stage, predecessor checkpoint, and profile version/hash", () => {
+  const xml = buildPlanningHandoffXml({ work_item_id: "wi-f", stage: "rri", predecessor_checkpoint: "cp-scan-1", profile_version: "2", profile_hash: "hash-2" }, "owner interview evidence");
+  assert.match(xml, /^<planning_handoff schema_version="1" work_item_id="wi-f" stage="rri" predecessor_checkpoint="cp-scan-1" profile_version="2" profile_hash="hash-2">/);
+  assert.match(xml, /owner interview evidence/);
+  assert.deepEqual(parsePlanningHandoffAttributes(xml), { work_item_id: "wi-f", stage: "rri", predecessor_checkpoint: "cp-scan-1", profile_version: "2", profile_hash: "hash-2" });
+});
+
+test("planning handoff validation rejects malformed bindings and unsupported stages", () => {
+  assert.throws(() => buildPlanningHandoffXml({ work_item_id: "", stage: "rri", predecessor_checkpoint: "", profile_version: "1", profile_hash: "h" }, "body"), /missing Work Item identity/);
+  assert.throws(() => buildPlanningHandoffXml({ work_item_id: "wi-f", stage: "contracts", predecessor_checkpoint: "", profile_version: "1", profile_hash: "h" }, "body"), /unsupported stage contracts/);
+  assert.throws(() => buildPlanningHandoffXml({ work_item_id: "wi-f", stage: "rri", predecessor_checkpoint: "", profile_version: "", profile_hash: "" }, "body"), /persisted profile version and hash/);
+  assert.throws(() => parsePlanningHandoffAttributes("not xml"), /one <planning_handoff>/);
+  assert.throws(() => assertPlanningHandoffAttributes(normalizePlanningHandoffAttributes({ work_item_id: "wi-f", stage: "blueprint" })), /persisted profile version and hash/);
+});
+
+test("planning handoff rejects dispatch before the Plan profile is persisted (resolved:false)", () => {
+  // A resolved:false profile yields an empty profile_hash; building the handoff
+  // must throw so no pre-persistence dispatch can publish an invalid envelope.
+  const resolvedFalseProfile = { version: 0, contentHash: "" };
+  assert.throws(
+    () => buildPlanningHandoffXml({ work_item_id: "wi-g", stage: "task_graph", predecessor_checkpoint: "cp-rri", profile_version: String(resolvedFalseProfile.version), profile_hash: resolvedFalseProfile.contentHash }, "<raw/>"),
+    /persisted profile version and hash/,
+  );
+});
+
+test("planning handoff CDATA-wraps raw payload so XML metacharacters cannot corrupt the envelope", () => {
+  const xml = buildPlanningHandoffXml({ work_item_id: "wi-f", stage: "blueprint", predecessor_checkpoint: "cp-vision", profile_version: "2", profile_hash: "hash-2" }, "a < b & \"quoted\" </planning_handoff>]]> tail");
+  // The raw body is CDATA-wrapped, its embedded CDATA terminator is split, and
+  // the envelope still parses to the declared attributes despite metacharacters.
+  assert.ok(xml.includes("<![CDATA[a < b & \"quoted\" </planning_handoff>]]]]><![CDATA[> tail]]>"));
+  assert.ok(xml.includes("a < b & \"quoted\" </planning_handoff>"));
+  assert.equal(parsePlanningHandoffAttributes(xml).work_item_id, "wi-f");
+  assert.equal(parsePlanningHandoffAttributes(xml).stage, "blueprint");
+});
 
 test("contractor verification handoff executes the active TIP protocol", () => {
   const prompt = buildTaskVerifyPrompt({

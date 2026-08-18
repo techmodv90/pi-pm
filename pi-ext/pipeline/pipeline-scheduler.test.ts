@@ -5,8 +5,83 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseTaskCompletionReport, pipelineFailureResult, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, renderCanonicalInstructionPackXml, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate } from "./pipeline-scheduler.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseTaskCompletionReport, pipelineFailureResult, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, renderCanonicalInstructionPackXml, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
+import { planStagesForProfile } from "../tasking/workflow-modes.ts";
+
+test("resolvePlanProfile binds dispatch authority to the persisted Plan profile", () => {
+  const data = normalizePipelineData({
+    work_item: { id: "wi-g", type: "feature", parent_id: "", planning_depth: "full" },
+    profiles: [
+      { profile_name: "plan", profile_version: 2, planning_depth: "designed", stages_json: JSON.stringify(["scan", "rri", "blueprint", "task_graph"]), content_hash: "hash-2" },
+    ],
+  });
+  assert.deepEqual(resolvePlanProfile(data), {
+    depth: "designed", version: 2, contentHash: "hash-2", stages: ["scan", "rri", "blueprint", "task_graph"], resolved: true,
+  });
+  assert.deepEqual(data.plan_profile.stages, ["scan", "rri", "blueprint", "task_graph"]);
+});
+
+test("resolvePlanProfile falls back to kind/depth before a profile is persisted", () => {
+  const profile = resolvePlanProfile({
+    work_item: { id: "wi-leaf", type: "task", parent_id: "", planning_depth: "quick" },
+    profiles: [],
+  });
+  assert.equal(profile.resolved, false);
+  assert.deepEqual(profile.stages, ["scan", "rri", "task_graph"]);
+});
+
+test("standalone planning omits aggregate-only design stages but keeps identity", () => {
+  assert.deepEqual(planStagesForProfile("task", "", "full"), ["scan", "rri", "task_graph"]);
+  assert.deepEqual(planStagesForProfile("bug", "", "designed"), ["scan", "rri", "task_graph"]);
+  assert.deepEqual(planStagesForProfile("chore", "", "quick"), ["scan", "rri", "task_graph"]);
+});
+
+test("aggregate planning depth selects Vision, Blueprint, and Contracts only when required", () => {
+  assert.deepEqual(planStagesForProfile("feature", "epic-1", "full"), ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"]);
+  assert.deepEqual(planStagesForProfile("feature", "epic-1", "designed"), ["scan", "rri", "blueprint", "task_graph"]);
+  assert.deepEqual(planStagesForProfile("feature", "epic-1", "standard"), ["scan", "rri", "task_graph"]);
+  assert.deepEqual(planStagesForProfile("epic", "", "full"), ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"]);
+  assert.deepEqual(planStagesForProfile("epic", "", "quick"), ["scan", "rri", "task_graph"]);
+});
+
+test("a skipped depth-controlled stage is absent from the profile, not a successful run", () => {
+  const profile = resolvePlanProfile({
+    work_item: { id: "wi-feature", type: "feature", planning_depth: "designed" },
+    profiles: [{ profile_name: "plan", profile_version: 1, planning_depth: "designed", stages_json: JSON.stringify(["scan", "rri", "blueprint", "task_graph"]), content_hash: "hash-1" }],
+  });
+  assert.deepEqual(profile.stages, ["scan", "rri", "blueprint", "task_graph"]);
+  assert.ok(!profile.stages.includes("vision"));
+  assert.ok(!profile.stages.includes("contracts"));
+});
+
+test("planning handoff resolves the approved predecessor checkpoint from the profile order", () => {
+  const data = {
+    checkpoints: [
+      { stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, created_at: "2026-01-01" },
+      { stage: "rri", artifact_id: "cp-rri", artifact_revision: 1, created_at: "2026-01-02" },
+    ],
+  };
+  assert.equal(predecessorCheckpointFor(data, "vision", ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"])?.artifact_id, "cp-rri");
+  assert.equal(predecessorCheckpointFor(data, "scan", ["scan", "rri", "task_graph"]), undefined);
+});
+
+test("planning dispatch binds the claim to the persisted profile version and hash", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /if \(isPlanningStage\(stage\)\) \{\n\s+const \{ profile \} = this\.planEligibility\(taskId, stage\)/);
+  assert.match(source, /--profile-version", String\(profile\.version\), "--profile-hash", profile\.contentHash/);
+  assert.match(source, /planning stage \$\{stage\} is not in the persisted plan profile/);
+  assert.match(source, /plan_profile: resolvePlanProfile\(data\)/);
+});
+
+test("planning dispatch demands a persisted Plan profile before any stage launch", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  // planEligibility must reject a resolved:false profile (empty contentHash) so a
+  // pre-persistence dispatch cannot reach the handoff envelope, which also rejects
+  // an empty profile_hash with no recovery.
+  assert.match(source, /if \(!profile\.resolved \|\| !profile\.contentHash\)/);
+  assert.match(source, /before the Plan profile is persisted; persist the approved profile/);
+});
 
 test("normalizePipelineData adapts canonical Work Items without snapshot authority", () => {
   const data = normalizePipelineData({
