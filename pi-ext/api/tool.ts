@@ -262,7 +262,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
                 case "task_graph": markdown = renderTaskGraphReportMarkdown(parseTaskGraphReportJson(params.content)); break;
                 default: throw new Error(`stage ${params.stage} has no rendered artifact preview`);
               }
-              return { content: [{ type: "text", text: `${markdown}\n\nThis is a deterministic preview rendered from the drafted artifact; nothing has been saved or approved.` }], details: { action: "preview_artifact", stage: params.stage, preview: true } };
+              return { content: [{ type: "text", text: markdown }], details: { action: "preview_artifact", stage: params.stage, preview: true, previewPresentation: markdown } };
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
@@ -565,6 +565,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         if (details?.error) {
           return new Text(theme.fg("error", details?.error || "Error"), 0, 0);
         }
+        if (details?.previewPresentation) return new Markdown(details.previewPresentation, 0, 0, getMarkdownTheme());
         if (details?.rriPresentation) return new Markdown(details.rriPresentation, 0, 0, getMarkdownTheme());
         if (details?.contractPresentation) return new Markdown(details.contractPresentation, 0, 0, getMarkdownTheme());
         if (details?.taskGraphPresentation) return new Markdown(details.taskGraphPresentation, 0, 0, getMarkdownTheme());
