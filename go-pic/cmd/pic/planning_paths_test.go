@@ -266,3 +266,52 @@ Then it completes')`)
 		t.Fatalf("frozen pack content = %#v", envelope)
 	}
 }
+
+func TestMigrationDropsLegacyRequirementForeignKeys(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Pre-Work-Item schema: requirements rows carry REFERENCES tasks(id) even
+	// though the canonical flow stores wi- identifiers in task_id/epic_id.
+	_, err = db.Exec(`CREATE TABLE epics (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')));
+		CREATE TABLE tasks (id TEXT PRIMARY KEY, epic_id TEXT REFERENCES epics(id), title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', priority TEXT DEFAULT 'medium', created_at TEXT DEFAULT (datetime('now')));
+		CREATE TABLE work_items (id TEXT PRIMARY KEY, type TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', priority TEXT DEFAULT 'medium', deferred INTEGER NOT NULL DEFAULT 0, claimed_at TEXT DEFAULT '', claimed_by TEXT DEFAULT '', review_status TEXT DEFAULT 'pending', review_notes TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
+		CREATE TABLE requirements (id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT REFERENCES epics(id) ON DELETE CASCADE, requirement_key TEXT NOT NULL, title TEXT NOT NULL, description TEXT DEFAULT '', acceptance_criteria TEXT DEFAULT '', status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO work_items(id,type,title,status) VALUES('wi-old','epic','Old','in_progress');
+		INSERT INTO tasks(id,title) VALUES('t-old','Legacy Task');
+		INSERT INTO requirements(id,task_id,requirement_key,title) VALUES('req-old','t-old','REQ-OLD','Legacy');`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	read, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Close()
+	if hasLegacySubjectForeignKey(read, "requirements") || hasLegacySubjectForeignKey(read, "owner_decisions") {
+		t.Fatalf("legacy subject foreign keys survived migration on requirements=%v owner_decisions=%v", hasLegacySubjectForeignKey(read, "requirements"), hasLegacySubjectForeignKey(read, "owner_decisions"))
+	}
+	var key, title string
+	if err := read.QueryRow(`SELECT requirement_key,title FROM requirements WHERE id='req-old'`).Scan(&key, &title); err != nil {
+		t.Fatalf("legacy requirement lost after FK rebuild: %v", err)
+	}
+	if key != "REQ-OLD" || title != "Legacy" {
+		t.Fatalf("legacy requirement content not preserved: %s %s", key, title)
+	}
+	// The canonical corrective-bug path inserts requirements bound to a
+	// Work Item ID that has no legacy tasks row; this only works when the
+	// legacy foreign key is gone.
+	if _, err := read.Exec(`INSERT INTO requirements(id,task_id,requirement_key,title,acceptance_criteria) VALUES('req-wi','wi-old','REQ-WI','Bound','Given x
+When y
+Then z')`); err != nil {
+		t.Fatalf("work-item-bound requirement rejected after migration: %v", err)
+	}
+}

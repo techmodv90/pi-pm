@@ -49,13 +49,21 @@ const workItemsTableSQL = `CREATE TABLE IF NOT EXISTS work_items (
 )`
 
 var ownedWorkflowTableSQL = map[string]string{
-	"scan_reports":         `CREATE TABLE IF NOT EXISTS scan_reports (id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT REFERENCES epics(id) ON DELETE CASCADE, status TEXT DEFAULT 'completed' CHECK(status IN ('completed','partial','failed')), summary TEXT DEFAULT '', tech_stack_json TEXT DEFAULT '', architecture_json TEXT DEFAULT '', commands_json TEXT DEFAULT '', patterns_json TEXT DEFAULT '', risks_json TEXT DEFAULT '', raw_report TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
-	"rri_sessions":         `CREATE TABLE IF NOT EXISTS rri_sessions (id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT REFERENCES epics(id) ON DELETE CASCADE, status TEXT DEFAULT 'preparing' CHECK(status IN ('preparing','interviewing','awaiting_confirmation','completed','abandoned')), interview_state_json TEXT DEFAULT '', report_markdown TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '', CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
-	"requirements":         `CREATE TABLE IF NOT EXISTS requirements (id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT REFERENCES epics(id) ON DELETE CASCADE, rri_session_id TEXT REFERENCES rri_sessions(id) ON DELETE SET NULL, requirement_key TEXT NOT NULL, contract_key TEXT DEFAULT '', inherit_to_descendants INTEGER NOT NULL DEFAULT 0 CHECK(inherit_to_descendants IN (0,1)), persona TEXT DEFAULT '', priority TEXT DEFAULT 'tier2' CHECK(priority IN ('tier1','tier2','tier3')), title TEXT NOT NULL, description TEXT DEFAULT '', acceptance_criteria TEXT DEFAULT '', status TEXT DEFAULT 'pending' CHECK(status IN ('pending','satisfied','failed','deferred')), source TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
-	"designs":              `CREATE TABLE IF NOT EXISTS designs (id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT REFERENCES epics(id) ON DELETE CASCADE, version INTEGER NOT NULL, status TEXT DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','superseded')), blueprint_markdown TEXT NOT NULL, contracts_markdown TEXT DEFAULT '', decisions_json TEXT DEFAULT '', risks_json TEXT DEFAULT '', created_by_role TEXT DEFAULT 'contractor', approved_at TEXT DEFAULT '', rejected_at TEXT DEFAULT '', rejection_reason TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
-	"verification_reports": `CREATE TABLE IF NOT EXISTS verification_reports (id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT REFERENCES epics(id) ON DELETE CASCADE, pipeline_run_id TEXT DEFAULT '', effective_contract_snapshot_id TEXT DEFAULT '', effective_contract_snapshot_hash TEXT DEFAULT '', status TEXT NOT NULL CHECK(status IN ('passed','failed','partial','blocked')), summary TEXT DEFAULT '', verified_by_role TEXT DEFAULT 'contractor', verified_by_model TEXT DEFAULT '', superseded_at TEXT DEFAULT '', superseded_by_report_id TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
-	"escalations":          `CREATE TABLE IF NOT EXISTS escalations (id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT REFERENCES epics(id) ON DELETE CASCADE, level INTEGER NOT NULL CHECK(level IN (1,2,3)), status TEXT DEFAULT 'open' CHECK(status IN ('open','resolved','cancelled')), title TEXT NOT NULL, description TEXT DEFAULT '', options_json TEXT DEFAULT '', recommendation TEXT DEFAULT '', decision TEXT DEFAULT '', resolved_by_role TEXT DEFAULT '', resolved_at TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
-	"owner_decisions":      `CREATE TABLE IF NOT EXISTS owner_decisions (id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT REFERENCES epics(id) ON DELETE CASCADE, related_type TEXT DEFAULT '', related_id TEXT DEFAULT '', decision_type TEXT NOT NULL, decision TEXT NOT NULL, notes TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
+	// Canonical Work Item flow stores wi-/wip- IDs in task_id/epic_id, so these
+	// tables must not carry legacy REFERENCES tasks(id)/epics(id) constraints;
+	// migrateEpicWorkflowSchema rebuilds databases that still have them.
+	"scan_reports":         `CREATE TABLE IF NOT EXISTS scan_reports (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, status TEXT DEFAULT 'completed' CHECK(status IN ('completed','partial','failed')), summary TEXT DEFAULT '', tech_stack_json TEXT DEFAULT '', architecture_json TEXT DEFAULT '', commands_json TEXT DEFAULT '', patterns_json TEXT DEFAULT '', risks_json TEXT DEFAULT '', raw_report TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
+	"rri_sessions":         `CREATE TABLE IF NOT EXISTS rri_sessions (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, status TEXT DEFAULT 'preparing' CHECK(status IN ('preparing','interviewing','awaiting_confirmation','completed','abandoned')), interview_state_json TEXT DEFAULT '', report_markdown TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '', CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
+	"requirements":         `CREATE TABLE IF NOT EXISTS requirements (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, rri_session_id TEXT, requirement_key TEXT NOT NULL, contract_key TEXT DEFAULT '', inherit_to_descendants INTEGER NOT NULL DEFAULT 0 CHECK(inherit_to_descendants IN (0,1)), persona TEXT DEFAULT '', priority TEXT DEFAULT 'tier2' CHECK(priority IN ('tier1','tier2','tier3')), title TEXT NOT NULL, description TEXT DEFAULT '', acceptance_criteria TEXT DEFAULT '', status TEXT DEFAULT 'pending' CHECK(status IN ('pending','satisfied','failed','deferred')), source TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
+	"designs":              `CREATE TABLE IF NOT EXISTS designs (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, version INTEGER NOT NULL, status TEXT DEFAULT 'pending' CHECK(status IN ('pending','approved','rejected','superseded')), blueprint_markdown TEXT NOT NULL, contracts_markdown TEXT DEFAULT '', decisions_json TEXT DEFAULT '', risks_json TEXT DEFAULT '', created_by_role TEXT DEFAULT 'contractor', approved_at TEXT DEFAULT '', rejected_at TEXT DEFAULT '', rejection_reason TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
+	"verification_reports": `CREATE TABLE IF NOT EXISTS verification_reports (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, pipeline_run_id TEXT DEFAULT '', effective_contract_snapshot_id TEXT DEFAULT '', effective_contract_snapshot_hash TEXT DEFAULT '', status TEXT NOT NULL CHECK(status IN ('passed','failed','partial','blocked')), summary TEXT DEFAULT '', verified_by_role TEXT DEFAULT 'contractor', verified_by_model TEXT DEFAULT '', superseded_at TEXT DEFAULT '', superseded_by_report_id TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
+	"escalations":          `CREATE TABLE IF NOT EXISTS escalations (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, level INTEGER NOT NULL CHECK(level IN (1,2,3)), status TEXT DEFAULT 'open' CHECK(status IN ('open','resolved','cancelled')), title TEXT NOT NULL, description TEXT DEFAULT '', options_json TEXT DEFAULT '', recommendation TEXT DEFAULT '', decision TEXT DEFAULT '', resolved_by_role TEXT DEFAULT '', resolved_at TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
+	"owner_decisions":      `CREATE TABLE IF NOT EXISTS owner_decisions (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, related_type TEXT DEFAULT '', related_id TEXT DEFAULT '', decision_type TEXT NOT NULL, decision TEXT NOT NULL, notes TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
+}
+
+func hasColumn(db workflowStore, table, column string) bool {
+	ok, _ := rowExists(db, `SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
+	return ok
 }
 
 func migrateEpicWorkflowSchema(db *sql.DB) error {
@@ -78,13 +86,21 @@ func migrateEpicWorkflowSchema(db *sql.DB) error {
 		}
 	}
 	for table, createSQL := range ownedWorkflowTableSQL {
-		if tableExists(db, table) && (!hasColumn(db, table, "epic_id") || ownerColumnNotNull(db, table, "task_id")) {
+		if tableExists(db, table) && (!hasColumn(db, table, "epic_id") || ownerColumnNotNull(db, table, "task_id") || hasLegacySubjectForeignKey(db, table)) {
 			if err := rebuildSchemaTable(db, table, createSQL); err != nil {
 				return err
 			}
 		}
 	}
 	return migrateLegacyWorkItems(db)
+}
+
+// hasLegacySubjectForeignKey reports whether table still carries a REFERENCES
+// tasks(id) or epics(id) constraint from the pre-Work-Item schema.
+func hasLegacySubjectForeignKey(db *sql.DB, table string) bool {
+	var target string
+	err := db.QueryRow(`SELECT "table" FROM pragma_foreign_key_list(?) WHERE "table" IN ('tasks','epics') LIMIT 1`, table).Scan(&target)
+	return err == nil
 }
 
 func migrateLegacyWorkItems(db *sql.DB) error {

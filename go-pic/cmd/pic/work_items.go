@@ -1842,9 +1842,6 @@ func workItemAggregateVerify(db *sql.DB, args []string) error {
 			if _, err = tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority) VALUES(?,'bug',?,?,?,'high')`, correctiveBugID, args[0], "Correct aggregate verification failure", args[2]); err != nil {
 				return err
 			}
-			if _, err = tx.Exec(`INSERT INTO tasks(id,title,status,priority,origin) VALUES(?,?, 'open','high','materialized')`, correctiveBugID, "Correct aggregate verification failure"); err != nil {
-				return fmt.Errorf("create corrective task projection: %w", err)
-			}
 			requirementID := "req-" + shortID()
 			requirementKey := "CORRECTIVE-" + strings.ToUpper(strings.TrimPrefix(id, "wivr-"))
 			acceptance := "Given aggregate verification report " + id + " is not passed\nWhen the corrective work is implemented and verified\nThen the aggregate verification failure is resolved"
