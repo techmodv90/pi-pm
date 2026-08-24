@@ -1,14 +1,15 @@
 # Work Item Workflow
 
-The canonical model is a typed Work Item tree. `epic` and `feature` are aggregates; `task`, `bug`, `chore`, and `gate` are executable leaves. Archived Epic, Task, and Task Item rows remain migration history and are read-only.
+The canonical model is a typed Work Item tree. `epic` and `feature` are aggregates; a Feature normally represents a complete vertical slice, while an Epic may contain multiple Features or represent one coherent vertical slice when its approved scope warrants that shape. `task`, `bug`, `chore`, and `gate` are executable leaves. Tasks are bite-sized requirement-bound increments, bound to at most two Requirements, while Code Review checks each child change and aggregate verification is final integrated QA. Archived Epic, Task, and Task Item rows remain migration history and are read-only.
 
 ## Lifecycle
 
 ```text
 Work Item -> Scan -> RRI -> Vision -> Blueprint -> Contracts -> task graph
           -> owner approvals -> materialize -> implementation authorization
-          -> authorized ready leaves -> Worker -> Reviewer -> Completion Report
-          -> aggregate verification -> owner acceptance
+          -> Feature or Epic vertical slice -> bite-sized requirement-bound Tasks
+          -> Worker -> focused Child Evidence -> Code Review -> Completion Report
+          -> aggregate verification (final QA) -> owner acceptance
 ```
 
 Each staged artifact is an immutable revision with a content hash. Owner checkpoints bind the exact artifact ID, revision, and hash. Publishing a new upstream revision invalidates only downstream checkpoints. Materialization is atomic and creates inactive immutable Task Instruction Packs (TIPs); explicit implementation authorization activates them.

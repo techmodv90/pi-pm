@@ -12,8 +12,13 @@ function cell(value: string): string { return value.replaceAll("|", "\\|").repla
 export function parseRriReportJson(content: string): RriReport {
   const report = JSON.parse(content) as Partial<RriReport>;
   if (!report.project_name || !report.generated || !Array.isArray(report.requirements_matrix) || !Array.isArray(report.auto_answered) || !Array.isArray(report.decisions_log) || !Array.isArray(report.open_questions)) {
-    throw new Error("RRI report JSON is missing one of the required sections");
+    throw new Error("RRI report is missing one of the required sections");
   }
+  const required = (report.requirements_matrix as RriReport["requirements_matrix"]).every((row) => row && row.req_id && row.requirement && row.source && row.priority && row.persona);
+  const autoAnswered = (report.auto_answered as RriReport["auto_answered"]).every((row) => row && row.topic && row.details && row.resolution);
+  const decisions = (report.decisions_log as RriReport["decisions_log"]).every((row) => row && row.decision && row.options_considered && row.chosen && row.rationale);
+  const questions = (report.open_questions as RriReport["open_questions"]).every((row) => row && row.id && row.question);
+  if (!required || !autoAnswered || !decisions || !questions) throw new Error("RRI report contains an incomplete row");
   return report as RriReport;
 }
 

@@ -25,13 +25,28 @@ func compileEffectiveContract(db *sql.DB, taskID string) (effectiveContractSnaps
 	return compileEffectiveContractWithRequirements(db, taskID, nil)
 }
 
+func contractSubjectID(db *sql.DB, workItemID string) string {
+	var root string
+	if err := db.QueryRow(`SELECT root_work_item_id FROM work_item_materializations WHERE work_item_id=? ORDER BY rowid DESC LIMIT 1`, workItemID).Scan(&root); err == nil && root != "" {
+		return root
+	}
+	return workItemID
+}
+
 func compileEffectiveContractWithRequirements(db *sql.DB, taskID string, assignedRequirementIDs []string) (effectiveContractSnapshot, error) {
-	task, err := queryOne(db, `SELECT id,epic_id FROM tasks WHERE id=?`, taskID)
+	subjectID := contractSubjectID(db, taskID)
+	task, err := queryOne(db, `SELECT id,epic_id FROM tasks WHERE id=?`, subjectID)
+	if err != nil {
+		task, err = queryOne(db, `SELECT id,'' AS epic_id FROM epics WHERE id=?`, subjectID)
+	}
 	if err != nil {
 		return effectiveContractSnapshot{}, fmt.Errorf("Task %s not found", taskID)
 	}
 	epicID := persistedText(task["epic_id"])
-	requirements, err := queryMaps(db, `SELECT * FROM requirements WHERE task_id=? OR (epic_id=? AND inherit_to_descendants=1) ORDER BY requirement_key,id`, taskID, epicID)
+	if epicID == "" {
+		epicID = subjectID
+	}
+	requirements, err := queryMaps(db, `SELECT * FROM requirements WHERE task_id=? OR (epic_id=? AND inherit_to_descendants=1) ORDER BY requirement_key,id`, subjectID, epicID)
 	if err != nil {
 		return effectiveContractSnapshot{}, err
 	}
@@ -54,7 +69,7 @@ func compileEffectiveContractWithRequirements(db *sql.DB, taskID string, assigne
 		}
 		entries[id] = effectiveContractEntry{RequirementID: id, ContractKey: persistedText(requirement["contract_key"]), RequirementHash: requirementContentHash(requirement), Status: "effective", Provenance: "task:assigned"}
 	}
-	operations, err := queryMaps(db, `SELECT * FROM contract_operations WHERE status='approved' AND (task_id=? OR (epic_id=? AND inherit_to_descendants=1)) ORDER BY created_at,id`, taskID, epicID)
+	operations, err := queryMaps(db, `SELECT * FROM contract_operations WHERE status='approved' AND (task_id=? OR (epic_id=? AND inherit_to_descendants=1)) ORDER BY created_at,id`, subjectID, epicID)
 	if err != nil {
 		return effectiveContractSnapshot{}, err
 	}

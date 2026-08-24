@@ -245,7 +245,7 @@ export function renderAgentWidget(runs: AgentRun[], width: number, now = Date.no
   };
   const usage = (run: AgentRun) => {
     const value = run.usage;
-    return `↻ ${value?.turns || 0} · ${compact(value?.contextTokens || 0)} tok (i ${compact(value?.input || 0)}/o ${compact(value?.output || 0)})`;
+    return `↻ ${value?.turns || 0} · ${compact(value?.contextTokens || 0)} tok (i ${compact(value?.input || 0)}/o ${compact(value?.output || 0)}) · ${run.events.filter((event) => event.type === "tool").length} tools`;
   };
   const lines = ["● Agents"];
   const roots = active.filter((run) => !run.parentRunId || !active.some((candidate) => candidate.runId === run.parentRunId));

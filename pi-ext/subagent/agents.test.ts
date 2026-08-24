@@ -15,6 +15,7 @@ test("discoverAgents loads packaged task-system agents", () => {
   assert.equal(scout?.tools?.includes("research"), false);
   assert.deepEqual(agents.find((agent) => agent.name === "task-worker")?.skills, ["test-first", "verification-gate", "testing-anti-patterns", "ponytail"]);
 
+  assert.deepEqual(agents.find((agent) => agent.name === "task-planner")?.skills, ["write-plan", "shape-spec", "codebase-design"]);
   assert.deepEqual(agents.find((agent) => agent.name === "task-reviewer")?.skills, ["defense-in-depth"]);
   assert.match(packagedAgentsDir(), /pi-ext[\\/]agents$/);
 });

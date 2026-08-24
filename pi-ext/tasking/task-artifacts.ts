@@ -18,6 +18,15 @@ function mergeArtifactRows(childRows: any[] | undefined, parentRows: any[] | und
   return merged;
 }
 
+// Planning context constraint: return only the artifact selected by the latest
+// approved checkpoint so fresh agents cannot consume draft or historical rows.
+export function currentApprovedPlanningArtifact(data: any, stage: string): any | undefined {
+  const checkpoint = (Array.isArray(data?.checkpoints) ? data.checkpoints : [])
+    .filter((entry: any) => entry.stage === stage)
+    .sort((a: any, b: any) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0))[0];
+  return (Array.isArray(data?.artifacts) ? data.artifacts : []).find((entry: any) => entry.id === checkpoint?.artifact_id);
+}
+
 
 /**
  * Merge parent planning-task artifacts into a phase/feature child task payload.

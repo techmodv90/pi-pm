@@ -193,6 +193,17 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 		var rootID, materializationCheckpoint string
 		err = tx.QueryRow(`SELECT root_work_item_id,checkpoint_id FROM work_item_materializations WHERE work_item_id=?`, taskID).Scan(&rootID, &materializationCheckpoint)
 		if err == nil {
+			var newerTaskGraph int
+			if err = tx.QueryRow(`SELECT EXISTS(
+				SELECT 1 FROM work_item_artifacts newer
+				JOIN workflow_checkpoints approved ON approved.work_item_id=newer.work_item_id AND approved.stage='task_graph'
+				WHERE newer.work_item_id=? AND newer.stage='task_graph' AND newer.revision>approved.artifact_revision
+			)`, rootID).Scan(&newerTaskGraph); err != nil {
+				return err
+			}
+			if newerTaskGraph != 0 {
+				return errors.New("pipeline claim rejected: current task graph is not approved")
+			}
 			var authorized int
 			if err = tx.QueryRow(`SELECT COUNT(*) FROM implementation_authorizations WHERE work_item_id=? AND task_graph_checkpoint_id=? AND revoked_at=''`, rootID, materializationCheckpoint).Scan(&authorized); err != nil {
 				return err
@@ -251,6 +262,12 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	}
 	if stage == "worker" {
 		if opts["review-fix"] == "1" {
+			var ownerApprovalRequired int
+			if err = tx.QueryRow(`SELECT COALESCE(json_extract(result_json,'$.owner_approval_required'),0) FROM pipeline_runs WHERE task_id=? AND stage='review' AND status='completed' AND json_valid(result_json) AND json_extract(result_json,'$.review_status')='failed' ORDER BY rowid DESC LIMIT 1`, taskID).Scan(&ownerApprovalRequired); err == nil && ownerApprovalRequired != 0 {
+				return errors.New("review-fix claim requires owner approval for a critical deviation")
+			} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+				return err
+			}
 			if err = tx.QueryRow(`SELECT review.candidate_run_id,review.candidate_patch_hash FROM pipeline_runs review JOIN pipeline_runs candidate ON candidate.id=review.candidate_run_id WHERE review.task_id=? AND review.stage='review' AND review.status='completed' AND review.instruction_pack_id=? AND review.instruction_pack_version=? AND review.instruction_pack_hash=? AND json_valid(review.result_json) AND json_extract(review.result_json,'$.review_status')='failed' AND candidate.task_id=review.task_id AND candidate.stage IN ('worker','autofix') AND candidate.status='completed' AND candidate.instruction_pack_id=review.instruction_pack_id AND candidate.instruction_pack_version=review.instruction_pack_version AND candidate.instruction_pack_hash=review.instruction_pack_hash AND candidate.artifact_saved_at<>'' AND candidate.integrated_patch_path<>'' AND candidate.integrated_patch_hash=review.candidate_patch_hash AND candidate.rowid=(SELECT MAX(current.rowid) FROM pipeline_runs current WHERE current.task_id=review.task_id AND current.stage IN ('worker','autofix') AND current.status='completed' AND current.instruction_pack_id=review.instruction_pack_id AND current.instruction_pack_version=review.instruction_pack_version AND current.instruction_pack_hash=review.instruction_pack_hash AND current.artifact_saved_at<>'') ORDER BY review.rowid DESC LIMIT 1`, taskID, packID, packVersion, packHash).Scan(&candidateRunID, &candidatePatchHash); err != nil {
 				return errors.New("review-fix claim requires a completed failed review verdict")
 			}
@@ -358,12 +375,25 @@ func workflowPipelineCircuitReset(db *sql.DB, args []string) error {
 	if snapshotHash == "" {
 		return errors.New("pipeline circuit reset requires an active instruction pack hash")
 	}
+	// No-progress reset invariant: resetting the counter must identify the changed
+	// execution input, otherwise the same TIP/environment can loop indefinitely.
+	changedFingerprint, _ := evidence["changed_fingerprint"].(string)
+	if changedFingerprint == "" {
+		return errors.New("pipeline-circuit-reset evidence requires changed_fingerprint")
+	}
+	var previousFingerprint string
+	if err = tx.QueryRow(`SELECT json_extract(payload_json,'$.changed_fingerprint') FROM work_item_events WHERE work_item_id=? AND event_type='pipeline_circuit_reset' ORDER BY rowid DESC LIMIT 1`, taskID).Scan(&previousFingerprint); err == nil && previousFingerprint == changedFingerprint {
+		return errors.New("pipeline circuit reset rejected: unchanged execution fingerprint")
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
 	var attempt int
 	if err = tx.QueryRow(`SELECT attempt FROM pipeline_runs WHERE task_id=? AND stage='worker' AND status IN ('failed','blocked','cancelled','expired') ORDER BY attempt DESC LIMIT 1`, taskID).Scan(&attempt); err != nil {
 		return errors.New("pipeline circuit reset requires a terminal worker attempt")
 	}
 	id := "wie-" + shortID()
-	decisionMetadata := map[string]any{"after_attempt": attempt, "change_type": opts["change-type"], "evidence": evidence, "reason": opts["reason"]}
+	decisionMetadata := map[string]any{"after_attempt": attempt, "change_type": opts["change-type"], "changed_fingerprint": changedFingerprint, "evidence": evidence, "reason": opts["reason"]}
 	metadataJSON, _ := json.Marshal(decisionMetadata)
 	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,'pipeline_circuit_reset','owner',?,?)`, id, taskID, opts["reason"], string(metadataJSON)); err != nil {
 		return err
@@ -485,6 +515,24 @@ func workflowPipelineCheckpoint(db *sql.DB, args []string) error {
 	opts, err := parseOptions(args[3:])
 	if err != nil {
 		return err
+	}
+	if args[2] == "advanced" {
+		// Terminal advancement is reconciliation metadata, not an authority-bearing mutation.
+		// Allow the durable pending sweep to close a terminal run after its worker lease expires.
+		result, updateErr := db.Exec(`UPDATE pipeline_runs SET advanced_at=datetime('now'),updated_at=datetime('now') WHERE id=? AND status IN ('completed','failed','blocked','cancelled','expired') AND advanced_at=''`, args[0])
+		if updateErr != nil {
+			return updateErr
+		}
+		if changed, _ := result.RowsAffected(); changed == 1 {
+			return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+		}
+		var terminal int
+		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pipeline_runs WHERE id=? AND status IN ('completed','failed','blocked','cancelled','expired') AND advanced_at<>'')`, args[0]).Scan(&terminal); err != nil {
+			return err
+		}
+		if terminal != 0 {
+			return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+		}
 	}
 	statePredicate := map[string]string{
 		"artifact_saved": `stage IN ('worker','autofix') AND status='completed'`,

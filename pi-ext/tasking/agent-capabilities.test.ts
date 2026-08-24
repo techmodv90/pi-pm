@@ -10,7 +10,8 @@ test("child agent task-manager capabilities exclude lifecycle authority", () => 
   assert.throws(() => assertTaskManagerActionAllowed("task-scout", "reset_pipeline_circuit"), /cannot call/);
   assert.throws(() => assertTaskManagerActionAllowed("task-scout", "save_work_item_artifact", "blueprint"), /cannot call/);
   assert.throws(() => assertTaskManagerActionAllowed("task-planner", "approve_work_item_artifact"), /cannot call/);
-  assert.throws(() => assertTaskManagerActionAllowed("task-planner", "save_work_item_artifact", "vision"), /cannot save vision/);
+  assert.throws(() => assertTaskManagerActionAllowed("task-planner", "save_work_item_artifact", "blueprint"), /cannot save blueprint/);
+  assert.doesNotThrow(() => assertTaskManagerActionAllowed("task-planner", "save_work_item_artifact", "task_graph"));
   assert.throws(() => assertTaskManagerActionAllowed("task-planner", "save_work_item_artifact", "contracts"), /cannot save contracts/);
   // task-worker and task-debugger are least-privilege observers; they may view
   // read-only state but never mutate workflow lifecycle.

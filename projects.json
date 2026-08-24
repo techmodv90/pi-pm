@@ -89,6 +89,15 @@
       "changelogPath": "/var/folders/dm/fbhxw7195jqcp25y006hz5vc0000gn/T/tmp.noPkDLMPb6/project/CHANGELOG.md",
       "createdAt": "2026-08-14T00:22:26.833607Z",
       "updatedAt": "2026-08-14T00:22:26.848498Z"
+    },
+    {
+      "id": "proj-fd39faa0",
+      "name": "npvn.app",
+      "rootPath": "/Users/justin/Work/nodejs/nhaphovietnam/npvn.app",
+      "databasePath": "/Users/justin/Work/nodejs/nhaphovietnam/npvn.app/.pi/tasks.db",
+      "changelogPath": "/Users/justin/Work/nodejs/nhaphovietnam/npvn.app/CHANGELOG.md",
+      "createdAt": "2026-08-18T21:01:23.162386Z",
+      "updatedAt": "2026-08-21T10:25:26.670246Z"
     }
   ],
   "currentProjectId": "proj-eu8l23fd"

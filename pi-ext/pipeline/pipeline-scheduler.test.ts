@@ -5,9 +5,29 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseTaskCompletionReport, pipelineFailureResult, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, renderCanonicalInstructionPackXml, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, runnerRepairEvidence, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
+
+test("worker and reviewer reports require strict XML envelopes", () => {
+  const worker = `<completion_report tip_id="tip-1" version="1" status="done"><files_changed>None</files_changed><test_results>go test ./... PASS</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`;
+  assert.equal(parseTaskCompletionReport(worker).status, "done");
+  assert.equal(parseTaskCompletionReport(`Finished verification.\n\n${worker}`).status, "done");
+  const blocked = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="blocked"><files_changed>None</files_changed><test_results>Not run</test_results><issues_discovered>API composition root is outside the frozen scope.</issues_discovered><deviations>Requires services/api/cmd/api/main.go.</deviations><suggestions>Re-scope the TIP.</suggestions></completion_report>`);
+  assert.equal(blocked.blocker, "API composition root is outside the frozen scope. Requires services/api/cmd/api/main.go.");
+  const nested = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="partial"><files_changed><file>a.ts</file><file>b.ts</file></files_changed><test_results><result>PASS</result></test_results><issues_discovered><issue>Provider unavailable</issue></issues_discovered><deviations>None</deviations><suggestions>Retry</suggestions></completion_report>`);
+  assert.equal(nested.blocker, "Provider unavailable");
+  const halfEscaped = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>a.ts</files_changed><test_results>PASS</test_results><issues_discovered>None</issues_discovered><deviations>The <emission&gt; path is verified.</deviations><suggestions>None</suggestions></completion_report>`);
+  assert.match(halfEscaped.markdown, /&lt;emission&gt;/);
+  assert.throws(() => parseTaskCompletionReport(`${worker}\n${worker}`), /one completion_report XML/);
+  assert.throws(() => parseTaskCompletionReport("**STATUS:** DONE"), /completion_report XML/);
+
+  const passed = `<review_report status="passed"><notes>All criteria verified.</notes><findings></findings></review_report>`;
+  assert.deepEqual(parseReviewReport(passed), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
+  assert.deepEqual(parseReviewReport(`Reviewer output:\n${passed}\nDone.`), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
+  assert.throws(() => parseReviewReport("```review-report\n{\"status\":\"passed\"}\n```"), /review_report XML/);
+  assert.throws(() => parseReviewReport(`${passed}${passed}`), /review_report XML/);
+});
 
 test("resolvePlanProfile binds dispatch authority to the persisted Plan profile", () => {
   const data = normalizePipelineData({
@@ -53,6 +73,24 @@ test("a skipped depth-controlled stage is absent from the profile, not a success
   assert.deepEqual(profile.stages, ["scan", "rri", "blueprint", "task_graph"]);
   assert.ok(!profile.stages.includes("vision"));
   assert.ok(!profile.stages.includes("contracts"));
+});
+
+test("planning handoff contains lineage metadata, not artifact history", () => {
+  const handoff = planningHandoff("blueprint", {
+    work_item: { title: "Blueprint", type: "feature", description: "A".repeat(20_000) },
+    project: { name: "Project", root_path: "/repo" },
+    checkpoints: [
+      { stage: "scan", artifact_id: "wia-scan", artifact_revision: 2, content_hash: "hash-scan", content: "secret-history" },
+      { stage: "scan", artifact_id: "wia-old", artifact_revision: 1, content_hash: "old", content: "old-history" },
+      { stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "hash-rri", content: "rri-history" },
+      { stage: "vision", artifact_id: "wia-vision", artifact_revision: 1, content_hash: "hash-vision", content: "vision-history" },
+      { stage: "contracts", artifact_id: "wia-contracts", artifact_revision: 1, content_hash: "not-for-blueprint", content: "not-needed" },
+    ],
+  }, "wi-bcc15233");
+  assert.equal(handoff.length < 8_000, true);
+  assert.match(handoff, /wia-scan/);
+  assert.doesNotMatch(handoff, /secret-history|old-history|rri-history|vision-history|not-needed/);
+  assert.doesNotMatch(handoff, /wia-old|wia-contracts/);
 });
 
 test("planning handoff resolves the approved predecessor checkpoint from the profile order", () => {
@@ -132,10 +170,15 @@ test("rejects incomplete Instruction Pack XML", () => {
   assert.throws(() => validateInstructionPackXml(`<instruction_pack schema_version="1" display_key="TIP-1" id="pack-1" version="1" content_hash="hash"><task>work</task></instruction_pack>`), /missing <pipeline_ownership>/);
 });
 
-test("pipeline circuit reset tool forwards typed runner evidence", () => {
+test("pipeline circuit reset tool derives runner repair fingerprints", () => {
+  const first = JSON.parse(runnerRepairEvidence('{"failed_run_id":"pr-1"}'));
+  const second = JSON.parse(runnerRepairEvidence('{"failed_run_id":"pr-2"}'));
+  assert.match(first.changed_fingerprint, /^runner:[a-f0-9]{64}$/);
+  assert.equal(first.changed_fingerprint, second.changed_fingerprint);
+  assert.equal(JSON.parse(runnerRepairEvidence('{"changed_fingerprint":"manual"}')).changed_fingerprint, "manual");
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   assert.match(source, /change_type: Type\.Optional\(StringEnum\(\["contract", "environment", "runner", "artifact"\]/);
-  assert.match(source, /"--change-type", params\.change_type, "--evidence-json", params\.evidence_json/);
+  assert.match(source, /params\.change_type === "runner".*runnerRepairEvidence/);
 });
 
 test("Scan artifact saves render the owner-facing Markdown result", () => {
@@ -183,6 +226,16 @@ test("RRI reports persist structured JSON and render the owner-facing matrix", a
   assert.match(markdown, /## AUTO-ANSWERED \(from Scan\)/);
   assert.match(markdown, /## DECISIONS LOG/);
   assert.match(markdown, /## OPEN QUESTIONS/);
+  assert.throws(() => parseRriReportJson(JSON.stringify({ project_name: "Project", generated: "2026-08-17", requirements_matrix: [{ req_id: "REQ-001" }], auto_answered: [], decisions_log: [], open_questions: [] })), /incomplete row/);
+});
+
+test("aggregate verification prompt applies RRI-T without changing the aggregate gate", async () => {
+  const { buildAggregateVerifyPrompt } = await import("../tasking/work-item-prompts.ts");
+  const prompt = buildAggregateVerifyPrompt({ work_item: { id: "wi-feature", title: "Approval flow" }, children: [] });
+  assert.match(prompt, /Apply RRI-T/);
+  assert.match(prompt, /PASS, ACCEPTABLE, PAINFUL, and FAIL/);
+  assert.match(prompt, /approved REQ-ID/);
+  assert.match(prompt, /verify_aggregate_work_item/);
 });
 
 
@@ -276,6 +329,17 @@ test("successful Scan Scout handoff completes without reporting a blocked attemp
   assert.doesNotMatch(scanFinish, /pipeline-complete[\s\S]+"blocked"/);
 });
 
+test("blocked Worker persists concrete evidence without saving a candidate artifact", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const blockedStart = source.indexOf('if (taskReport.status !== "done")');
+  const blockedFinish = source.slice(blockedStart, source.indexOf("return;", blockedStart));
+  assert.match(blockedFinish, /taskReport\.blocker/);
+  assert.match(blockedFinish, /pipeline-complete[\s\S]+"blocked"/);
+  assert.match(blockedFinish, /blocker: reason/);
+  assert.match(blockedFinish, /checkpoint\(run, "advanced"/);
+  assert.doesNotMatch(blockedFinish, /checkpoint\(run, "artifact_saved"/);
+});
+
 test("canonical aggregate creation starts orchestration at Scan", () => {
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   assert.match(source, /create_work_item[\s\S]+pipelineScheduler\.start\(/);
@@ -299,7 +363,7 @@ test("pipeline run parsing rejects malformed pic records instead of silently dro
 
 test("planning pipeline stages use planning agents and prompts without an active TIP", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /rri: "task-rri"/);
+  assert.match(source, /rri: "rri-persona"/);
   assert.match(source, /vision: "task-planner"/);
   assert.doesNotMatch(source, /contracts: "task-planner"/);
   assert.match(source, /stage === "contracts".*Contract drafting is Contractor-owned/);
@@ -318,13 +382,11 @@ test("completed planning stages pause for main-agent synthesis instead of launch
   assert.match(resumeBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
 });
 
-test("planner completion publishes canonical Blueprint and Task Graph presentations", () => {
+test("planner completion publishes a draft handoff without canonical Blueprint presentation", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /run\.stage === "blueprint" \|\| run\.stage === "task_graph" \? this\.planningArtifactPresentation\(run\.task_id, run\.stage\) : output/);
-  assert.match(source, /filter\(\(entry: any\) => entry\.stage === stage\)/);
-  assert.match(source, /renderBlueprintReportMarkdown\(parseBlueprintReportJson\(artifact\.content\)\)/);
-  assert.match(source, /renderTaskGraphReportMarkdown\(parseTaskGraphReportJson\(artifact\.content\)\)/);
-  assert.match(source, /planner completed without a persisted/);
+  assert.match(source, /loadLatestBlueprintDraft\(this\.cwd, run\.task_id\)/);
+  assert.match(source, /load the temporary draft with load_blueprint_draft/);
+  assert.match(source, /do not call save_work_item_artifact/);
 });
 
 test("RRI persona handoffs require strict assigned-persona XML", () => {
@@ -338,6 +400,13 @@ test("RRI persona handoffs require strict assigned-persona XML", () => {
   assert.throws(() => parseRriPersonaResult(valid.replace("<reason>Recovery policy is unspecified</reason>", ""), "QA / Tester"), /candidate question missing or invalid: reason element/);
 });
 
+test("RRI-T persona results require requirement-bound executable scenarios", () => {
+  const valid = `<rri_t_persona persona="QA / Tester"><scenarios><scenario><id>RRI-T-1</id><dimension>D3</dimension><stress_axis>ERROR</stress_axis><requirement_id>REQ-1</requirement_id><procedure>Submit invalid input</procedure><evidence>go test ./...</evidence><result>PASS</result><remediation></remediation></scenario></scenarios><not_applicable></not_applicable><open_blockers></open_blockers></rri_t_persona>`;
+  assert.equal(parseRriTPersonaResult(valid, "QA / Tester").scenarios[0].result, "PASS");
+  assert.throws(() => parseRriTPersonaResult(valid.replace("REQ-1", ""), "QA / Tester"), /invalid scenario/);
+});
+
+
 test("RRI synthesis handoff is strict XML", () => {
   const valid = "<rri_synthesis><remaining_queue></remaining_queue><auto_answered></auto_answered><not_applicable></not_applicable><open_blockers></open_blockers><final_report></final_report></rri_synthesis>";
   assert.deepEqual(parseRriSynthesisResult(valid), { remaining_queue: [], auto_answered: [], not_applicable: [], open_blockers: [], next_question: null, final_report: null });
@@ -348,31 +417,44 @@ test("RRI synthesis handoff is strict XML", () => {
 test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   const personaInstructions = readFileSync(new URL("../agents/rri-persona.md", import.meta.url), "utf8");
-  assert.match(source, /stage === "rri"[\s\S]+startRriFanout\(spec, agent, personaAgent, this\.handoffs\)/);
+  assert.match(source, /stage === "rri"[\s\S]+startRriFanout\(spec, personaAgent, this\.handoffs\)/);
   const fanout = source.slice(source.indexOf("function startRriFanout"), source.indexOf("function outputFor"));
   assert.match(fanout, /personas\.map/);
   assert.match(fanout, /parseRriPersonaResult/);
   assert.match(fanout, /handoffs\.put\("rri-persona"/);
-  assert.match(fanout, /startSubagent\([\s\S]+agent: taskRriAgent/);
+  assert.doesNotMatch(fanout, /startSubagent\([\s\S]+agent: taskRriAgent/);
+  assert.match(fanout, /deterministicRriSynthesis/);
   assert.match(fanout, /catch[\s\S]+handles\.forEach\(\(handle\) => handle\.stop\(\)\)/);
   assert.match(personaInstructions, /first element.*<rri_persona.*last.*<\/rri_persona>/s);
   assert.match(personaInstructions, /escape text values.*&amp;.*&lt;.*&gt;/s);
   assert.match(personaInstructions, /Every `<candidate_questions><question>` entry must include all three attributes/);
   assert.doesNotMatch(personaInstructions, /```json/);
-  assert.match(readFileSync(new URL("../agents/task-rri.md", import.meta.url), "utf8"), /prepared interview[\s\S]+root must be.*<rri_synthesis>/s);
-  assert.doesNotMatch(readFileSync(new URL("../agents/task-rri.md", import.meta.url), "utf8"), /\.pi\/agent\/methodologies/);
   assert.doesNotMatch(readFileSync(new URL("../agents/rri-persona.md", import.meta.url), "utf8"), /\.pi\/agent\/methodologies/);
-  assert.match(fanout, /RRI synthesis failed validation:[\s\S]+only retry/);
+  assert.doesNotMatch(fanout, /RRI synthesis failed validation:[\s\S]+only retry/);
 });
 
 test("review output is a single structured scheduler-owned verdict", () => {
-  assert.deepEqual(parseReviewReport('```review-report\n{"status":"passed","notes":"Reviewed integrated patch","findings":[]}\n```'), {
+  assert.deepEqual(parseReviewReport('<review_report status="passed"><notes>Reviewed integrated patch</notes><findings></findings></review_report>'), {
     status: "passed",
     notes: "Reviewed integrated patch",
     findings: [],
+    ownerApprovalRequired: false,
   });
-  assert.throws(() => parseReviewReport("Approved"), /exactly one review-report/);
-  assert.throws(() => parseReviewReport('```review-report\n{"status":"passed","notes":"ok","findings":"none"}\n```'), /findings must be strings/);
+  assert.throws(() => parseReviewReport("Approved"), /review_report XML/);
+  assert.deepEqual(parseReviewReport('<review_report status="passed"><notes>ok</notes><findings><finding>fix idempotency</finding></findings></review_report>'), {
+    status: "failed",
+    notes: "ok",
+    findings: ["fix idempotency"],
+    ownerApprovalRequired: false,
+  });
+});
+
+test("critical review deviations pause instead of relaunching a worker", () => {
+  const pack = { status: "active", id: "tip-1", version: 1, content_hash: "pack-hash" };
+  const candidate = { id: "pr-1", stage: "worker", status: "completed", instruction_pack_hash: "pack-hash", artifact_saved_at: "now", integrated_patch_hash: "hash" };
+  const review = { stage: "review", status: "completed", candidate_run_id: "pr-1", candidate_patch_hash: "hash", result_json: JSON.stringify({ review_status: "failed", owner_approval_required: true }) };
+  assert.equal(nextPipelineStage({ instruction_packs: [pack], completion_reports: [], work_item: { review_status: "failed" } }, [candidate, review]), null);
+  assert.throws(() => parseReviewReport('<review_report status="passed"><owner_approval_required>true</owner_approval_required><notes>ok</notes><findings></findings></review_report>'), /cannot require owner approval/);
 });
 
 test("nextPipelineStage stops after task review", () => {
@@ -608,6 +690,33 @@ test("review-fix workers must change the rejected candidate patch", () => {
   );
   assert.doesNotThrow(() => assertReviewFixChangedPatch({ review_fix_cycle: 1, candidate_patch_hash: "different" } as any, patch));
   assert.doesNotThrow(() => assertReviewFixChangedPatch({ review_fix_cycle: 0, candidate_patch_hash: hash } as any, patch));
+});
+
+test("obsolete failed-review patch does not block a fresh correction worker", () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-review-obsolete-seed-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    writeFileSync(join(repo, "README.md"), "base\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+    writeFileSync(join(repo, "foundation.txt"), "candidate foundation\n");
+    writeFileSync(join(repo, "task.txt"), "candidate task\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    const patch = join(repo, "candidate.patch");
+    writeFileSync(patch, execFileSync("git", ["diff", "--cached", "--binary", "HEAD"], { cwd: repo }));
+    execFileSync("git", ["reset", "--hard", "-q", "HEAD"], { cwd: repo });
+    writeFileSync(join(repo, "foundation.txt"), "newer integration\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "newer foundation"], { cwd: repo });
+    const pack = { id: "pack-1", version: 1, content_hash: "hash-1", status: "active" };
+    const candidate = { id: "worker-1", stage: "worker", status: "completed", artifact_saved_at: "now", integrated_at: "", instruction_pack_id: pack.id, instruction_pack_version: pack.version, instruction_pack_hash: pack.content_hash, integrated_patch_path: patch, integrated_patch_hash: "patch-hash" };
+    const review = { id: "review-1", stage: "review", status: "completed", candidate_run_id: candidate.id, candidate_patch_hash: candidate.integrated_patch_hash, result_json: JSON.stringify({ review_status: "failed", findings: ["fix immutability"] }) };
+    assert.equal(rejectedCandidatePatch({ instruction_packs: [pack] }, [candidate, review] as any, repo), undefined);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
 });
 
 test("failed review correction prompt requires a changed patch", () => {
@@ -1002,7 +1111,7 @@ test("owned runner completion persists output and Task-specific worktree patch e
     agent: "task-worker",
     task: "work",
     exitCode: 0,
-    messages: [{ role: "assistant", content: [{ type: "text", text: "## COMPLETION REPORT\n\n**STATUS:** DONE\n\n**FILES CHANGED:**\n- file.txt\n**TEST RESULTS:**\n- PASS\n**ISSUES DISCOVERED:**\n- None\n**DEVIATIONS FROM SPEC:**\n- None\n**SUGGESTIONS FOR CHỦ THẦU:**\n- None" }] }],
+    messages: [{ role: "assistant", content: [{ type: "text", text: '<completion_report tip_id="TIP-001" version="1" status="done"><files_changed>file.txt</files_changed><test_results>PASS</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>' }] }],
     stderr: "",
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
     workspace: {
@@ -1013,7 +1122,7 @@ test("owned runner completion persists output and Task-specific worktree patch e
     },
   });
 
-  assert.match(readFileSync(join(artifactDir, "output-0.log"), "utf8"), /COMPLETION REPORT/);
+  assert.match(readFileSync(join(artifactDir, "output-0.log"), "utf8"), /completion_report/);
   const patch = readFileSync(join(artifactDir, "worktree-diffs", "task-0-task-worker.patch"), "utf8");
   assert.match(patch, /changed/);
   assert.match(patch, /new\.txt/);
@@ -1087,9 +1196,9 @@ test("worker provenance is bound by the pipeline claim instead of report hash re
 });
 
 test("parseTaskCompletionReport distinguishes Task outcome from runtime acceptance", () => {
-  const report = parseTaskCompletionReport(`## COMPLETION REPORT — TIP-001 v1\n\n**STATUS:** PARTIAL\n\n**FILES CHANGED:**\n- None\n**TEST RESULTS:**\n- FAIL\n**ISSUES DISCOVERED:**\n- blocker\n**DEVIATIONS FROM SPEC:**\n- None\n**SUGGESTIONS FOR CHỦ THẦU:**\n- decide`);
+  const report = parseTaskCompletionReport(`<completion_report tip_id="TIP-001" version="1" status="partial"><files_changed>None</files_changed><test_results>FAIL</test_results><issues_discovered>blocker</issues_discovered><deviations>None</deviations><suggestions>decide</suggestions></completion_report>`);
   assert.equal(report.status, "partial");
-  assert.throws(() => parseTaskCompletionReport("**STATUS:** DONE"), /FILES CHANGED/);
+  assert.throws(() => parseTaskCompletionReport("**STATUS:** DONE"), /completion_report XML/);
 });
 
 test("DONE worker output requires passing verification and canonicalizes changed files", () => {

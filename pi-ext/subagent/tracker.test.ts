@@ -13,15 +13,16 @@ test("tracker exposes live agent state and persists its prompt and events", () =
 
   tracker.start({ runId: "run-12345678", agent: "task-worker", task: "Fix the deploy race", cwd, stage: "worker", taskId: "t-42", stop: () => { stopped = true; } });
   tracker.event("run-12345678", "tool", "bash");
+  tracker.event("run-12345678", "tool", "read");
   tracker.setUsage("run-12345678", { input: 10_000, output: 2_400, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 });
 
   const run = tracker.get("run-12345678");
   assert.equal(run?.status, "running");
-  assert.equal(run?.events.at(-1)?.summary, "bash");
+  assert.equal(run?.events.at(-1)?.summary, "read");
   assert.equal(formatAgentFooter(tracker.list(), 120), "1 active · 1 open");
   assert.match(renderAgentWidget(tracker.list(), 80).join("\n"), /Fix the deploy race/);
-  assert.match(renderAgentWidget(tracker.list(), 80).join("\n"), /using bash/);
-  assert.match(renderAgentWidget(tracker.list(), 120).join("\n"), /↻ 1 · 0 tok \(i 10k\/o 2\.4k\)/);
+  assert.match(renderAgentWidget(tracker.list(), 80).join("\n"), /using read/);
+  assert.match(renderAgentWidget(tracker.list(), 120).join("\n"), /↻ 1 · 0 tok \(i 10k\/o 2\.4k\) · 2 tools/);
   assert.equal(tracker.stop("run-12345678"), true);
   assert.equal(stopped, true);
 
@@ -93,17 +94,17 @@ test("tracker projects managed process and turn lifecycle in the live widget", (
   assert.match(renderAgentWidget([run], 80).join("\n"), /finalizing/);
 });
 
-test("tracker syncs nested persona runs under their task-rri parent", () => {
+test("tracker syncs nested persona runs under their RRI parent", () => {
   const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
   const parent = new AgentRunTracker();
   const child = new AgentRunTracker();
-  parent.start({ runId: "rri-parent", agent: "task-rri", task: "Prepare interview", cwd });
+  parent.start({ runId: "rri-parent", agent: "rri-persona", task: "Prepare interview", cwd });
   child.start({ runId: "persona-child", parentRunId: "rri-parent", agent: "rri-persona", task: "End User", cwd });
 
   parent.sync(cwd);
 
   assert.equal(parent.get("persona-child")?.parentRunId, "rri-parent");
   const widget = renderAgentWidget(parent.list(), 120).join("\n");
-  assert.match(widget, /task-rri/);
+  assert.match(widget, /rri-persona/);
   assert.match(widget, /rri-persona.*End User/);
 });

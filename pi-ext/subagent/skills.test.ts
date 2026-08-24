@@ -37,6 +37,13 @@ test("resolveSkillDirectories keeps baselines global and merges project family o
   assert.deepEqual(resolved.slice(1), [join(global, "languages/golang"), join(project, "languages/golang")]);
 });
 
+test("packaged codebase-design baseline includes its companion guidance", () => {
+  const packagedRoot = fileURLToPath(new URL("../task-skills", import.meta.url));
+  const resolved = resolveSkillDirectories({ baselineSkills: ["codebase-design"], skillFamilies: [], packagedRoot, globalRoot: join(tmpdir(), "missing-task-skills"), projectRoot: null });
+  assert.equal(resolved.length, 1);
+  assert.match(resolved[0]!, /task-skills[\\/]codebase-design$/);
+});
+
 test("resolveSkillDirectories accepts skills from the agent catalog", () => {
   const fixture = mkdtempSync(join(tmpdir(), "task-skills-"));
   const agent = join(fixture, "agent");

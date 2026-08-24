@@ -85,7 +85,7 @@ test("startSubagent supplies extension-owned methodologies", async () => {
   let methodologyDir = "";
   const cwd = mkdtempSync(join(tmpdir(), "task-subagent-methodologies-"));
   const handle = startSubagent({
-    agent: { name: "task-rri", description: "", systemPrompt: "", source: "packaged", filePath: "task-rri.md" },
+    agent: { name: "rri-persona", description: "", systemPrompt: "", source: "packaged", filePath: "rri-persona.md" },
     task: "verify methodology path",
     cwd,
     stage: "rri",
@@ -400,7 +400,7 @@ test("child agents disable inherited extensions and load the owned task-system e
   const cwd = mkdtempSync(join(tmpdir(), "task-subagent-runner-"));
   let invocation: any;
   const handle = startSubagent({
-    agent: { name: "task-rri", description: "", tools: ["read", "subagent"], systemPrompt: "", source: "packaged", filePath: "task-rri.md" },
+    agent: { name: "rri-persona", description: "", tools: ["read", "subagent"], systemPrompt: "", source: "packaged", filePath: "rri-persona.md" },
     task: "prepare interview",
     cwd,
     tracker,

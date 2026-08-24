@@ -4,10 +4,10 @@ This spec proposes contractor-closed executable work and one branch-owning deliv
 
 ## Goals
 
-- A passed contractor verification atomically completes an executable child without an owner decision.
+- A passed child Code Review and valid Completion Report atomically complete an executable Task without an owner decision; child Code Review is Standards/Spec review, not aggregate QA.
 - Aggregate workflow status advances only after every required descendant is complete and exposes aggregate verification, owner acceptance, merge, and closure as distinct gates.
 - Exactly one aggregate on a containment path may own the current delivery branch; Features own by default, Epics coordinate by default, and `integration:branch` / `integration:coordination` labels provide explicit overrides.
-- Aggregate verification and owner acceptance bind the exact delivery branch head and current `develop` base.
+- Aggregate verification is the final integrated QA gate and binds the exact delivery branch head and current `develop` base.
 - A branch-owning aggregate merges and pushes to `develop` after owner acceptance, then closes only after the remote target confirms the merge.
 - Coordination aggregates close after aggregate verification and one owner acceptance without a Git merge.
 
@@ -50,7 +50,7 @@ This spec proposes contractor-closed executable work and one branch-owning deliv
 2. Given a Feature with no branch-owning ancestor, when implementation is authorized from a non-`develop` branch, then that exact branch and current `develop` base are recorded as its delivery authority.
 3. Given an Epic without an override, when implementation is authorized, then it is recorded as coordination-only and does not own a branch.
 4. Given an aggregate beneath a branch-owning ancestor, when authorization attempts to assign another branch owner, then authorization fails without changing persisted authority.
-5. Given all required descendants are complete, when workflow status is queried, then the next stage is `aggregate_verification`; before that it remains `implement`.
+5. Given all required bite-sized Tasks have focused evidence, passed child Code Review, and complete reports, when workflow status is queried, then the next stage is `aggregate_verification`; before that it remains `implement`.
 6. Given passed aggregate verification, when the branch head or target base differs from the report binding, then owner acceptance fails as stale.
 7. Given current aggregate verification, when the owner accepts a coordination aggregate, then it closes without a merge.
 8. Given current aggregate verification, when the owner accepts a branch aggregate, then it enters `merge_pending`; only confirmed remote `develop` merge evidence moves it to `done`.

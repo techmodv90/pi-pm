@@ -8,9 +8,9 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { Type } from "typebox";
 import { execGitIndexWrite, execPic, execPicText, withGitWriteLock } from "../core/cli-helpers.ts";
 import { EphemeralHandoffStore } from "../core/ephemeral-handoffs.ts";
+import { loadLatestBlueprintDraft } from "../core/blueprint-drafts.ts";
 import { XMLParser, XMLValidator } from "fast-xml-parser";
-import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../reporting/blueprint-report.ts";
-import { parseTaskGraphReportJson, renderTaskGraphReportMarkdown } from "../reporting/task-graph-report.ts";
+
 
 import { validateSkillFamilies } from "../subagent/skills.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -29,8 +29,35 @@ const DEFAULT_GENERATED_FILES = ["test-results/**", "playwright-report/**", "cov
 // This is a stage/agent registry only; dispatch eligibility is decided by the
 // persisted Plan profile, never by this list (see resolvePlanProfile).
 const planningStages: PipelineStage[] = ["rri", "vision", "blueprint", "contracts", "task_graph"];
+const RRI_T_PERSONAS = ["End User", "Business Analyst", "QA / Tester", "Developer", "Operator"] as const;
+const RRI_T_DIMENSIONS = new Set(["D1", "D2", "D3", "D4", "D5", "D6", "D7"]);
+const RRI_T_STRESS_AXES = new Set(["TIME", "DATA", "ERROR", "COLLABORATION", "EMERGENCY", "SCALE", "COMPLIANCE", "EVOLUTION"]);
+const RRI_T_RESULTS = new Set(["PASS", "ACCEPTABLE", "PAINFUL", "FAIL"]);
 
 function isPlanningStage(stage: PipelineStage): boolean { return planningStages.includes(stage); }
+
+function normalizeRriTXml(output: string): string {
+  const trimmed = output.trim().replace(/^```(?:xml)?\s*([\s\S]*?)\s*```$/, "$1").trim();
+  const start = trimmed.indexOf("<rri_t_persona");
+  const end = trimmed.lastIndexOf("</rri_t_persona>");
+  if (start < 0 || end <= start) throw new Error("RRI-T persona output must contain one rri_t_persona document");
+  return trimmed.slice(start, end + "</rri_t_persona>".length);
+}
+
+export function parseRriTPersonaResult(output: string, expectedPersona: string): any {
+  const xml = normalizeRriTXml(output);
+  const parsed = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_", trimValues: true }).parse(xml)?.rri_t_persona;
+  if (!parsed || parsed["@_persona"] !== expectedPersona) throw new Error(`RRI-T output has unexpected persona; expected ${expectedPersona}`);
+  const scenarios = Array.isArray(parsed.scenarios?.scenario) ? parsed.scenarios.scenario : parsed.scenarios?.scenario ? [parsed.scenarios.scenario] : [];
+  const normalized = scenarios.map((scenario: any) => {
+    const value = Object.fromEntries(["id", "dimension", "stress_axis", "requirement_id", "procedure", "evidence", "result", "remediation"].map((key) => [key, String(scenario[key] || "").trim()]));
+    if (!value.id || !RRI_T_DIMENSIONS.has(value.dimension) || !RRI_T_STRESS_AXES.has(value.stress_axis) || !value.requirement_id || !value.procedure || !value.evidence || !RRI_T_RESULTS.has(value.result)) throw new Error(`RRI-T ${expectedPersona} returned an invalid scenario`);
+    return value;
+  });
+  const notApplicable = parsed.not_applicable?.topic ? (Array.isArray(parsed.not_applicable.topic) ? parsed.not_applicable.topic : [parsed.not_applicable.topic]).map((topic: any) => ({ topic: String(topic.topic || ""), reason: String(topic.reason || "") })) : [];
+  if (notApplicable.some((topic: any) => !topic.topic || !topic.reason)) throw new Error(`RRI-T ${expectedPersona} returned an invalid N/A topic`);
+  return { persona: expectedPersona, scenarios: normalized, not_applicable: notApplicable, open_blockers: parsed.open_blockers?.blocker ? (Array.isArray(parsed.open_blockers.blocker) ? parsed.open_blockers.blocker : [parsed.open_blockers.blocker]).map(String) : [] };
+}
 
 // Planning profile constraint: dispatch authority for planning stages comes from
 // the persisted Plan profile (work_item_profiles), falling back to deterministic
@@ -80,6 +107,19 @@ export function resolvePlanProfile(data: any): PlanningProfileState {
     stages: planStagesForProfile(item.type || "", item.parent_id || "", depth),
     resolved: false,
   };
+}
+
+export function runnerRepairEvidence(evidenceJson: string): string {
+  const evidence = JSON.parse(evidenceJson);
+  if (!evidence || typeof evidence !== "object" || Array.isArray(evidence)) throw new Error("runner repair evidence must be a JSON object");
+  if (!evidence.changed_fingerprint) {
+    const hash = createHash("sha256");
+    for (const file of ["./pipeline-scheduler.ts", "../subagent/runner.ts", "../agents/task-worker.md", "../agents/task-reviewer.md"]) {
+      hash.update(readFileSync(new URL(file, import.meta.url)));
+    }
+    evidence.changed_fingerprint = `runner:${hash.digest("hex")}`;
+  }
+  return JSON.stringify(evidence);
 }
 
 function verificationEnvironmentFingerprint(cwd: string): string {
@@ -338,7 +378,8 @@ export function nextPipelineStage(data: any, runs: any[] = []): PipelineStage | 
   const candidate = runs.find((run: any) => isMutationStage(run.stage) && run.status === "completed"
     && run.instruction_pack_hash === activePack.content_hash && run.artifact_saved_at && run.integrated_patch_hash);
   if (!latest && candidate) {
-    return reviewStatusForCandidate(runs, candidate) === "failed" ? "worker" : "review";
+    const review = reviewStatusForCandidate(runs, candidate);
+    return review === "failed" && !reviewRequiresOwner(runs, candidate) ? "worker" : review === "failed" ? null : "review";
   }
 
   const done = Boolean(latest && runs.some((run: any) =>
@@ -349,11 +390,17 @@ export function nextPipelineStage(data: any, runs: any[] = []): PipelineStage | 
   const completionCandidate = runs.find((run: any) => run.id === latest?.pipeline_run_id);
   const durableReviewStatus = reviewStatusForCandidate(runs, completionCandidate);
   const reviewStatus = data.canonical || runs.some((run: any) => run.stage === "review") ? durableReviewStatus : data.work_item?.review_status;
-  if (reviewStatus === "failed") return "worker";
+  if (reviewStatus === "failed") return reviewRequiresOwner(runs, completionCandidate) ? null : "worker";
   const verification = latestVerificationAfter(data, latest);
   if (reviewStatus === "passed" && verification && (verification.status === "failed" || verification.status === "partial")) return "autofix";
   if (reviewStatus !== "passed") return "review";
   return null;
+}
+
+function reviewRequiresOwner(runs: any[], candidate: any): boolean {
+  const review = runs.find((run: any) => run.stage === "review" && run.status === "completed"
+    && run.candidate_run_id === candidate?.id && run.candidate_patch_hash === candidate?.integrated_patch_hash);
+  try { return JSON.parse(review?.result_json || "{}").owner_approval_required === true; } catch { return false; }
 }
 
 function reviewStatusForCandidate(runs: any[], candidate: any): "passed" | "failed" | "" {
@@ -418,25 +465,59 @@ function activePackDoneReports(data: any, activePack: any): any[] {
         || (!decision.related_type && decision.created_at >= report.created_at)))));
 }
 
-export function parseTaskCompletionReport(output: string): { status: "done" | "partial" | "blocked"; markdown: string } {
-  const statusMatch = output.match(/\*\*STATUS:\*\*\s*(DONE|PARTIAL|BLOCKED)\b/i);
-  if (!statusMatch) throw new Error("worker output missing canonical Completion/Issue Report status");
-  for (const section of ["FILES CHANGED", "TEST RESULTS", "ISSUES DISCOVERED", "DEVIATIONS FROM SPEC", "SUGGESTIONS FOR CHỦ THẦU"]) {
-    if (!output.includes(`**${section}:**`)) throw new Error(`worker output missing ${section}`);
+export function parseTaskCompletionReport(output: string): { status: "done" | "partial" | "blocked"; markdown: string; blocker: string } {
+  const documents = [...output.matchAll(/<completion_report\b[\s\S]*?<\/completion_report>/g)].map((match) => match[0]);
+  if (documents.length !== 1) throw new Error("worker output must contain one completion_report XML document");
+  const document = documents[0]!.replace(/<([^<>\s]+)&gt;/g, "&lt;$1&gt;");
+  if (!XMLValidator.validate(document)) throw new Error("worker output contains invalid XML");
+  let parsed: any;
+  try {
+    parsed = new XMLParser({ ignoreAttributes: false }).parse(document)?.completion_report;
+  } catch (error) {
+    throw new Error(`worker output contains invalid XML: ${error instanceof Error ? error.message : String(error)}`);
   }
-  return { status: statusMatch[1]!.toLowerCase() as "done" | "partial" | "blocked", markdown: output };
+  const status = String(parsed?.["@_status"] || "").toLowerCase();
+  if (!["done", "partial", "blocked"].includes(status)) throw new Error("worker output has invalid status");
+  const sections = Object.fromEntries(["files_changed", "test_results", "issues_discovered", "deviations", "suggestions"].map((section) => {
+    const text = completionSectionText(parsed?.[section]);
+    if (!text) throw new Error(`worker output missing ${section}`);
+    return [section, text];
+  }));
+  const blocker = [sections.issues_discovered, sections.deviations]
+    .filter((value) => value && value.toLowerCase() !== "none")
+    .join(" ");
+  return { status: status as "done" | "partial" | "blocked", markdown: document, blocker };
+}
+
+function completionSectionText(value: unknown): string {
+  if (typeof value === "string" || typeof value === "number") return String(value).trim();
+  if (Array.isArray(value)) return value.map(completionSectionText).filter(Boolean).join("\n");
+  if (value && typeof value === "object") return Object.entries(value)
+    .filter(([key]) => !key.startsWith("@_"))
+    .map(([, child]) => completionSectionText(child))
+    .filter(Boolean)
+    .join("\n");
+  return "";
 }
 
 
-export function parseReviewReport(output: string): { status: "passed" | "failed"; notes: string; findings: string[] } {
-  const matches = [...output.matchAll(/```review-report\s*\n([\s\S]*?)\n```/g)];
-  if (matches.length !== 1) throw new Error("expected exactly one review-report block");
-  const report = JSON.parse(matches[0]![1]!);
-  if (report.status !== "passed" && report.status !== "failed") throw new Error("invalid review status");
-  if (typeof report.notes !== "string" || !report.notes.trim()) throw new Error("review report notes are required");
-  if (!Array.isArray(report.findings) || !report.findings.every((finding: unknown) => typeof finding === "string")) throw new Error("review report findings must be strings");
-  if (report.status === "passed" && report.findings.length) throw new Error("passed review report cannot contain findings");
-  return { status: report.status, notes: report.notes, findings: report.findings };
+export function parseReviewReport(output: string): { status: "passed" | "failed"; notes: string; findings: string[]; ownerApprovalRequired: boolean } {
+  const outputText = output.trim();
+  const start = outputText.indexOf("<review_report");
+  const end = outputText.lastIndexOf("</review_report>");
+  if (start < 0 || end < start || outputText.indexOf("<review_report", start + 1) >= 0) throw new Error("expected one review_report XML document");
+  const document = outputText.slice(start, end + "</review_report>".length);
+  if (!XMLValidator.validate(document)) throw new Error("review report contains invalid XML");
+  const report = new XMLParser({ ignoreAttributes: false }).parse(document)?.review_report;
+  const reviewStatus = report?.["@_status"];
+  if (reviewStatus !== "passed" && reviewStatus !== "failed") throw new Error("invalid review status");
+  if (typeof report?.notes !== "string" || !report.notes.trim()) throw new Error("review report notes are required");
+  const findings = report.findings?.finding ? (Array.isArray(report.findings.finding) ? report.findings.finding : [report.findings.finding]) : [];
+  if (!findings.every((finding: unknown) => typeof finding === "string" && finding.trim())) throw new Error("review report findings must be strings");
+  const normalizedStatus = reviewStatus === "passed" && findings.length ? "failed" : reviewStatus;
+  const ownerApprovalRequired = String(report.owner_approval_required || "").toLowerCase() === "true";
+  if (normalizedStatus === "passed" && ownerApprovalRequired) throw new Error("passed review report cannot require owner approval");
+  return { status: normalizedStatus, notes: report.notes, findings, ownerApprovalRequired };
 }
 
 
@@ -726,14 +807,45 @@ export function parseRriSynthesisResult(output: string): any {
   return value;
 }
 
-function startRriFanout(spec: any, taskRriAgent: any, personaAgent: any, handoffs: EphemeralHandoffStore): SubagentHandle {
+function escapeRriText(value: unknown): string {
+  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function rriQuestionKey(question: any): string {
+  return `${question.priority || "P3"}|${question.requirement_area || ""}|${String(question.question || "").trim().toLowerCase().replace(/\s+/g, " ")}`;
+}
+
+function deterministicRriSynthesis(personaResults: Array<{ persona: string; parsed: any }>): string {
+  const questions = new Map<string, any>();
+  const autoAnswered: any[] = [];
+  const notApplicable: any[] = [];
+  for (const { persona, parsed } of personaResults) {
+    for (const answer of parsed.auto_answered || []) autoAnswered.push({ ...answer, persona });
+    for (const topic of parsed.not_applicable || []) notApplicable.push({ ...topic, persona });
+    for (const question of parsed.candidate_questions || []) {
+      const key = rriQuestionKey(question);
+      const current = questions.get(key);
+      if (current) current.personas = [...new Set([...(current.personas || []), persona])];
+      else questions.set(key, { ...question, personas: [persona] });
+    }
+  }
+  const priorities = ["P0", "P1", "P2", "P3"];
+  const ordered = [...questions.values()].sort((a, b) => priorities.indexOf(a.priority) - priorities.indexOf(b.priority) || String(a.mode).localeCompare(String(b.mode)));
+  const renderQuestion = (question: any) => `<question priority="${escapeRriText(question.priority)}" classification="${escapeRriText(question.classification)}" mode="${escapeRriText(question.mode)}"><question>${escapeRriText(question.question)}</question><suggested_answer>${escapeRriText(question.suggested_answers?.[0])}</suggested_answer><reason>${escapeRriText(question.reason)}</reason><requirement_area>${escapeRriText(question.requirement_area)}</requirement_area><personas>${escapeRriText((question.personas || []).join(", "))}</personas></question>`;
+  const next = ordered[0];
+  const answers = autoAnswered.map((answer) => `<answer confidence="${escapeRriText(answer.confidence)}"><question>${escapeRriText(answer.question)}</question><answer>${escapeRriText(answer.answer)}</answer><source>${escapeRriText(`${answer.source} (${answer.persona})`)}</source></answer>`).join("");
+  const notApplicableXml = notApplicable.map((topic) => `<topic><topic>${escapeRriText(topic.topic)}</topic><reason>${escapeRriText(`${topic.reason} (${topic.persona})`)}</reason></topic>`).join("");
+  return `<rri_synthesis><next_question>${next ? renderQuestion(next) : ""}</next_question><remaining_queue>${ordered.slice(1).map(renderQuestion).join("")}</remaining_queue><auto_answered>${answers}</auto_answered><not_applicable>${notApplicableXml}</not_applicable><open_blockers></open_blockers><final_report></final_report></rri_synthesis>`;
+}
+
+function startRriFanout(spec: any, personaAgent: any, handoffs: EphemeralHandoffStore): SubagentHandle {
   const id = randomUUID();
   const handles: SubagentHandle[] = [];
   let stopped = false;
   const personas: readonly string[] = /\b(production|deploy(?:ment)?|operations?|observability|backup|recovery|scal(?:e|ing)|uptime)\b/i.test(spec.task)
     ? [...RRI_PERSONAS, "Operator"]
     : RRI_PERSONAS;
-  const launchPersona = async (persona: string, attempt = 0, correction = ""): Promise<{ output: string; result: SubagentResult }> => {
+  const launchPersona = async (persona: string, attempt = 0, correction = ""): Promise<{ output: string; result: SubagentResult; parsed: any; persona: string }> => {
     const handle = startSubagent({
       ...spec,
       runId: undefined,
@@ -746,56 +858,35 @@ function startRriFanout(spec: any, taskRriAgent: any, personaAgent: any, handoff
     try {
       if (result.exitCode !== 0) throw new Error(result.errorMessage || result.stderr || "persona process failed");
       const output = finalAssistantText(result.messages);
-      parseRriPersonaResult(output, persona);
-      return { output, result };
+      const parsed = parseRriPersonaResult(output, persona);
+      return { output, result, parsed, persona };
     } catch (error) {
       if (attempt === 0 && !stopped) return launchPersona(persona, 1, error instanceof Error ? error.message : String(error));
       throw new Error(`RRI persona ${persona} ${error instanceof Error ? error.message : String(error)}`);
     }
   };
-  const result = Promise.all(personas.map((persona) => launchPersona(persona))).then(async (personaResults): Promise<SubagentResult> => {
+  const result = Promise.all(personas.map((persona) => launchPersona(persona))).then((personaResults): SubagentResult => {
     const synchronized = personaResults.map(({ output, result }) => ({ handoffId: handoffs.put("rri-persona", spec.taskId, output), result }));
-    const handoffPayloads = synchronized.map(({ handoffId }) => {
-      const entry = handoffs.get(handoffId, spec.taskId);
-      if (!entry) throw new Error(`RRI persona handoff unavailable: ${handoffId}`);
-      return `<handoff id="${handoffId}">${entry.payload}</handoff>`;
-    });
-    const synthesisAttempts: SubagentResult[] = [];
-    const launchSynthesis = async (attempt = 0, correction = ""): Promise<SubagentResult> => {
-      const synthesis = startSubagent({
-        ...spec,
-        runId: undefined,
-        agent: taskRriAgent,
-        task: `${spec.task}\n\nThe scheduler has completed and validated all required persona runs. Do not launch subagents. Synthesize the prepared owner interview from these scheduler-provided XML handoffs:\n<rri_persona_handoffs>${handoffPayloads.join("\n")}</rri_persona_handoffs>${correction ? `\n\nRRI synthesis failed validation: ${correction}. This is the only retry. The first element must be <rri_synthesis> and the last must be </rri_synthesis>; emit no other text.` : ""}`,
-      });
-      handles.push(synthesis);
-      const synthesisResult = await synthesis.result;
-      synthesisAttempts.push(synthesisResult);
-      try {
-        if (synthesisResult.exitCode !== 0) throw new Error(synthesisResult.errorMessage || synthesisResult.stderr || "synthesis process failed");
-        parseRriSynthesisResult(finalAssistantText(synthesisResult.messages));
-        return synthesisResult;
-      } catch (error) {
-        if (attempt === 0 && !stopped) return launchSynthesis(1, error instanceof Error ? error.message : String(error));
-        throw error;
-      }
-    };
-    const synthesisResult = await launchSynthesis();
+    for (const { handoffId } of synchronized) {
+      if (!handoffs.get(handoffId, spec.taskId)) throw new Error(`RRI persona handoff unavailable: ${handoffId}`);
+    }
+    const synthesisOutput = deterministicRriSynthesis(personaResults);
+    parseRriSynthesisResult(synthesisOutput);
     for (const { handoffId } of synchronized) handoffs.delete(handoffId);
-    return { ...synthesisResult, runId: id, agent: "task-rri-group", usage: [...synchronized.map((entry) => entry.result), ...synthesisAttempts].reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }) };
+    return {
+      runId: id,
+      agent: "rri-persona-group",
+      task: spec.task,
+      exitCode: 0,
+      messages: [{ role: "assistant", content: [{ type: "text", text: synthesisOutput }] }],
+      stderr: "",
+      errorMessage: "",
+      usage: synchronized.map((entry) => entry.result).reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
+    };
   }).catch((error): SubagentResult => {
     stopped = true;
     handles.forEach((handle) => handle.stop());
-    return {
-      runId: id,
-      agent: "task-rri-group",
-      task: spec.task,
-      exitCode: 1,
-      messages: [],
-      stderr: error instanceof Error ? error.message : String(error),
-      errorMessage: error instanceof Error ? error.message : String(error),
-      usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-    };
+    return { runId: id, agent: "rri-persona-group", task: spec.task, exitCode: 1, messages: [], stderr: error instanceof Error ? error.message : String(error), errorMessage: error instanceof Error ? error.message : String(error), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 } };
   });
   return { id, result, stop: () => { stopped = true; handles.forEach((handle) => handle.stop()); } };
 }
@@ -897,7 +988,11 @@ function checkpoint(run: PipelineRun, name: "integrated" | "artifact_saved" | "a
     execPicText(args, cwd);
   } catch (error: any) {
     const message = error?.stderr?.toString().trim() || error?.message || String(error);
-    if (!message.includes("already recorded")) throw new Error(message);
+    if (message.includes("already recorded")) return;
+    // Terminal runs with an expired lease are reconciled by the durable pending-run sweep.
+    // Do not turn that cleanup race into a new worker blocker.
+    if (name === "advanced" && (message.includes("invalid stage, status, lease") || message.includes("stale, invalid, or already recorded"))) return;
+    throw new Error(message);
   }
 }
 
@@ -919,7 +1014,7 @@ function saveWorkerReport(run: PipelineRun, cwd: string, taskReport: { status: "
 
 function stageAgent(stage: PipelineStage): string {
   if (stage === "contracts") throw new Error("Contract drafting is Contractor-owned");
-  return ({ scan: "task-scout", rri: "task-rri", vision: "task-planner", blueprint: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
+  return ({ scan: "task-scout", rri: "rri-persona", vision: "task-planner", blueprint: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
 }
 
 export function buildWorkerCorrectionContext(data: any): string {
@@ -954,9 +1049,23 @@ export function assertReviewFixChangedPatch(run: PipelineRun, patch: Buffer): vo
   if (patchHash === run.candidate_patch_hash) throw new Error("review-fix produced the unchanged rejected candidate patch");
 }
 
-function planningHandoff(stage: "blueprint" | "task_graph", raw: any, taskId: string): string {
-  const payload = JSON.stringify(raw).replaceAll("]]>", "]] ]>");
-  return `<${stage}_handoff schema_version="1" work_item_id="${taskId}"><approved_context><![CDATA[${payload}]]></approved_context></${stage}_handoff>`;
+export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, taskId: string): string {
+  const requiredStages = stage === "blueprint" ? ["scan", "rri", "vision"] : ["scan", "rri", "vision", "blueprint", "contracts"];
+  const checkpoints = (Array.isArray(raw?.checkpoints) ? raw.checkpoints : [])
+    .filter((checkpoint: any) => requiredStages.includes(checkpoint.stage))
+    .reduce((latest: Map<string, any>, checkpoint: any) => {
+      const current = latest.get(checkpoint.stage);
+      if (!current || Number(checkpoint.artifact_revision || 0) > Number(current.artifact_revision || 0)) latest.set(checkpoint.stage, checkpoint);
+      return latest;
+    }, new Map<string, any>());
+  const payload = {
+    work_item: { id: taskId, title: raw?.work_item?.title || "", type: raw?.work_item?.type || "", description: String(raw?.work_item?.description || "").slice(0, 4000) },
+    project: { name: raw?.project?.name || "", root_path: raw?.project?.root_path || "." },
+    approved_context: [...checkpoints.values()].map((checkpoint: any) => ({ stage: checkpoint.stage, artifact_id: checkpoint.artifact_id, artifact_revision: checkpoint.artifact_revision, content_hash: checkpoint.content_hash })),
+    instructions: "Load each approved context artifact with task_manager action load_planning_artifact before planning. Do not use historical revisions.",
+  };
+  const encoded = JSON.stringify(payload).replaceAll("]]>", "]] ]>");
+  return `<${stage}_handoff schema_version="2" work_item_id="${taskId}"><approved_context><![CDATA[${encoded}]]></approved_context></${stage}_handoff>`;
 }
 
 // Planning profile constraint: a handoff must name the approved checkpoint of
@@ -995,12 +1104,24 @@ function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string 
   return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildWorkerCorrectionContext(data);
 }
 
-function rejectedCandidatePatch(data: any, runs: PipelineRun[]): string | undefined {
+export function rejectedCandidatePatch(data: any, runs: PipelineRun[], cwd: string): string | undefined {
   const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
   const failedReview = currentFailedReview(runs, activePack);
   const candidate = failedReview?.candidate;
   if (!failedReview || !candidate || candidate.integrated_at) return undefined;
   if (!candidate?.integrated_patch_path || !existsSync(candidate.integrated_patch_path)) throw new Error("failed review candidate patch is unavailable");
+  try {
+    execFileSync("git", ["apply", "--check", candidate.integrated_patch_path], { cwd });
+  } catch {
+    try {
+      execFileSync("git", ["apply", "--reverse", "--check", candidate.integrated_patch_path], { cwd, stdio: "pipe" });
+      return undefined;
+    } catch {
+      // A sibling integration may have consumed only part of this candidate.
+      // Keep the failed verdict as correction authority, but rebuild from current HEAD.
+      return undefined;
+    }
+  }
   return candidate.integrated_patch_path;
 }
 
@@ -1018,6 +1139,51 @@ export class PipelineScheduler {
   private agentHandles = new Map<string, SubagentHandle>();
 
   constructor(pi: ExtensionAPI) { this.pi = pi; }
+
+  async runRriT(data: any): Promise<string> {
+    const item = data?.work_item || {};
+    const scope = JSON.stringify({ work_item: item, requirements: data?.requirements || [], artifacts: (data?.artifacts || []).filter((artifact: any) => ["scan", "vision", "blueprint", "contracts", "task_graph"].includes(artifact.stage)), children: data?.children || [] });
+    const text = `${item.title || item.id || "Aggregate"} ${item.description || ""} ${scope}`;
+    const personas: string[] = ["QA / Tester"];
+    if ((data?.requirements || []).length || /rule|workflow|policy|report|requirement|business/i.test(text)) personas.push("Business Analyst");
+    if (/ui|ux|user|screen|page|form|mobile|accessib/i.test(text)) personas.push("End User");
+    if (/api|database|integration|code|module|dependency|performance|backend|existing/i.test(text) || !personas.includes("Developer")) personas.push("Developer");
+    if (/production|deploy|operation|observability|backup|recovery|scale|uptime|monitor/i.test(text)) personas.push("Operator");
+    const uniquePersonas = [...new Set(personas)].filter((persona): persona is (typeof RRI_T_PERSONAS)[number] => RRI_T_PERSONAS.includes(persona as (typeof RRI_T_PERSONAS)[number]));
+    const personaAgent = discoverAgents(this.cwd, "project").find((candidate) => candidate.name === "rri-t-persona");
+    if (!personaAgent) throw new Error("Task-system agent definition not found: rri-t-persona");
+    const results = await Promise.all(uniquePersonas.map(async (persona) => {
+      let lastError = "";
+      for (let attempt = 0; attempt < 2; attempt++) {
+        const handle = startSubagent({
+          agent: personaAgent,
+          task: `# RRI-T aggregate evidence\nWork Item: ${item.id || "unknown"}\nAssigned perspective: ${persona}\n\nRepository context:\n${scope}\n\nSelect only risk-relevant scenarios for this perspective. Return exactly one <rri_t_persona> XML document.${lastError ? ` Previous output was invalid: ${lastError}. Correct it on this retry.` : ""}`,
+          cwd: this.cwd,
+          stage: "aggregate_verification",
+          taskId: item.id,
+          acceptance: "checked",
+        });
+        const result = await handle.result;
+        try {
+          if (result.exitCode !== 0) throw new Error(result.errorMessage || result.stderr || "persona process failed");
+          return parseRriTPersonaResult(finalAssistantText(result.messages), persona);
+        } catch (error) {
+          lastError = error instanceof Error ? error.message : String(error);
+        }
+      }
+      throw new Error(`RRI-T persona ${persona} failed validation: ${lastError}`);
+    }));
+    const seen = new Set<string>();
+    const scenarios = results.flatMap((result) => result.scenarios.map((scenario: any) => ({ ...scenario, persona: result.persona }))).filter((scenario: any) => {
+      const key = `${scenario.persona}|${scenario.dimension}|${scenario.stress_axis}|${scenario.requirement_id}|${scenario.id}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    const notApplicable = results.flatMap((result) => result.not_applicable.map((topic: any) => ({ ...topic, persona: result.persona })));
+    const counts = scenarios.reduce((summary: Record<string, number>, scenario: any) => { summary[scenario.result.toLowerCase()] = (summary[scenario.result.toLowerCase()] || 0) + 1; return summary; }, {});
+    return JSON.stringify({ methodology: "rri-t", personas: uniquePersonas, scenarios, not_applicable: notApplicable, open_blockers: results.flatMap((result) => result.open_blockers), summary: counts });
+  }
 
   private async persistAgentResult(result: SubagentResult): Promise<void> {
     const run = this.agentRuns.get(result.runId);
@@ -1316,7 +1482,8 @@ export class PipelineScheduler {
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
         if (stage === "worker" && currentFailedReview(runs, activePack)) {
           reviewFixTaskIds.add(taskId);
-          initialPatchPaths.set(taskId, rejectedCandidatePatch(data, runs)!);
+          const rejectedPatch = rejectedCandidatePatch(data, runs, this.cwd);
+          if (rejectedPatch) initialPatchPaths.set(taskId, rejectedPatch);
         }
       }
     }
@@ -1399,7 +1566,7 @@ export class PipelineScheduler {
           if (stage === "rri") {
             const personaAgent = discoverAgents(this.cwd, "project").find((candidate) => candidate.name === "rri-persona");
             if (!personaAgent) throw new Error("Task-system agent definition not found: rri-persona");
-            handle = startRriFanout(spec, agent, personaAgent, this.handoffs);
+            handle = startRriFanout(spec, personaAgent, this.handoffs);
           } else handle = stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)
             ? startFullScanFanout(spec, agent)
             : startSubagent({ ...spec, agent }, (update) => {
@@ -1501,9 +1668,8 @@ export class PipelineScheduler {
           }
         }
         if (taskReport.status !== "done") {
-          const reason = `worker reported ${taskReport.status}`;
-          if (!run.artifact_saved_at) checkpoint(run, "artifact_saved", this.cwd);
-          execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", reason, "--result-json", JSON.stringify(pipelineFailureResult(reason))], this.cwd);
+          const reason = taskReport.blocker || `worker reported ${taskReport.status}`;
+          execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", reason, "--result-json", JSON.stringify({ ...pipelineFailureResult(reason), blocker: reason, completion_report: taskReport.markdown })], this.cwd);
           checkpoint(run, "advanced", this.cwd);
           this.notifyBlockedAttempt(run, reason);
           return;
@@ -1513,7 +1679,7 @@ export class PipelineScheduler {
         assertReviewBaseCurrent(run, this.cwd);
         const review = parseReviewReport(outputFor(run));
         const reviewNotes = review.findings.length ? `${review.notes}\n\n${review.findings.map((finding) => `- ${finding}`).join("\n")}` : review.notes;
-        const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state, review_status: review.status, notes: review.notes, findings: review.findings, candidate_run_id: run.candidate_run_id, candidate_patch_hash: run.candidate_patch_hash })], this.cwd);
+        const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state, review_status: review.status, notes: review.notes, findings: review.findings, owner_approval_required: review.ownerApprovalRequired, candidate_run_id: run.candidate_run_id, candidate_patch_hash: run.candidate_patch_hash })], this.cwd);
         if (result.error) throw new Error(result.error);
         reviewCompleted = true;
         const update = execPic(["work-item", "review", run.task_id, review.status, "--notes", reviewNotes, "--pipeline-run-id", run.id], this.cwd);
@@ -1729,7 +1895,11 @@ export class PipelineScheduler {
   }
 
   private publishPlanningHandoff(run: PipelineRun, output: string): void {
-    const payload = run.stage === "blueprint" || run.stage === "task_graph" ? this.planningArtifactPresentation(run.task_id, run.stage) : output;
+    // Blueprint draft constraint: planner output is not canonical until the
+    // Contractor checkpoint and owner promotion complete.
+    const payload = run.stage === "blueprint"
+      ? JSON.stringify(loadLatestBlueprintDraft(this.cwd, run.task_id))
+      : output;
     const data = execPic(["show", run.task_id], this.cwd);
     const profile = resolvePlanProfile(data);
     const predecessor = predecessorCheckpointFor(data, run.stage, profile.stages);
@@ -1743,21 +1913,12 @@ export class PipelineScheduler {
     const handoffId = this.handoffs.put(run.stage, run.task_id, envelope);
     const action = run.stage === "rri"
       ? "conduct the owner interview, persist confirmed requirements and decisions, then save the owner-confirmed RRI artifact"
-      : `validate the result, save the ${run.stage} artifact, and present it for owner approval`;
+      : run.stage === "blueprint"
+        ? "load the temporary draft with load_blueprint_draft, validate its JSON content, and use its draft_id for review_blueprint_checkpoint; revise through save_blueprint_draft if needed, then present the checked draft for owner approval; do not call save_work_item_artifact"
+        : `validate the result, save the ${run.stage} artifact, and present it for owner approval`;
     this.pi.sendUserMessage(`${run.stage.toUpperCase()} analysis ready for ${run.task_id}. Load ephemeral handoff ${handoffId}, ${action}. The handoff expires after five minutes and is never persisted.`, { deliverAs: "followUp" });
   }
 
-  private planningArtifactPresentation(workItemId: string, stage: "blueprint" | "task_graph"): string {
-    const data = execPic(["show", workItemId], this.cwd);
-    const artifact = (Array.isArray(data.artifacts) ? data.artifacts : [])
-      .filter((entry: any) => entry.stage === stage)
-      .sort((a: any, b: any) => Number(b.revision || 0) - Number(a.revision || 0))[0];
-    if (!artifact?.id || typeof artifact.content !== "string") throw new Error(`${stage} planner completed without a persisted ${stage} artifact for ${workItemId}`);
-    const markdown = stage === "blueprint"
-      ? renderBlueprintReportMarkdown(parseBlueprintReportJson(artifact.content))
-      : renderTaskGraphReportMarkdown(parseTaskGraphReportJson(artifact.content));
-    return `${markdown}\n\n${stage === "blueprint" ? "Blueprint" : "Task Graph"} artifact: \`${artifact.id}\` (revision ${artifact.revision})`;
-  }
 
   private pipelineRuns(taskId: string): any[] {
     const runs = execPic(["workflow", "pipeline-runs", taskId], this.cwd);

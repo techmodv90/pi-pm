@@ -12,6 +12,10 @@ export interface TaskGraphNode {
   files: string[];
   verification: unknown[];
   skillFamilies: string[];
+  obligation_keys: string[];
+  provides: string[];
+  consumes: string[];
+  evidence_for: string[];
   [key: string]: unknown;
 }
 
@@ -41,7 +45,8 @@ export function parseTaskGraphReportJson(content: string): TaskGraphReport {
     text(node.priority, `${node.key} priority`);
     text(node.module, `${node.key} module`);
     if (!node.requirement_keys?.length) throw new Error(`Task Graph ${node.key} requirement_keys are required`);
-    if (!Array.isArray(node.depends_on) || !Array.isArray(node.files) || !Array.isArray(node.verification) || !Array.isArray(node.skillFamilies)) throw new Error(`Task Graph ${node.key} arrays are incomplete`);
+    if (node.requirement_keys.length > 2) throw new Error(`Task Graph ${node.key} has more than two requirement_keys; split the node`);
+    if (!Array.isArray(node.depends_on) || !Array.isArray(node.files) || !Array.isArray(node.verification) || !Array.isArray(node.skillFamilies) || !Array.isArray(node.obligation_keys) || !Array.isArray(node.provides) || !Array.isArray(node.consumes) || !Array.isArray(node.evidence_for)) throw new Error(`Task Graph ${node.key} arrays are incomplete`);
     if (!Number.isFinite(node.estimated_effort_minutes) || node.estimated_effort_minutes < 1) throw new Error(`Task Graph ${node.key} estimated_effort_minutes is invalid`);
   }
   const visiting = new Set<string>();

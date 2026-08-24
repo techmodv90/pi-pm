@@ -135,7 +135,7 @@ const validVisionArtifact = `{"project_name":"Task System","nature":{"interface"
 
 const validBlueprintArtifact = `{"project_info":{"project":"Task System","nature":"CLI + pipeline + team","date":"2026-08-17"},"goals":{"primary_goal":"Reliable workflow","target_audience":"Owner and agents","key_message":"Every transition is durable"},"architecture":{"building_blocks":["CLI","Scheduler","SQLite"],"connection_summary":"CLI drives scheduler state","data_flow":"Inputs -> CLI -> SQLite"},"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing","reuse":"go-pic"}],"file_structure":[{"path":"go-pic/cmd/pic","purpose":"Workflow backend"}],"rri_requirements_matrix":[{"blueprint_section":"Lifecycle","requirements":["REQ-001"],"source_questions":["Q1"]}],"task_decomposition_preview":{"estimated_tasks":1,"tasks":[{"tip_id":"TIP-001","title":"Lifecycle","goal":"Enforce transitions"}],"estimated_effort_minutes":30}}`
 
-const validContractArtifact = `{"project_name":"Task System","deliverables":[{"item":"Lifecycle","details":"Persisted workflow","requirements":["REQ-001"]}],"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing stack"}],"task_graph_summary":{"tip_count":8,"estimated_minutes":240},"not_included":["Legacy migration"]}`
+const validContractArtifact = `{"project_name":"Task System","deliverables":[{"item":"Lifecycle","details":"Persisted workflow","requirements":["REQ-001"]}],"obligations":[{"id":"OBL-001","requirement_keys":["REQ-001"],"behavior":"Persist workflow state","acceptance":"Given a valid workflow\nWhen it is persisted\nThen the state is queryable"}],"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing stack"}],"task_graph_summary":{"tip_count":8,"estimated_minutes":240},"not_included":["Legacy migration"]}`
 
 func planningArtifactContent(stage string) string {
 	if stage == "vision" {
@@ -755,7 +755,7 @@ Then it completes')`)
 		t.Fatalf("materialization created %d eager TIPs, err=%v", eagerPacks, err)
 	}
 	content := `{"schemaVersion":3,"skillFamilies":[],"goal":"Correct materialized task","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}]}`
-	pack := asObject(t, runPic(t, bin, root, home, "workflow", "instruction-pack-save", firstTaskID, "--source-type", "standalone_task", "--content-json", content, "--requirement-ids-json", `["req-m"]`))
+	pack := asObject(t, runPic(t, bin, root, home, "workflow", "instruction-pack-save", firstTaskID, "--source-type", "standalone_task", "--content-json", content, "--requirement-ids-json", `["req-m"]`, "--activate", "1"))
 	if pack["checkpoint_id"] != first["checkpoint_id"] {
 		t.Fatalf("materialized child pack checkpoint = %#v, materialization = %#v", pack, first)
 	}
@@ -770,6 +770,77 @@ Then it completes')`)
 	var packs int
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=?`, firstTaskID).Scan(&packs); err != nil || packs != packsBefore {
 		t.Fatalf("packs after rejected non-Gherkin save = %d, err=%v", packs, err)
+	}
+
+	repaired := asObject(t, runPic(t, bin, root, home, "work-item", "execution-reset", firstTaskID, "owner"))
+	if repaired["id"] != firstTaskID || repaired["status"] != "open" {
+		t.Fatalf("child execution reset = %#v", repaired)
+	}
+	var preservedMappings, preservedSiblings, activePacks int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id=?`, id).Scan(&preservedMappings)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=? OR parent_id IN (SELECT id FROM work_items WHERE parent_id=?)`, id, id).Scan(&preservedSiblings)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, firstTaskID).Scan(&activePacks)
+	if preservedMappings != 3 || preservedSiblings != 3 || activePacks != 0 {
+		t.Fatalf("child repair mappings=%d children=%d active_packs=%d", preservedMappings, preservedSiblings, activePacks)
+	}
+	if status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", firstTaskID)); status["next_stage"] != "instruction_pack" {
+		t.Fatalf("child repair next stage = %#v", status)
+	}
+
+	reset := asObject(t, runPic(t, bin, root, home, "work-item", "planning-reset", firstTaskID, "owner"))
+	if reset["id"] != id || reset["status"] != "open" {
+		t.Fatalf("owner re-scope reset = %#v", reset)
+	}
+	var remainingChildren, mappings, graphCheckpoints, stalePacks int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=? OR parent_id IN (SELECT id FROM work_items WHERE parent_id=?)`, id, id).Scan(&remainingChildren)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id=?`, id).Scan(&mappings)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph'`, id).Scan(&graphCheckpoints)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=?`, firstTaskID).Scan(&stalePacks)
+	if remainingChildren != 0 || mappings != 0 || graphCheckpoints != 0 || stalePacks != 0 {
+		t.Fatalf("owner re-scope retained children=%d mappings=%d task_graph_checkpoints=%d stale_packs=%d", remainingChildren, mappings, graphCheckpoints, stalePacks)
+	}
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "task_graph" {
+		t.Fatalf("owner re-scope next stage = %#v", status)
+	}
+}
+
+func TestPlanningResetInvalidatesApprovedLineageForRescan(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Stale planning"))
+	id := item["id"].(string)
+	for _, stage := range []string{"scan", "rri", "vision", "blueprint", "contracts"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-stale','`+id+`','REQ-STALE','Stale','Given stale context
+When planning reruns
+Then stale requirements are removed')`)
+	reset := asObject(t, runPic(t, bin, root, home, "work-item", "planning-reset", id, "owner"))
+	if reset["id"] != id || reset["status"] != "open" {
+		t.Fatalf("planning reset = %#v", reset)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var artifacts, checkpoints, requirements int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, id).Scan(&artifacts)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=?`, id).Scan(&checkpoints)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM requirements WHERE epic_id=?`, id).Scan(&requirements)
+	if artifacts != 0 || checkpoints != 0 || requirements != 0 {
+		t.Fatalf("stale planning remained artifacts=%d checkpoints=%d requirements=%d", artifacts, checkpoints, requirements)
+	}
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "scan" {
+		t.Fatalf("planning reset next stage = %#v", status)
 	}
 }
 
@@ -1575,6 +1646,18 @@ func TestExecutableWorkItemLifecycleUsesTIPAndGuardedClosure(t *testing.T) {
 	if out, err := child.CombinedOutput(); err == nil || !strings.Contains(string(out), "cannot mutate Work Item lifecycle") {
 		t.Fatalf("child agent assumed contractor authority: err=%v out=%s", err, out)
 	}
+	failed := asObject(t, runPic(t, bin, root, home, "work-item", "verification-save", id, completion["id"].(string), "failed", "bootstrap evidence failed", "--actor-role", "contractor"))
+	if failed["status"] != "failed" {
+		t.Fatalf("failed verification = %#v", failed)
+	}
+	retry := asObject(t, runPic(t, bin, root, home, "show", id))
+	if asObject(t, retry["work_item"])["status"] != "open" || retry["ready"] != true {
+		t.Fatalf("failed verification did not reopen executable = %#v", retry)
+	}
+	retryStatus := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if retryStatus["pipeline_stage"] != "autofix" {
+		t.Fatalf("failed verification workflow = %#v", retryStatus)
+	}
 	verification := asObject(t, runPic(t, bin, root, home, "work-item", "verification-save", id, completion["id"].(string), "passed", "checks passed", "--actor-role", "contractor"))
 	if verification["completion_report_id"] != completion["id"] || verification["verified_by_role"] != "contractor" {
 		t.Fatalf("verification lineage = %#v", verification)
@@ -1596,7 +1679,7 @@ func TestPipelineCircuitResetRestoresCanonicalRunnerRetry(t *testing.T) {
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
 	activateTestWorkItemTIP(t, dbPath, id)
 	suffix := strings.TrimPrefix(id, "wi-")
-	if out := runPicError(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "runner repaired", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"missing"}`, "--actor-role", "owner"); !strings.Contains(out, "terminal worker attempt") {
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "runner repaired", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"missing","changed_fingerprint":"runner-v1"}`, "--actor-role", "owner"); !strings.Contains(out, "terminal worker attempt") {
 		t.Fatalf("reset without terminal attempt = %s", out)
 	}
 	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--explicit-retry", "1"))
@@ -1606,13 +1689,16 @@ func TestPipelineCircuitResetRestoresCanonicalRunnerRetry(t *testing.T) {
 		t.Fatalf("terminal worker cleanup = %#v", shown)
 	}
 	runSQLite(t, dbPath, `UPDATE work_items SET status='in_progress' WHERE id='`+id+`'; INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,error,completed_at) VALUES('pr-failed','`+id+`','worker',2,'failed','lease-failed',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','subagent child failed',datetime('now'));`)
-	if out := runPicError(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "runner repaired", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"pr-failed"}`); !strings.Contains(out, "actor_role=owner") {
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "runner repaired", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"pr-failed","changed_fingerprint":"runner-v2"}`); !strings.Contains(out, "actor_role=owner") {
 		t.Fatalf("circuit reset without owner authority = %s", out)
 	}
 
-	reset := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "runner repaired", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"pr-failed"}`, "--actor-role", "owner"))
+	reset := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "runner repaired", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"pr-failed","changed_fingerprint":"runner-v2"}`, "--actor-role", "owner"))
 	if reset["event_type"] != "pipeline_circuit_reset" || !strings.Contains(reset["payload_json"].(string), `"change_type":"runner"`) {
 		t.Fatalf("reset evidence = %#v", reset)
+	}
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "same runner retry", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"pr-failed","changed_fingerprint":"runner-v2"}`, "--actor-role", "owner"); !strings.Contains(out, "unchanged execution fingerprint") {
+		t.Fatalf("unchanged reset accepted: %s", out)
 	}
 	shown := asObject(t, runPic(t, bin, root, home, "show", id))
 	if shown["ready"] != true || asObject(t, shown["work_item"])["status"] != "open" {
@@ -1634,7 +1720,7 @@ func TestPipelineCircuitResetRestoresCanonicalRunnerRetry(t *testing.T) {
 	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--review-fix", "1", "--explicit-retry", "1"); !strings.Contains(out, "unchanged active instruction pack") || strings.Contains(out, "effective contract") {
 		t.Fatalf("canonical circuit wording = %s", out)
 	}
-	runPic(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "owner approved one corrected retry", "--change-type", "artifact", "--evidence-json", `{"failed_run_id":"pr-invalid-fix"}`, "--actor-role", "owner")
+	runPic(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "owner approved one corrected retry", "--change-type", "artifact", "--evidence-json", `{"failed_run_id":"pr-invalid-fix","changed_fingerprint":"artifact-v2"}`, "--actor-role", "owner")
 	claim = asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--review-fix", "1", "--explicit-retry", "1"))
 	if claim["review_fix_cycle"] != float64(1) {
 		t.Fatalf("owner reset did not start a fresh review-fix epoch: %#v", claim)
@@ -1665,7 +1751,7 @@ func TestPipelineCircuitResetClearsAutomaticWorkerRetryLimit(t *testing.T) {
 	}
 
 	// Owner-authorized circuit reset clears the epoch.
-	runPic(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "runner repaired", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"all"}`, "--actor-role", "owner")
+	runPic(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "runner repaired", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"all","changed_fingerprint":"runner-v2"}`, "--actor-role", "owner")
 
 	// After reset, a new worker claim must succeed without --explicit-retry.
 	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))

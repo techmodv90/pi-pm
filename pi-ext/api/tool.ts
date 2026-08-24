@@ -15,9 +15,10 @@ import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../repo
 import { parseContractReportJson, renderContractReportMarkdown } from "../reporting/contract-report.ts";
 import { parseTaskGraphReportJson, renderTaskGraphReportMarkdown } from "../reporting/task-graph-report.ts";
 import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
+import { deleteBlueprintDraft, loadBlueprintDraft, loadLatestBlueprintDraft, saveBlueprintDraft } from "../core/blueprint-drafts.ts";
 
-import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
-import type { PipelineScheduler } from "../pipeline/pipeline-scheduler.ts";
+import { currentApprovedPlanningArtifact, withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
+import { runnerRepairEvidence, type PipelineScheduler } from "../pipeline/pipeline-scheduler.ts";
 
 function aggregateGitEvidence(cwd: string): { branch: string; head: string; baseBranch: string; baseCommit: string } {
   const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
@@ -52,7 +53,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
       parameters: Type.Object({
         action: StringEnum([
           "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview", "save_rri_interview",
-          "save_work_item_artifact", "approve_work_item_artifact", "reject_work_item_scan", "reset_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
+          "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
           "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
           "relate_work_items", "reset_pipeline_circuit",
         ] as const),
@@ -73,6 +74,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         work_item_type: Type.Optional(StringEnum(["epic", "feature", "task", "bug", "chore", "gate"] as const)),
         parent_id: Type.Optional(Type.String({ description: "Parent aggregate Work Item ID" })),
         labels: Type.Optional(Type.Array(Type.String(), { description: "Work Item labels" })),
+        deviation_ids: Type.Optional(Type.Array(Type.String(), { description: "Requirement IDs approved for deferment" })),
         stage: Type.Optional(StringEnum(["scan", "rri", "vision", "blueprint", "contracts", "task_graph"] as const)),
         artifact_id: Type.Optional(Type.String({ description: "Immutable Work Item artifact ID" })),
         completion_report_id: Type.Optional(Type.String({ description: "Current integrated Completion Report ID" })),
@@ -101,6 +103,23 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         }
 
         switch (params.action as string) {
+          case "save_blueprint_draft": {
+            if (!params.id || !params.content || params.stage !== "blueprint") return { content: [{ type: "text", text: "Error: id, stage=blueprint, and content required" }], details: {}, isError: true };
+            const report = parseBlueprintReportJson(params.content);
+            const draft = saveBlueprintDraft(ctx.cwd, params.id, params.content);
+            blueprintPresentation = renderBlueprintReportMarkdown(report);
+            return { content: [{ type: "text", text: `${blueprintPresentation}\n\nTemporary Blueprint draft: ${draft.draftId}\nContractor review is required before owner approval.` }], details: { draft_id: draft.draftId, temporary: true, path: `.pi/runtime/blueprint/${params.id}.json` } };
+          }
+          case "load_blueprint_draft": {
+            if (!params.id) return { content: [{ type: "text", text: "Error: id required" }], details: {}, isError: true };
+            try {
+              const draft = params.artifact_id ? loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id) : loadLatestBlueprintDraft(ctx.cwd, params.id);
+              return { content: [{ type: "text", text: JSON.stringify(draft, null, 2) }], details: { draft_id: draft.draftId, reviewed: draft.reviewed, temporary: true } };
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Error: ${message}` }], details: { error: message }, isError: true };
+            }
+          }
           case "checkpoint_rri_interview": {
             if (!params.id || !params.content) return { content: [{ type: "text", text: "Error: id and JSON content required" }], details: {}, isError: true };
             let state: unknown;
@@ -231,9 +250,47 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             args = ["work-item", "artifact-approve", params.id, params.stage, params.artifact_id, params.stage === "scan" ? "accepted" : "approved"];
             break;
           }
+          case "review_blueprint_checkpoint": {
+            if (!params.id || !params.artifact_id || !params.content || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, draft_id, content, and actor_role=contractor are required" }], details: {}, isError: true };
+            const draft = loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id);
+            const checkpoint = JSON.parse(params.content) as Record<string, unknown>;
+            const checks = ["architecture", "design", "requirements", "task_decomposition", "nothing_missing"];
+            if (!checks.every((key) => checkpoint[key] === true)) return { content: [{ type: "text", text: "Error: all five Blueprint checks must pass" }], details: {}, isError: true };
+            const reviewed = saveBlueprintDraft(ctx.cwd, params.id, draft.content, checkpoint);
+            blueprintPresentation = renderBlueprintReportMarkdown(parseBlueprintReportJson(draft.content)).replaceAll("- [ ]", "- [x]");
+            return { content: [{ type: "text", text: `${blueprintPresentation}\n\nContractor checkpoint passed. Draft ${reviewed.draftId} is ready for owner approval.` }], details: { draft_id: reviewed.draftId, reviewed: true } };
+          }
+          case "approve_blueprint_draft": {
+            if (!params.id || !params.artifact_id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id, draft_id, and actor_role=owner are required" }], details: {}, isError: true };
+            const draft = loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id);
+            if (!draft.reviewed) return { content: [{ type: "text", text: "Error: Contractor review is required before owner approval" }], details: {}, isError: true };
+            const saved = execPic(["work-item", "artifact-save", params.id, "blueprint", draft.content], ctx.cwd);
+            if (saved.error) return { content: [{ type: "text", text: `Error: ${saved.error}` }], details: saved, isError: true };
+            const approved = execPic(["work-item", "artifact-approve", params.id, "blueprint", saved.id, "approved"], ctx.cwd);
+            deleteBlueprintDraft(ctx.cwd, params.id);
+            return { content: [{ type: "text", text: JSON.stringify({ saved, approved }, null, 2) }], details: { saved, approved } };
+          }
+          case "load_planning_artifact": {
+            if (!params.id || !params.stage || !["scan", "rri", "vision", "blueprint", "contracts", "task_graph"].includes(params.stage)) return { content: [{ type: "text", text: "Error: id and a valid planning stage are required" }], details: {}, isError: true };
+            const data = execPic(["show", params.id], ctx.cwd);
+            const artifact = currentApprovedPlanningArtifact(data, params.stage);
+            if (!artifact) return { content: [{ type: "text", text: `Error: no approved current ${params.stage} artifact exists` }], details: {}, isError: true };
+            const result = { stage: params.stage, artifact_id: artifact.id, revision: artifact.revision, content_hash: artifact.content_hash, content: artifact.content };
+            return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: { stage: params.stage, artifact_id: artifact.id, revision: artifact.revision, content_hash: artifact.content_hash } };
+          }
+          case "approve_work_item_deviations": {
+            if (!params.id || params.actor_role !== "owner" || !params.deviation_ids?.length) return { content: [{ type: "text", text: "Error: id, deviation_ids, and actor_role must be owner after explicit owner approval" }], details: {}, isError: true };
+            args = ["work-item", "approve-deviations", params.id, params.actor_role, ...params.deviation_ids];
+            break;
+          }
           case "reset_work_item_planning": {
             if (!params.id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id and actor_role must be owner after explicit owner approval" }], details: {}, isError: true };
             args = ["work-item", "planning-reset", params.id, params.actor_role];
+            break;
+          }
+          case "reset_work_item_execution": {
+            if (!params.id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id and actor_role must be owner after explicit owner approval" }], details: {}, isError: true };
+            args = ["work-item", "execution-reset", params.id, params.actor_role];
             break;
           }
           case "reject_work_item_scan": {
@@ -263,7 +320,16 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           }
           case "verify_aggregate_work_item": {
             if (!params.id || !params.verification_status || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, verification_status, and actor_role=contractor required" }], details: {}, isError: true };
-            args = ["work-item", "aggregate-verify", params.id, params.verification_status, params.summary || params.notes || "", "--actor-role", params.actor_role];
+            const aggregateData = withInheritedParentWorkflowArtifacts(execPic(["show", params.id], ctx.cwd), ctx.cwd);
+            if (!aggregateData.work_item) return { content: [{ type: "text", text: `Error: ${aggregateData.error || "Work Item not found"}` }], details: {}, isError: true };
+            let rriTJson = "";
+            try {
+              rriTJson = await pipelineScheduler.runRriT(aggregateData);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `RRI-T verification blocked: ${message}` }], details: { error: message }, isError: true };
+            }
+            args = ["work-item", "aggregate-verify", params.id, params.verification_status, params.summary || params.notes || "", "--actor-role", params.actor_role, "--rri-t-json", rriTJson];
             const git = aggregateGitEvidence(ctx.cwd);
             args.push("--branch-name", git.branch, "--head-commit", git.head, "--base-commit", git.baseCommit);
             break;
@@ -313,7 +379,13 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           }
           case "reset_pipeline_circuit": {
             if (!params.id || !params.notes || !params.change_type || !params.evidence_json || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id, notes, change_type, evidence_json, and actor_role=owner required for reset_pipeline_circuit" }], details: {}, isError: true };
-            args = ["workflow", "pipeline-circuit-reset", params.id, "--reason", params.notes, "--change-type", params.change_type, "--evidence-json", params.evidence_json, "--actor-role", params.actor_role];
+            let evidenceJson = params.evidence_json;
+            try {
+              if (params.change_type === "runner") evidenceJson = runnerRepairEvidence(evidenceJson);
+            } catch (error) {
+              return { content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }], details: {}, isError: true };
+            }
+            args = ["workflow", "pipeline-circuit-reset", params.id, "--reason", params.notes, "--change-type", params.change_type, "--evidence-json", evidenceJson, "--actor-role", params.actor_role];
             break;
           }
           case "work_on_work_item": {
@@ -376,7 +448,10 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           (params.action === "approve_work_item_artifact" && params.stage === "rri")
           || params.action === "reset_work_item_planning"
           || (params.action === "update_work_item_status" && params.status === "cancelled")
-        )) deleteRriDraft(rriDraftRoot(ctx.cwd), params.id);
+        )) {
+          deleteRriDraft(rriDraftRoot(ctx.cwd), params.id);
+          deleteBlueprintDraft(ctx.cwd, params.id);
+        }
         if (!result.error && params.action === "create_work_item" && ["epic", "feature"].includes(params.work_item_type || "")) {
           const workflow = execPic(["work-item", "workflow-status", result.id], ctx.cwd);
           result.next_stage = workflow.next_stage;
@@ -414,6 +489,11 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             const message = error instanceof Error ? error.message : String(error);
             return { content: [{ type: "text", text: `Owner acceptance recorded; aggregate merge is pending: ${message}` }], details: { acceptance: result, error: message }, isError: true };
           }
+        }
+        if (!result.error && params.action === "review_blueprint_checkpoint") {
+          const checkpoint = JSON.parse(params.content || "{}");
+          const text = ["### CHECKPOINT", "- [x] Architecture matches expectations", "- [x] Design is appropriate (if UI)", "- [x] Requirements are complete (from RRI)", "- [x] Task decomposition is reasonable", "- [x] Nothing important is missing", "", "Contractor checkpoint passed. The Blueprint is ready for owner approval.", checkpoint.summary ? `\n${checkpoint.summary}` : ""].join("\n");
+          return { content: [{ type: "text", text }], details: { checkpoint: result } };
         }
         let text = result.error
           ? `Error: ${result.error}`

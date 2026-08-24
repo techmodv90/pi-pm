@@ -1,9 +1,9 @@
 const childTaskManagerActions: Record<string, ReadonlySet<string>> = {
   "task-reviewer": new Set(["show_work_item", "work_item_workflow_status", "trigger_work_item_review", "search"]),
   "task-scout": new Set(["list_work_items", "show_work_item", "work_item_workflow_status", "search"]),
-  "task-planner": new Set(["list_work_items", "show_work_item", "work_item_workflow_status", "save_work_item_artifact", "validate_work_item_graph", "search"]),
-  "task-rri": new Set(["show_work_item", "work_item_workflow_status", "save_work_item_artifact", "search"]),
+  "task-planner": new Set(["list_work_items", "show_work_item", "work_item_workflow_status", "load_planning_artifact", "save_blueprint_draft", "save_work_item_artifact", "validate_work_item_graph", "search"]),
   "rri-persona": new Set(["show_work_item", "work_item_workflow_status", "search"]),
+  "rri-t-persona": new Set(["show_work_item", "work_item_workflow_status", "search"]),
   // Worker, autofix, and debugger subagents implement within the isolated worktree
   // and never transition workflow lifecycle; persist nothing through task_manager,
   // and may only observe. Least privilege: read-only observation, no owner,
@@ -20,8 +20,7 @@ export function assertTaskManagerActionAllowed(agentName: string | undefined, ac
   if (action === "save_work_item_artifact") {
     const stages: Record<string, ReadonlySet<string>> = {
       "task-scout": new Set(["scan"]),
-      "task-rri": new Set(["rri"]),
-      "task-planner": new Set(["blueprint", "task_graph"]),
+      "task-planner": new Set(["task_graph"]),
     };
     if (!stage || !stages[agentName]?.has(stage)) throw new Error(`${agentName} cannot save ${stage || "unspecified"} artifacts`);
   }

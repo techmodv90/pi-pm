@@ -20,7 +20,7 @@ const defaultHerdrPanel = createHerdrPanel();
 const methodologiesDirectory = fileURLToPath(new URL("../methodologies", import.meta.url));
 
 const emptyUsage = (): SubagentUsage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 });
-const READ_ONLY_AGENTS = new Set(["task-scout", "task-reviewer", "task-rri", "rri-persona"]);
+const READ_ONLY_AGENTS = new Set(["task-scout", "task-reviewer", "rri-persona", "rri-t-persona"]);
 
 export function buildPiInvocation(args: string[], script = process.argv[1]): { command: string; args: string[] } {
   const virtualScript = script?.startsWith("/$bunfs/root/");
@@ -84,8 +84,19 @@ export async function prepareSubagentWorktree(cwd: string, initialPatchPath?: st
   const worktree = join(tmpdir(), `pi-task-worktree-${runId}`);
   await execFileAsync("git", ["worktree", "add", "-b", `pi-agent-${runId}`, worktree, "HEAD"], { cwd });
   try {
-    if (initialPatchPath && statSync(initialPatchPath).size > 0) await execFileAsync("git", ["apply", "--check", initialPatchPath], { cwd: worktree });
-    if (initialPatchPath && statSync(initialPatchPath).size > 0) await execFileAsync("git", ["apply", initialPatchPath], { cwd: worktree });
+    if (initialPatchPath && statSync(initialPatchPath).size > 0) {
+      try {
+        await execFileAsync("git", ["apply", "--check", initialPatchPath], { cwd: worktree });
+        await execFileAsync("git", ["apply", initialPatchPath], { cwd: worktree });
+      } catch (error) {
+        // Review recovery: an integrated candidate patch is already in the base; review that base directly.
+        try {
+          await execFileAsync("git", ["apply", "--reverse", "--check", initialPatchPath], { cwd: worktree });
+        } catch {
+          throw error;
+        }
+      }
+    }
   } catch (error) {
     removeSubagentWorktree(cwd, worktree, runId);
     throw error;

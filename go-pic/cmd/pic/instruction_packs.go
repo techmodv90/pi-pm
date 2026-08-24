@@ -30,12 +30,25 @@ type instructionPackContent struct {
 	Verification        []any            `json:"verification"`
 	SchemaVersion       int              `json:"schemaVersion"`
 	SkillFamilies       *[]string        `json:"skillFamilies"`
+	ObligationKeys      []string         `json:"obligation_keys"`
 }
 
 type taskPlanDocument struct {
 	Version         int                    `json:"version"`
 	ExecutionPolicy string                 `json:"execution_policy"`
 	Nodes           []taskPlanDocumentNode `json:"nodes"`
+}
+
+type contractObligation struct {
+	ID              string   `json:"id"`
+	RequirementKeys []string `json:"requirement_keys"`
+	Behavior        string   `json:"behavior"`
+	Acceptance      string   `json:"acceptance"`
+}
+
+type contractDocument struct {
+	ObligationSchemaVersion int                  `json:"obligation_schema_version"`
+	Obligations             []contractObligation `json:"obligations"`
 }
 
 type taskPlanDocumentNode struct {
@@ -59,6 +72,10 @@ type taskPlanDocumentNode struct {
 	Constraints         map[string]any   `json:"constraints"`
 	Verification        []any            `json:"verification"`
 	SkillFamilies       *[]string        `json:"skillFamilies"`
+	Provides            []string         `json:"provides"`
+	Consumes            []string         `json:"consumes"`
+	EvidenceFor         []string         `json:"evidence_for"`
+	ObligationKeys      []string         `json:"obligation_keys"`
 }
 
 func parseTaskPlanJSON(blueprint string) (taskPlanDocument, error) {

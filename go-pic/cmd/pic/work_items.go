@@ -86,6 +86,10 @@ func cmdWorkItem(args []string) error {
 		return workItemArtifactApprove(db, args[1:])
 	case "planning-reset":
 		return workItemPlanningReset(db, args[1:])
+	case "execution-reset":
+		return workItemExecutionReset(db, args[1:])
+	case "approve-deviations":
+		return workItemApproveDeviations(db, args[1:])
 	case "scan-reject":
 		return workItemScanReject(db, args[1:])
 	case "scan-rejection":
@@ -117,6 +121,109 @@ func cmdWorkItem(args []string) error {
 	default:
 		return fmt.Errorf("unknown work-item subcommand: %s", args[0])
 	}
+}
+
+// Contract deviation approval: preserve planning and renew only execution authority.
+func workItemApproveDeviations(db *sql.DB, args []string) error {
+	if len(args) < 3 || args[1] != "owner" {
+		return errors.New("usage: pic work-item approve-deviations <id> owner <requirement-id>...")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	item, err := workItemByIDTx(tx, args[0])
+	if err != nil {
+		return err
+	}
+	if item["status"] == "done" || item["status"] == "cancelled" {
+		return errors.New("deviation approval requires a non-terminal Work Item")
+	}
+	contractTaskID := args[0]
+	if err = tx.QueryRow(`SELECT root_work_item_id FROM work_item_materializations WHERE work_item_id=? ORDER BY rowid DESC LIMIT 1`, args[0]).Scan(&contractTaskID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	subjectColumn := "task_id"
+	var subjectExists int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE id=?`, contractTaskID).Scan(&subjectExists); err != nil {
+		return err
+	}
+	if subjectExists == 0 {
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM epics WHERE id=?`, contractTaskID).Scan(&subjectExists); err != nil {
+			return err
+		}
+		if subjectExists == 0 {
+			return fmt.Errorf("materialization root %s is not a legacy task or epic", contractTaskID)
+		}
+		subjectColumn = "epic_id"
+	}
+	var packContent string
+	if err = tx.QueryRow(`SELECT content_json FROM work_item_instruction_packs WHERE work_item_id=? AND status IN ('active','stale','superseded') ORDER BY version DESC LIMIT 1`, args[0]).Scan(&packContent); err != nil {
+		return fmt.Errorf("instruction pack lineage for Work Item %s not found", args[0])
+	}
+	var pack struct {
+		Requirements []struct {
+			ID  string `json:"requirement_id"`
+			Key string `json:"requirement_key"`
+		} `json:"requirements"`
+	}
+	var envelope struct {
+		Requirements []struct {
+			ID  string `json:"requirement_id"`
+			Key string `json:"requirement_key"`
+		} `json:"requirements"`
+	}
+	if err = json.Unmarshal([]byte(packContent), &envelope); err != nil {
+		return fmt.Errorf("active instruction pack is invalid: %w", err)
+	}
+	pack.Requirements = envelope.Requirements
+	for _, key := range args[2:] {
+		var requirementID string
+		for _, requirement := range pack.Requirements {
+			if requirement.ID == key || requirement.Key == key {
+				requirementID = requirement.ID
+				break
+			}
+		}
+		if requirementID == "" {
+			return fmt.Errorf("requirement %s is not in the active instruction pack", key)
+		}
+		if err = tx.QueryRow(`SELECT id FROM requirements WHERE id=? OR requirement_key=?`, requirementID, key).Scan(&requirementID); err != nil {
+			return fmt.Errorf("authoritative requirement %s not found", key)
+		}
+		var existing string
+		err = tx.QueryRow(`SELECT o.id FROM contract_operations o JOIN contract_operation_targets t ON t.operation_id=o.id WHERE o.`+subjectColumn+`=? AND o.operation_type='defer' AND o.status='approved' AND o.owner_decision_id<>'' AND t.requirement_id=?`, contractTaskID, requirementID).Scan(&existing)
+		if err == nil {
+			continue
+		}
+		if !errors.Is(err, sql.ErrNoRows) {
+			return err
+		}
+		operationID, decisionID := "cop-"+shortID(), "od-"+shortID()
+		if _, err = tx.Exec(`INSERT INTO owner_decisions(id,`+subjectColumn+`,related_type,related_id,decision_type,decision,notes) VALUES(?,?, 'contract_operation',?, 'approve_contract_operation','approved',?)`, decisionID, contractTaskID, operationID, "Owner-approved deferment"); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO contract_operations(id,`+subjectColumn+`,operation_type,status,resume_condition,completed_task_impact,owner_decision_id,approved_at) VALUES(?,?, 'defer','approved','owner_reactivation','none',?,datetime('now'))`, operationID, contractTaskID, decisionID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO contract_operation_targets(operation_id,requirement_id) VALUES(?,?)`, operationID, requirementID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`UPDATE implementation_authorizations SET revoked_at=datetime('now') WHERE work_item_id=? AND revoked_at=''`, args[0]); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE work_item_instruction_packs SET status='stale' WHERE work_item_id=? AND status='active'`, args[0]); err != nil {
+		return err
+	}
+	if err = addEvent(tx, args[0], "contract_deviations_approved", "owner", "Owner-approved contract deviations; execution authority requires renewal", map[string]any{"requirement_ids": args[2:]}); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return outputOne(db, `SELECT * FROM work_items WHERE id=?`, args[0])
 }
 
 func workItemSetStatus(db *sql.DB, id, status string) (map[string]any, error) {
@@ -473,6 +580,10 @@ func workItemVerificationSave(db *sql.DB, args []string) error {
 		if _, err = tx.Exec(`UPDATE work_items SET status='done',claimed_at='',claimed_by='',review_status='passed' WHERE id=? AND type IN ('task','bug','chore')`, args[0]); err != nil {
 			return err
 		}
+	} else {
+		if _, err = tx.Exec(`UPDATE work_items SET status='open',claimed_at='',claimed_by='' WHERE id=? AND type IN ('task','bug','chore')`, args[0]); err != nil {
+			return err
+		}
 	}
 	if err = tx.Commit(); err != nil {
 		return err
@@ -564,14 +675,15 @@ func validateExecutableClosureForReport(db workflowStore, id, expectedCompletion
 }
 
 type workItemExecutionState struct {
-	PackID             string `json:"active_instruction_pack_id"`
-	CandidateID        string `json:"candidate_run_id"`
-	ReviewStatus       string `json:"review_status"`
-	CompletionID       string `json:"completion_report_id"`
-	VerificationStatus string `json:"verification_status"`
-	OwnerDecision      string `json:"owner_decision"`
-	NextStage          string `json:"next_stage"`
-	PipelineStage      string `json:"pipeline_stage"`
+	PackID                string `json:"active_instruction_pack_id"`
+	CandidateID           string `json:"candidate_run_id"`
+	ReviewStatus          string `json:"review_status"`
+	OwnerApprovalRequired bool   `json:"owner_approval_required"`
+	CompletionID          string `json:"completion_report_id"`
+	VerificationStatus    string `json:"verification_status"`
+	OwnerDecision         string `json:"owner_decision"`
+	NextStage             string `json:"next_stage"`
+	PipelineStage         string `json:"pipeline_stage"`
 }
 
 func loadWorkItemExecutionState(db databaseQueryer, id string) (workItemExecutionState, error) {
@@ -611,9 +723,14 @@ func loadWorkItemExecutionState(db databaseQueryer, id string) (workItemExecutio
 	}
 	state.NextStage = "review"
 	state.PipelineStage = "review"
-	_ = db.QueryRow(`SELECT json_extract(result_json,'$.review_status') FROM pipeline_runs WHERE task_id=? AND stage='review' AND status='completed' AND instruction_pack_id=? AND instruction_pack_version=? AND instruction_pack_hash=? AND candidate_run_id=? AND json_valid(result_json) AND json_extract(result_json,'$.candidate_patch_hash')=(SELECT integrated_patch_hash FROM pipeline_runs WHERE id=?) ORDER BY rowid DESC LIMIT 1`, id, state.PackID, packVersion, packHash, state.CandidateID, state.CandidateID).Scan(&state.ReviewStatus)
+	var ownerApprovalRequired int
+	_ = db.QueryRow(`SELECT json_extract(result_json,'$.review_status'),COALESCE(json_extract(result_json,'$.owner_approval_required'),0) FROM pipeline_runs WHERE task_id=? AND stage='review' AND status='completed' AND instruction_pack_id=? AND instruction_pack_version=? AND instruction_pack_hash=? AND candidate_run_id=? AND json_valid(result_json) AND json_extract(result_json,'$.candidate_patch_hash')=(SELECT integrated_patch_hash FROM pipeline_runs WHERE id=?) ORDER BY rowid DESC LIMIT 1`, id, state.PackID, packVersion, packHash, state.CandidateID, state.CandidateID).Scan(&state.ReviewStatus, &ownerApprovalRequired)
+	state.OwnerApprovalRequired = ownerApprovalRequired != 0
 	if state.ReviewStatus != "passed" {
-		if state.ReviewStatus == "failed" {
+		if state.ReviewStatus == "failed" && state.OwnerApprovalRequired {
+			state.NextStage = "owner_approval"
+			state.PipelineStage = ""
+		} else if state.ReviewStatus == "failed" {
 			state.NextStage = "implement"
 			state.PipelineStage = "worker"
 		}
@@ -811,12 +928,34 @@ func validateRriReport(report rriReport) error {
 	return nil
 }
 
+func validateRriReportConsistency(payload rriFinalization) error {
+	if len(payload.Requirements) != len(payload.Report.RequirementsMatrix) {
+		return errors.New("RRI report requirements_matrix must match the confirmed requirements")
+	}
+	for _, requirement := range payload.Requirements {
+		matched := false
+		for _, row := range payload.Report.RequirementsMatrix {
+			if row.ReqID == requirement.Key && row.Requirement == requirement.Title {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("RRI report does not describe confirmed requirement %s", requirement.Key)
+		}
+	}
+	if len(payload.Decisions) != len(payload.Report.DecisionsLog) {
+		return errors.New("RRI decisions_log must match the confirmed decisions")
+	}
+	return nil
+}
+
 func workItemRriFinalize(db *sql.DB, args []string) error {
 	if len(args) != 2 {
 		return errors.New("usage: pic work-item rri-finalize <id> <payload-json>")
 	}
 	var payload rriFinalization
-	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 || len(payload.Decisions) == 0 || validateRriReport(payload.Report) != nil {
+	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 || validateRriReport(payload.Report) != nil || validateRriReportConsistency(payload) != nil {
 		return errors.New("RRI finalization requires valid JSON with requirements, decisions, and report")
 	}
 	seenRequirements, seenDecisions := map[string]bool{}, map[string]bool{}
@@ -844,11 +983,22 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
+	itemType, title, description := fmt.Sprint(item["type"]), fmt.Sprint(item["title"]), fmt.Sprint(item["description"])
+	subjectColumn := "task_id"
+	if itemType == "epic" || itemType == "feature" {
+		subjectColumn = "epic_id"
+	}
 	var scanApproved, finalized, revision int
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage='scan'`, args[0]).Scan(&scanApproved); err != nil || scanApproved != 1 {
 		return errors.New("RRI finalization requires one approved Scan checkpoint")
 	}
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='rri_finalized'`, args[0]).Scan(&finalized); err != nil {
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_events finalized
+		WHERE finalized.work_item_id=? AND finalized.event_type='rri_finalized'
+		AND NOT EXISTS (
+			SELECT 1 FROM work_item_events reset
+			WHERE reset.work_item_id=finalized.work_item_id AND reset.event_type='planning_reset'
+			AND datetime(reset.created_at) >= datetime(finalized.created_at)
+		)`, args[0]).Scan(&finalized); err != nil {
 		return err
 	}
 	if finalized != 0 {
@@ -873,19 +1023,38 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		if err = addEvent(tx, args[0], "rri_report_revised", "contractor", "Owner-confirmed RRI report revised before approval", map[string]any{"artifact_id": artifactID}); err != nil {
 			return err
 		}
+		if _, err = tx.Exec(`DELETE FROM requirements WHERE `+subjectColumn+`=? AND source IN (SELECT id FROM work_item_artifacts WHERE work_item_id=? AND stage='rri')`, args[0], args[0]); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM owner_decisions WHERE `+subjectColumn+`=? AND related_type='rri'`, args[0]); err != nil {
+			return err
+		}
+		inherit := 0
+		if subjectColumn == "epic_id" {
+			inherit = 1
+		}
+		for _, requirement := range payload.Requirements {
+			query := `INSERT INTO requirements(id,` + subjectColumn + `,requirement_key,inherit_to_descendants,priority,title,description,acceptance_criteria,source) VALUES(?,?,?,?,?,?,?,?,?)`
+			if _, err = tx.Exec(query, "req-"+shortID(), args[0], requirement.Key, inherit, requirement.Priority, requirement.Title, requirement.Description, requirement.AcceptanceCriteria, artifactID); err != nil {
+				return err
+			}
+		}
+		for _, decision := range payload.Decisions {
+			query := `INSERT INTO owner_decisions(id,` + subjectColumn + `,related_type,related_id,decision_type,decision) VALUES(?,?, 'rri',?,?,?)`
+			if _, err = tx.Exec(query, "od-"+shortID(), args[0], artifactID, decision.Key, decision.Answer); err != nil {
+				return err
+			}
+		}
 		if err = tx.Commit(); err != nil {
 			return err
 		}
-		writeJSON(os.Stdout, map[string]any{"artifact_id": artifactID, "work_item_id": args[0], "stage": "rri", "content_hash": contentHash, "requirements": 0, "decisions": 0, "revised": true})
+		writeJSON(os.Stdout, map[string]any{"artifact_id": artifactID, "work_item_id": args[0], "stage": "rri", "content_hash": contentHash, "requirements": len(payload.Requirements), "decisions": len(payload.Decisions), "revised": true})
 		return nil
 	}
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&revision); err != nil {
 		return err
 	}
-	itemType, title, description := fmt.Sprint(item["type"]), fmt.Sprint(item["title"]), fmt.Sprint(item["description"])
-	subjectColumn := "task_id"
 	if itemType == "epic" || itemType == "feature" {
-		subjectColumn = "epic_id"
 		var projectColumn int
 		if err = tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('epics') WHERE name='project_id'`).Scan(&projectColumn); err != nil {
 			return err
@@ -1101,7 +1270,8 @@ func validateContractReport(content string) error {
 			Tips    int `json:"tip_count"`
 			Minutes int `json:"estimated_minutes"`
 		} `json:"task_graph_summary"`
-		NotIncluded []string `json:"not_included"`
+		NotIncluded []string             `json:"not_included"`
+		Obligations []contractObligation `json:"obligations"`
 	}
 	if err := json.Unmarshal([]byte(content), &report); err != nil || report.ProjectName == "" || len(report.Deliverables) == 0 || len(report.TechStack) == 0 || len(report.NotIncluded) == 0 || report.Summary.Tips < 1 || report.Summary.Minutes < 1 {
 		return errors.New("Contract artifact must contain valid project, deliverables, stack, task graph summary, and exclusions")
@@ -1109,6 +1279,19 @@ func validateContractReport(content string) error {
 	for _, item := range report.Deliverables {
 		if item.Item == "" || item.Details == "" || len(item.Requirements) == 0 {
 			return errors.New("Contract deliverables are incomplete")
+		}
+	}
+	if len(report.Obligations) == 0 {
+		return errors.New("Contract obligations are required; decompose each non-deferred requirement into atomic behavior with Given/When/Then acceptance")
+	}
+	seen := map[string]bool{}
+	for _, obligation := range report.Obligations {
+		if obligation.ID == "" || seen[obligation.ID] || len(obligation.RequirementKeys) == 0 || obligation.Behavior == "" || obligation.Acceptance == "" {
+			return errors.New("Contract obligations are incomplete or duplicated")
+		}
+		seen[obligation.ID] = true
+		if err := validateGherkinSteps(obligation.Acceptance); err != nil {
+			return fmt.Errorf("Contract obligation %s acceptance %w", obligation.ID, err)
 		}
 	}
 	return nil
@@ -1149,63 +1332,132 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 		return err
 	}
 	defer tx.Rollback()
-	item, err := workItemByIDTx(tx, args[0])
+	targetID := args[0]
+	if err = tx.QueryRow(`SELECT root_work_item_id FROM work_item_materializations WHERE work_item_id=?`, args[0]).Scan(&targetID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	item, err := workItemByIDTx(tx, targetID)
 	if err != nil {
 		return err
 	}
 	if item["status"] == "cancelled" || item["status"] == "done" {
 		return errors.New("planning reset requires a non-terminal Work Item")
 	}
-	var count int
-	if err = tx.QueryRow(`WITH RECURSIVE descendants(id) AS (
-		SELECT id FROM work_items WHERE parent_id=?
-		UNION ALL
-		SELECT wi.id FROM work_items wi JOIN descendants d ON wi.parent_id=d.id
-	) SELECT COUNT(*) FROM descendants d
-	JOIN work_items child ON child.id=d.id
-	WHERE child.status NOT IN ('open','cancelled')
-	OR EXISTS (SELECT 1 FROM workflow_checkpoints c WHERE c.work_item_id=d.id)
-	OR EXISTS (SELECT 1 FROM work_item_materializations m WHERE m.work_item_id=d.id OR m.root_work_item_id=d.id)
-	OR EXISTS (SELECT 1 FROM implementation_authorizations a WHERE a.work_item_id=d.id AND a.revoked_at='')
-	OR EXISTS (SELECT 1 FROM work_item_instruction_packs p WHERE p.work_item_id=d.id)
-	OR EXISTS (SELECT 1 FROM pipeline_runs r WHERE r.task_id=d.id)
-	OR EXISTS (SELECT 1 FROM work_item_completion_reports r WHERE r.work_item_id=d.id)
-	OR EXISTS (SELECT 1 FROM work_item_verification_reports r WHERE r.work_item_id=d.id)`, args[0]).Scan(&count); err != nil {
+	var count, materialized int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id=?`, targetID).Scan(&materialized); err != nil {
 		return err
 	}
-	if count != 0 {
-		return errors.New("planning reset requires no execution-bearing descendants")
-	}
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=?`, args[0]).Scan(&count); err != nil {
-		return err
-	}
-	if count != 0 {
-		return errors.New("planning reset cannot remove approved planning artifacts")
-	}
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND status IN ('claimed','running')`, args[0]).Scan(&count); err != nil {
+	if err = tx.QueryRow(`WITH RECURSIVE execution(id) AS (
+		SELECT ? UNION ALL SELECT wi.id FROM work_items wi JOIN execution parent ON wi.parent_id=parent.id
+	) SELECT COUNT(*) FROM pipeline_runs WHERE task_id IN (SELECT id FROM execution) AND status IN ('claimed','running')`, targetID).Scan(&count); err != nil {
 		return err
 	}
 	if count != 0 {
 		return errors.New("planning reset requires no active pipeline runs")
 	}
 	var artifacts, runs int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, args[0]).Scan(&artifacts); err != nil {
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, targetID).Scan(&artifacts); err != nil {
 		return err
 	}
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=?`, args[0]).Scan(&runs); err != nil {
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=?`, targetID).Scan(&runs); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`DELETE FROM work_item_artifacts WHERE work_item_id=?`, args[0]); err != nil {
+	if materialized > 0 {
+		// Owner re-scope transition: retire the authorized DAG before replacing its frozen Task Graph.
+		if _, err = tx.Exec(`DELETE FROM work_items WHERE id IN (SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id<>?)`, targetID, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM implementation_authorizations WHERE work_item_id=?`, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM work_item_materializations WHERE root_work_item_id=?`, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph'`, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM work_item_artifacts WHERE work_item_id=? AND stage='task_graph'`, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM pipeline_runs WHERE task_id=? AND stage='task_graph'`, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM work_item_delivery_states WHERE work_item_id=?`, targetID); err != nil {
+			return err
+		}
+	} else {
+		// Owner re-scope transition: invalidate the entire stale planning lineage so Scan can run again.
+		if _, err = tx.Exec(`DELETE FROM workflow_checkpoints WHERE work_item_id=?`, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM work_item_artifacts WHERE work_item_id=?`, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM requirements WHERE epic_id=? OR task_id=?`, targetID, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM owner_decisions WHERE epic_id=? OR task_id=?`, targetID, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM pipeline_runs WHERE task_id=?`, targetID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`UPDATE work_items SET status='open',claimed_at='',claimed_by='',review_status='pending',review_notes='' WHERE id=?`, targetID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`DELETE FROM pipeline_runs WHERE task_id=? AND stage='scan'`, args[0]); err != nil {
+	payload, _ := json.Marshal(map[string]int{"artifacts": artifacts, "pipeline_runs": runs, "retired_materializations": materialized})
+	summary := "Owner invalidated stale planning lineage and reset Scan for re-scope"
+	if materialized > 0 {
+		summary = "Owner retired the materialized DAG and reset Task Graph planning for re-scope"
+	}
+	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,?,?,?,?)`, "wie-"+shortID(), targetID, "planning_reset", "owner", summary, string(payload)); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`UPDATE work_items SET status='open',claimed_at='',claimed_by='' WHERE id=?`, args[0]); err != nil {
+	if err = tx.Commit(); err != nil {
 		return err
 	}
-	payload, _ := json.Marshal(map[string]int{"artifacts": artifacts, "pipeline_runs": runs})
-	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,?,?,?,?)`, "wie-"+shortID(), args[0], "planning_reset", "owner", "Unapproved planning artifacts and Scan runs reset for rerun", string(payload)); err != nil {
+	return outputOne(db, `SELECT `+workItemColumns+` FROM work_items WHERE id=?`, targetID)
+}
+
+func workItemExecutionReset(db *sql.DB, args []string) error {
+	if len(args) != 2 || args[1] != "owner" {
+		return errors.New("usage: pic work-item execution-reset <id> owner")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	item, err := workItemByIDTx(tx, args[0])
+	if err != nil {
+		return err
+	}
+	if item["status"] == "cancelled" || item["status"] == "done" {
+		return errors.New("execution reset requires a non-terminal Work Item")
+	}
+	var rootID, checkpointID string
+	if err = tx.QueryRow(`SELECT root_work_item_id,checkpoint_id FROM work_item_materializations WHERE work_item_id=? ORDER BY rowid DESC LIMIT 1`, args[0]).Scan(&rootID, &checkpointID); err != nil {
+		return errors.New("execution reset requires a materialized child Work Item")
+	}
+	var active int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND status IN ('claimed','running')`, args[0]).Scan(&active); err != nil {
+		return err
+	}
+	if active != 0 {
+		return errors.New("execution reset requires no active pipeline runs")
+	}
+	if _, err = tx.Exec(`UPDATE implementation_authorizations SET revoked_at=datetime('now') WHERE work_item_id=? AND revoked_at=''`, args[0]); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE work_item_instruction_packs SET status='stale',stale_at=datetime('now') WHERE work_item_id=? AND status='active'`, args[0]); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`UPDATE work_items SET status='open',claimed_at='',claimed_by='',review_status='pending',review_notes='' WHERE id=?`, args[0]); err != nil {
+		return err
+	}
+	payload, _ := json.Marshal(map[string]string{"root_work_item_id": rootID, "task_graph_checkpoint_id": checkpointID})
+	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,?,?,?,?)`, "wie-"+shortID(), args[0], "execution_reset", "owner", "Owner reset this child execution binding; Task Graph and sibling Work Items preserved", string(payload)); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -1424,7 +1676,13 @@ func workItemExecutionStatus(db *sql.DB, id string) error {
 	if err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"work_item_id": id, "workflow_kind": "execution", "next_stage": state.NextStage, "pipeline_stage": state.PipelineStage, "active_instruction_pack_id": state.PackID, "candidate_run_id": state.CandidateID, "review_status": state.ReviewStatus, "completion_report_id": state.CompletionID, "verification_status": state.VerificationStatus, "owner_decision": state.OwnerDecision})
+	graph := map[string]any{}
+	var artifactID, checkpointID, decision string
+	var revision int
+	if db.QueryRow(`SELECT a.id,a.revision,c.id,c.decision_type FROM work_item_artifacts a LEFT JOIN workflow_checkpoints c ON c.artifact_id=a.id AND c.artifact_revision=a.revision WHERE a.work_item_id=(SELECT COALESCE(parent_id,id) FROM work_items WHERE id=?) AND a.stage='task_graph' ORDER BY a.revision DESC LIMIT 1`, id).Scan(&artifactID, &revision, &checkpointID, &decision) == nil {
+		graph = map[string]any{"artifact_id": artifactID, "revision": revision, "checkpoint_id": checkpointID, "decision": decision}
+	}
+	writeJSON(os.Stdout, map[string]any{"work_item_id": id, "workflow_kind": "execution", "next_stage": state.NextStage, "pipeline_stage": state.PipelineStage, "active_instruction_pack_id": state.PackID, "candidate_run_id": state.CandidateID, "review_status": state.ReviewStatus, "completion_report_id": state.CompletionID, "verification_status": state.VerificationStatus, "owner_decision": state.OwnerDecision, "current_task_graph": graph})
 	return nil
 }
 
@@ -1476,6 +1734,57 @@ func aggregateDeliveryWorkflowStatus(db *sql.DB, id string) (map[string]any, boo
 	return state, true, nil
 }
 
+func validateRriTVerification(db *sql.DB, workItemID, aggregateStatus, content string) error {
+	var report struct {
+		Scenarios []struct {
+			Persona       string `json:"persona"`
+			Dimension     string `json:"dimension"`
+			StressAxis    string `json:"stress_axis"`
+			RequirementID string `json:"requirement_id"`
+			Procedure     string `json:"procedure"`
+			Evidence      string `json:"evidence"`
+			Result        string `json:"result"`
+		} `json:"scenarios"`
+	}
+	if err := json.Unmarshal([]byte(content), &report); err != nil {
+		return fmt.Errorf("invalid RRI-T evidence JSON: %w", err)
+	}
+	validDimensions := map[string]bool{"D1": true, "D2": true, "D3": true, "D4": true, "D5": true, "D6": true, "D7": true}
+	validStressAxes := map[string]bool{"TIME": true, "DATA": true, "ERROR": true, "COLLABORATION": true, "EMERGENCY": true, "SCALE": true, "COMPLIANCE": true, "EVOLUTION": true}
+	validResults := map[string]bool{"PASS": true, "ACCEPTABLE": true, "PAINFUL": true, "FAIL": true}
+	rows, err := db.Query(`SELECT requirement_key FROM requirements WHERE (task_id=? OR epic_id=?)`, workItemID, workItemID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	approved := map[string]bool{}
+	for rows.Next() {
+		var key string
+		if err := rows.Scan(&key); err != nil {
+			return err
+		}
+		approved[key] = true
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	seen := map[string]bool{}
+	for _, scenario := range report.Scenarios {
+		if scenario.Persona == "" || !validDimensions[scenario.Dimension] || !validStressAxes[scenario.StressAxis] || !approved[scenario.RequirementID] || scenario.Procedure == "" || scenario.Evidence == "" || !validResults[scenario.Result] {
+			return fmt.Errorf("invalid RRI-T scenario for requirement %s", scenario.RequirementID)
+		}
+		key := scenario.Persona + "|" + scenario.Dimension + "|" + scenario.StressAxis + "|" + scenario.RequirementID
+		if seen[key] {
+			return fmt.Errorf("duplicate RRI-T scenario %s", key)
+		}
+		seen[key] = true
+		if aggregateStatus == "passed" && scenario.Result != "PASS" {
+			return fmt.Errorf("RRI-T %s result requires remediation or owner deferral before aggregate passage", scenario.Result)
+		}
+	}
+	return nil
+}
+
 func workItemAggregateVerify(db *sql.DB, args []string) error {
 	if len(args) < 3 || !contains([]string{"passed", "failed", "partial", "blocked"}, args[1]) {
 		return errors.New("usage: pic work-item aggregate-verify <id> <status> <summary> --actor-role contractor")
@@ -1483,6 +1792,12 @@ func workItemAggregateVerify(db *sql.DB, args []string) error {
 	opts, err := parseOptions(args[3:])
 	if err != nil || validateWorkflowActor(opts["actor-role"], "contractor") != nil {
 		return errors.New("aggregate verification requires actor_role=contractor")
+	}
+	rriTJSON := opts["rri-t-json"]
+	if rriTJSON != "" {
+		if err := validateRriTVerification(db, args[0], args[1], rriTJSON); err != nil {
+			return err
+		}
 	}
 	tx, err := db.Begin()
 	if err != nil {
@@ -1495,7 +1810,7 @@ func workItemAggregateVerify(db *sql.DB, args []string) error {
 	checkpointID := ""
 	_ = tx.QueryRow(`SELECT id FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' ORDER BY artifact_revision DESC LIMIT 1`, args[0]).Scan(&checkpointID)
 	id := "wivr-" + shortID()
-	if _, err = tx.Exec(`INSERT INTO work_item_verification_reports(id,work_item_id,checkpoint_id,status,summary,verified_by_role) VALUES(?,?,?,?,?,?)`, id, args[0], checkpointID, args[1], args[2], opts["actor-role"]); err != nil {
+	if _, err = tx.Exec(`INSERT INTO work_item_verification_reports(id,work_item_id,checkpoint_id,status,summary,verified_by_role,rri_t_json) VALUES(?,?,?,?,?,?,?)`, id, args[0], checkpointID, args[1], args[2], opts["actor-role"], rriTJSON); err != nil {
 		return err
 	}
 	correctiveBugID := ""
@@ -1820,6 +2135,9 @@ func validateTaskGraphArtifact(db databaseQueryer, workItemID, content string) (
 	if _, err = validateTaskGraphRequirementCoverage(db, workItemID, plan); err != nil {
 		return taskPlanDocument{}, err
 	}
+	if err := validateTaskGraphObligations(db, workItemID, plan); err != nil {
+		return taskPlanDocument{}, err
+	}
 	var kind, parentID string
 	if err = db.QueryRow(`SELECT type,COALESCE(parent_id,'') FROM work_items WHERE id=?`, workItemID).Scan(&kind, &parentID); err != nil {
 		return taskPlanDocument{}, err
@@ -1828,6 +2146,99 @@ func validateTaskGraphArtifact(db databaseQueryer, workItemID, content string) (
 		return taskPlanDocument{}, errors.New("standalone task graph requires exactly one matching executable node without parent or dependencies")
 	}
 	return plan, nil
+}
+
+func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan taskPlanDocument) error {
+	var contractContent string
+	if err := db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='contracts' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&contractContent); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil
+		}
+		return fmt.Errorf("approved Contract is required before Task Graph obligation validation: %w", err)
+	}
+	var contract contractDocument
+	bindingFieldsPresent := false
+	for _, node := range plan.Nodes {
+		if node.Type != "feature" && node.Type != "gate" && (node.Provides != nil || node.Consumes != nil || node.EvidenceFor != nil || node.ObligationKeys != nil) {
+			bindingFieldsPresent = true
+			break
+		}
+	}
+	if err := json.Unmarshal([]byte(contractContent), &contract); err != nil {
+		return fmt.Errorf("approved Contract obligation graph is invalid: %w", err)
+	}
+	if len(contract.Obligations) == 0 {
+		return errors.New("approved Contract has no obligation graph; redraft the Contract with atomic obligations")
+	}
+	if contract.ObligationSchemaVersion != 2 {
+		return nil
+	}
+	if !bindingFieldsPresent {
+		return errors.New("Task Graph nodes must bind Contract obligations with provides, consumes, evidence_for, and obligation_keys")
+	}
+	obligations := map[string]contractObligation{}
+	for _, obligation := range contract.Obligations {
+		if obligation.ID == "" || obligations[obligation.ID].ID != "" {
+			return fmt.Errorf("Contract obligation %s is duplicated", obligation.ID)
+		}
+		obligations[obligation.ID] = obligation
+	}
+	providers := map[string][]string{}
+	evidence := map[string][]string{}
+	for _, node := range plan.Nodes {
+		if node.Type == "feature" || node.Type == "gate" {
+			continue
+		}
+		for _, key := range node.Provides {
+			providers[key] = append(providers[key], node.Key)
+		}
+		for _, key := range node.EvidenceFor {
+			evidence[key] = append(evidence[key], node.Key)
+		}
+	}
+	for _, node := range plan.Nodes {
+		if node.Type == "feature" || node.Type == "gate" {
+			continue
+		}
+		if node.Provides == nil || node.Consumes == nil || node.EvidenceFor == nil || node.ObligationKeys == nil {
+			return fmt.Errorf("%s requires provides, consumes, evidence_for, and obligation_keys", node.Key)
+		}
+		for _, key := range node.ObligationKeys {
+			if _, ok := obligations[key]; !ok {
+				return fmt.Errorf("%s references unknown Contract obligation %s", node.Key, key)
+			}
+		}
+		for _, key := range node.Provides {
+			if _, ok := obligations[key]; !ok {
+				return fmt.Errorf("%s provides unknown Contract obligation %s", node.Key, key)
+			}
+		}
+		for _, key := range node.EvidenceFor {
+			if _, ok := obligations[key]; !ok {
+				return fmt.Errorf("%s evidences unknown Contract obligation %s", node.Key, key)
+			}
+		}
+		for _, key := range node.Consumes {
+			providerNodes := providers[key]
+			if len(providerNodes) == 0 {
+				return fmt.Errorf("%s consumes obligation %s without a provider", node.Key, key)
+			}
+			for _, provider := range providerNodes {
+				if provider == node.Key || !contains(node.DependsOn, provider) {
+					return fmt.Errorf("%s consumes obligation %s but does not depend on provider %s", node.Key, key, provider)
+				}
+			}
+		}
+	}
+	for key := range obligations {
+		if len(providers[key]) == 0 {
+			return fmt.Errorf("Contract obligation %s has no provider node", key)
+		}
+		if len(evidence[key]) == 0 {
+			return fmt.Errorf("Contract obligation %s has no evidence node", key)
+		}
+	}
+	return nil
 }
 
 func validateTaskGraphRequirementCoverage(db databaseQueryer, workItemID string, plan taskPlanDocument) (map[string]requirementSnapshot, error) {
@@ -1847,6 +2258,9 @@ func validateTaskGraphRequirementCoverage(db databaseQueryer, workItemID string,
 		known[strings.ToUpper(key)] = snapshot
 	}
 	for _, node := range plan.Nodes {
+		if len(node.RequirementKeys) > 2 {
+			return nil, fmt.Errorf("%s has more than two requirement_keys; split the node", node.Key)
+		}
 		for _, key := range node.RequirementKeys {
 			normalized := strings.ToUpper(key)
 			if _, ok := known[normalized]; !ok {
@@ -1869,7 +2283,7 @@ func validateTaskGraphRequirementCoverage(db databaseQueryer, workItemID string,
 }
 
 func materializedInstructionPack(node taskPlanDocumentNode, schemaVersion int, requirements map[string]requirementSnapshot) ([]byte, string, error) {
-	content := instructionPackContent{Goal: node.Goal, Module: node.Module, EstimatedEffort: node.EstimatedEffort, Files: node.Files, Patterns: node.Patterns, BusinessRules: node.BusinessRules, ValidationRules: node.ValidationRules, ErrorHandling: node.ErrorHandling, StateTransitions: node.StateTransitions, ContractObligations: node.ContractObligations, Constraints: node.Constraints, Verification: node.Verification, SchemaVersion: schemaVersion, SkillFamilies: node.SkillFamilies}
+	content := instructionPackContent{Goal: node.Goal, Module: node.Module, EstimatedEffort: node.EstimatedEffort, Files: node.Files, Patterns: node.Patterns, BusinessRules: node.BusinessRules, ValidationRules: node.ValidationRules, ErrorHandling: node.ErrorHandling, StateTransitions: node.StateTransitions, ContractObligations: node.ContractObligations, Constraints: node.Constraints, Verification: node.Verification, SchemaVersion: schemaVersion, SkillFamilies: node.SkillFamilies, ObligationKeys: node.ObligationKeys}
 	snapshots := make([]requirementSnapshot, 0, len(node.RequirementKeys))
 	for _, key := range node.RequirementKeys {
 		snapshots = append(snapshots, requirements[strings.ToUpper(key)])
