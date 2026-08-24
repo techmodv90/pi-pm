@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -107,4 +107,13 @@ test("tracker syncs nested persona runs under their RRI parent", () => {
   const widget = renderAgentWidget(parent.list(), 120).join("\n");
   assert.match(widget, /rri-persona/);
   assert.match(widget, /rri-persona.*End User/);
+});test("late events for a cancelled run with deleted worktree do not throw", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
+  const tracker = new AgentRunTracker();
+  tracker.start({ runId: "run-cancelled1", agent: "task-worker", task: "Work", cwd });
+  rmSync(cwd, { recursive: true, force: true });
+  assert.doesNotThrow(() => {
+    tracker.event("run-cancelled1", "message", "thinking");
+    tracker.setModel("run-cancelled1", "model-x");
+  });
 });

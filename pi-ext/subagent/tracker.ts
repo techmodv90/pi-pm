@@ -85,7 +85,13 @@ export class AgentRunTracker {
     }
     run.events.push(event);
     if (run.events.length > 500) run.events.shift();
-    appendFileSync(join(this.runDir(run), "events.jsonl"), `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
+    // Cancelled runs may have their worktree (and run directory) removed while late
+    // runner events still arrive; a vanished directory must not crash the host process.
+    try {
+      appendFileSync(join(this.runDir(run), "events.jsonl"), `${JSON.stringify(event)}\n`, { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
     this.persist(run);
     this.emit();
   }
@@ -189,7 +195,11 @@ export class AgentRunTracker {
 
   private persist(run: AgentRun): void {
     const { stop: _stop, ...snapshot } = run;
-    writeFileSync(join(this.runDir(run), "state.json"), JSON.stringify(snapshot), { encoding: "utf8", mode: 0o600 });
+    try {
+      writeFileSync(join(this.runDir(run), "state.json"), JSON.stringify(snapshot), { encoding: "utf8", mode: 0o600 });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
   }
 
   private emit(): void {
