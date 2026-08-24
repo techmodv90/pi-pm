@@ -8,6 +8,12 @@ export interface ContractReport {
   obligation_schema_version: 2;
 }
 const required = (v: unknown, name: string) => { if (typeof v !== "string" || !v.trim()) throw new Error(`Contract ${name} is required`); return v; };
+// Mirrors Go gherkinStep in cmd/pic/acceptance.go: step keywords count only at line start
+const gherkinStep = /^\s*(?:[-*]\s*)?(feature|scenario(?: outline)?|given|when|then|and|but)(?:\s*:|\s+)/i;
+function validateAcceptanceGherkin(acceptance: string, obligationId: string): void {
+  const steps = new Set(acceptance.split("\n").map((l) => l.match(gherkinStep)?.[1]?.toLowerCase()).filter((s): s is string => !!s));
+  if (!steps.has("given") || !steps.has("when") || !steps.has("then")) throw new Error(`Contract obligation ${obligationId} acceptance requires Given, When, and Then as separate line-start steps (e.g. "Given ...\\nWhen ...\\nThen ...")`);
+}
 export function parseContractReportJson(content: string): ContractReport {
   const r = JSON.parse(content) as Partial<ContractReport>;
   required(r.project_name, "project_name");
@@ -17,6 +23,7 @@ export function parseContractReportJson(content: string): ContractReport {
   if (!r.not_included?.length) throw new Error("Contract not_included is required");
   if (r.obligation_schema_version !== 2) throw new Error("Contract obligation_schema_version must be 2");
   if (!r.obligations?.length || r.obligations.some((x) => !x.id || !x.requirement_keys?.length || !x.behavior || !x.acceptance)) throw new Error("Contract obligations are incomplete");
+  for (const o of r.obligations) validateAcceptanceGherkin(o.acceptance, o.id);
   return r as ContractReport;
 }
 const cell = (v: string) => v.replaceAll("|", "\\|").replaceAll("\n", " ");
