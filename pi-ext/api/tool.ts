@@ -8,7 +8,7 @@ import { execPic } from "../core/cli-helpers";
 import { buildReviewContext } from "../tasking/settings";
 import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemDebugPrompt } from "../tasking/work-item-prompts";
 import { assertTaskManagerActionAllowed } from "../tasking/agent-capabilities.ts";
-import { prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
+import { parseCanonicalScanReportXml, renderScanReportMarkdown, prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
 import { parseRriReportJson, renderRriReportMarkdown } from "../reporting/rri-report.ts";
 import { parseVisionReportJson, renderVisionReportMarkdown } from "../reporting/vision-report.ts";
 import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../reporting/blueprint-report.ts";
@@ -53,7 +53,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
       parameters: Type.Object({
         action: StringEnum([
           "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview", "save_rri_interview",
-          "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "preview_contract", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
+          "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "preview_artifact", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
           "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
           "relate_work_items", "reset_pipeline_circuit",
         ] as const),
@@ -244,11 +244,25 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             args = ["work-item", "artifact-save", params.id, params.stage, scanContent || params.content];
             break;
           }
-          case "preview_contract": {
-            if (!params.content) return { content: [{ type: "text", text: "Error: content required" }], details: {}, isError: true };
+          case "preview_artifact": {
+            if (!params.stage || !params.content) return { content: [{ type: "text", text: "Error: stage and content required" }], details: {}, isError: true };
             try {
-              const markdown = renderContractReportMarkdown(parseContractReportJson(params.content));
-              return { content: [{ type: "text", text: `${markdown}\n\nThis is a deterministic preview of the drafted Contract; nothing has been saved. Present this Markdown to the owner and ask them to reply exactly CONFIRM.` }], details: { action: "preview_contract", preview: true } };
+              let markdown: string;
+              switch (params.stage) {
+                case "scan": markdown = renderScanReportMarkdown(parseCanonicalScanReportXml(params.content)); break;
+                case "rri": {
+                  // RRI finalization content nests the report under .report; accept either shape
+                  const payload = JSON.parse(params.content) as { report?: unknown };
+                  markdown = renderRriReportMarkdown(parseRriReportJson(JSON.stringify(payload.report ?? payload)));
+                  break;
+                }
+                case "vision": markdown = renderVisionReportMarkdown(parseVisionReportJson(params.content)); break;
+                case "blueprint": markdown = renderBlueprintReportMarkdown(parseBlueprintReportJson(params.content)); break;
+                case "contracts": markdown = renderContractReportMarkdown(parseContractReportJson(params.content)); break;
+                case "task_graph": markdown = renderTaskGraphReportMarkdown(parseTaskGraphReportJson(params.content)); break;
+                default: throw new Error(`stage ${params.stage} has no rendered artifact preview`);
+              }
+              return { content: [{ type: "text", text: `${markdown}\n\nThis is a deterministic preview rendered from the drafted artifact; nothing has been saved or approved.` }], details: { action: "preview_artifact", stage: params.stage, preview: true } };
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
