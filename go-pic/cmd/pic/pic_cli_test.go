@@ -800,8 +800,16 @@ Then it completes')`)
 		t.Fatalf("owner re-scope retained children=%d mappings=%d task_graph_checkpoints=%d stale_packs=%d", remainingChildren, mappings, graphCheckpoints, stalePacks)
 	}
 	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
-	if status["next_stage"] != "task_graph" {
+	if status["next_stage"] != "scan" {
 		t.Fatalf("owner re-scope next stage = %#v", status)
+	}
+	var staleArtifacts, staleCheckpoints, staleRequirements, staleDecisions int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, id).Scan(&staleArtifacts)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=?`, id).Scan(&staleCheckpoints)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM requirements WHERE epic_id=?`, id).Scan(&staleRequirements)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM owner_decisions WHERE epic_id=?`, id).Scan(&staleDecisions)
+	if staleArtifacts != 0 || staleCheckpoints != 0 || staleRequirements != 0 || staleDecisions != 0 {
+		t.Fatalf("owner re-scope retained artifacts=%d checkpoints=%d requirements=%d decisions=%d", staleArtifacts, staleCheckpoints, staleRequirements, staleDecisions)
 	}
 }
 

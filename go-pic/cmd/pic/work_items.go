@@ -1363,7 +1363,8 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 		return err
 	}
 	if materialized > 0 {
-		// Owner re-scope transition: retire the authorized DAG before replacing its frozen Task Graph.
+		// Owner re-scope transition: implemented code staled the Scan, so every derived
+		// artifact is stale too; retire the authorized DAG and the entire planning lineage.
 		if _, err = tx.Exec(`DELETE FROM work_items WHERE id IN (SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id<>?)`, targetID, targetID); err != nil {
 			return err
 		}
@@ -1373,13 +1374,19 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 		if _, err = tx.Exec(`DELETE FROM work_item_materializations WHERE root_work_item_id=?`, targetID); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(`DELETE FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph'`, targetID); err != nil {
+		if _, err = tx.Exec(`DELETE FROM workflow_checkpoints WHERE work_item_id=?`, targetID); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(`DELETE FROM work_item_artifacts WHERE work_item_id=? AND stage='task_graph'`, targetID); err != nil {
+		if _, err = tx.Exec(`DELETE FROM work_item_artifacts WHERE work_item_id=?`, targetID); err != nil {
 			return err
 		}
-		if _, err = tx.Exec(`DELETE FROM pipeline_runs WHERE task_id=? AND stage='task_graph'`, targetID); err != nil {
+		if _, err = tx.Exec(`DELETE FROM requirements WHERE epic_id=? OR task_id=?`, targetID, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM owner_decisions WHERE epic_id=? OR task_id=?`, targetID, targetID); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM pipeline_runs WHERE task_id=?`, targetID); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(`DELETE FROM work_item_delivery_states WHERE work_item_id=?`, targetID); err != nil {
@@ -1408,9 +1415,6 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 	}
 	payload, _ := json.Marshal(map[string]int{"artifacts": artifacts, "pipeline_runs": runs, "retired_materializations": materialized})
 	summary := "Owner invalidated stale planning lineage and reset Scan for re-scope"
-	if materialized > 0 {
-		summary = "Owner retired the materialized DAG and reset Task Graph planning for re-scope"
-	}
 	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,?,?,?,?)`, "wie-"+shortID(), targetID, "planning_reset", "owner", summary, string(payload)); err != nil {
 		return err
 	}
