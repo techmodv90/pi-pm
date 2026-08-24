@@ -251,11 +251,13 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             break;
           }
           case "review_blueprint_checkpoint": {
-            if (!params.id || !params.artifact_id || !params.content || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, draft_id, content, and actor_role=contractor are required" }], details: {}, isError: true };
+            if (!params.id || !params.artifact_id || !params.content || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, artifact_id (the draft ID), content, and actor_role=contractor are required" }], details: {}, isError: true };
             const draft = loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id);
-            const checkpoint = JSON.parse(params.content) as Record<string, unknown>;
+            let checkpoint: Record<string, unknown>;
+            try { checkpoint = JSON.parse(params.content) as Record<string, unknown>; }
+            catch { return { content: [{ type: "text", text: "Error: content must be a JSON object with the five checkpoint booleans: architecture, design, requirements, task_decomposition, nothing_missing" }], details: {}, isError: true }; }
             const checks = ["architecture", "design", "requirements", "task_decomposition", "nothing_missing"];
-            if (!checks.every((key) => checkpoint[key] === true)) return { content: [{ type: "text", text: "Error: all five Blueprint checks must pass" }], details: {}, isError: true };
+            if (!checks.every((key) => checkpoint[key] === true)) return { content: [{ type: "text", text: `Error: all five Blueprint checks must pass; set each to true: ${checks.join(", ")}` }], details: {}, isError: true };
             const reviewed = saveBlueprintDraft(ctx.cwd, params.id, draft.content, checkpoint);
             blueprintPresentation = renderBlueprintReportMarkdown(parseBlueprintReportJson(draft.content)).replaceAll("- [ ]", "- [x]");
             return { content: [{ type: "text", text: `${blueprintPresentation}\n\nContractor checkpoint passed. Draft ${reviewed.draftId} is ready for owner approval.` }], details: { draft_id: reviewed.draftId, reviewed: true } };
