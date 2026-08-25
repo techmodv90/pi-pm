@@ -1,5 +1,5 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -226,8 +226,27 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
       readSync(fd, head, 0, 1, 0);
       closeSync(fd);
       resumable = head[0] === 0x7b; // JSONL session files start with '{'
+      if (resumable) {
+        // Session-resume cwd guard (GAP-140): pi validates the resumed session
+        // against its recorded working directory; a GC'd temp worktree would kill
+        // the worker at load on every retry. Set the stale file aside instead.
+        const firstLineEnd = (() => {
+          const buf = Buffer.alloc(4096);
+          const fd2 = openSync(spec.sessionPath, "r");
+          const n = readSync(fd2, buf, 0, 4096, 0);
+          closeSync(fd2);
+          return buf.subarray(0, n).indexOf(0x0a);
+        })();
+        if (firstLineEnd > 0) {
+          const header = JSON.parse(readFileSync(spec.sessionPath, { encoding: "utf8", flag: "r" }).slice(0, firstLineEnd));
+          if (typeof header?.cwd === "string" && !existsSync(header.cwd)) {
+            renameSync(spec.sessionPath, `${spec.sessionPath}.stale-${Date.now()}`);
+            resumable = false;
+          }
+        }
+      }
     } catch {}
-    if (!resumable) rmSync(spec.sessionPath, { force: true });
+    if (!resumable && existsSync(spec.sessionPath)) rmSync(spec.sessionPath, { force: true });
     args.push("--session", spec.sessionPath);
   } else args.push("--no-session");
   if (spec.agent.model) args.push("--model", spec.agent.model);

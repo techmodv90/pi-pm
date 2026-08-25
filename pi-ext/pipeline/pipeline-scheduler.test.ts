@@ -1264,3 +1264,19 @@ test("escalation resolutions are authoritative in the next worker prompt", () =>
   assert.doesNotMatch(context, /wies-3/, "resolutions predating the latest run are already consumed");
   assert.equal(buildEscalationResolutionContext({ escalations: [data.escalations[1]] }, runs as any), "");
 });
+
+test("a failed escalation-save surfaces the worker's escalation payload instead of only the CLI error", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const blockStart = source.indexOf('if (taskReport.status === "escalated")');
+  assert.ok(blockStart > 0, "escalated branch must exist");
+  const blockEnd = source.indexOf('if (taskReport.status !== "done")', blockStart);
+  const block = source.slice(blockStart, blockEnd);
+  // GAP-141: the saved.error path must persist the run as blocked with the full
+  // escalation payload (completion report markdown + structured escalation) in the
+  // result JSON and notify with the payload, not rethrow the bare CLI error.
+  assert.match(block, /if \(saved\.error\)/);
+  assert.match(block, /"workflow", "pipeline-complete", run\.id, run\.lease_token, "blocked"/);
+  assert.match(block, /completion_report: taskReport\.markdown/);
+  assert.match(block, /escalation: taskReport\.escalation/);
+  assert.doesNotMatch(block, /throw new Error\(saved\.error\)/);
+});

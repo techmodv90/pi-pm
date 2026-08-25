@@ -1712,7 +1712,18 @@ export class PipelineScheduler {
           // run's TIP lineage, block the run, release the claim, and stop — never retry
           // or continue downstream while the escalation is open.
           const saved = execPic(["workflow", "escalation-save", run.task_id, "--pipeline-run-id", run.id, "--report-json", JSON.stringify(taskReport.escalation)], this.cwd);
-          if (saved.error) throw new Error(saved.error);
+          if (saved.error) {
+            // GAP-141: never lose the escalation intent to a tooling mismatch (e.g., a
+            // stale installed pic predating escalation-save). Persist the run blocked
+            // with the full structured payload and completion report so the owner sees
+            // the actual question instead of only the subcommand error.
+            const reason = `escalation persistence failed (${saved.error}); worker escalation payload preserved below`;
+            const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", reason, "--result-json", JSON.stringify({ ...pipelineFailureResult(reason), blocker: taskReport.escalation?.summary || reason, completion_report: taskReport.markdown, escalation: taskReport.escalation })], this.cwd);
+            if (result.error) throw new Error(result.error);
+            checkpoint(run, "advanced", this.cwd);
+            this.notifyBlockedAttempt(run, `${reason}\n\n${taskReport.markdown}`);
+            return;
+          }
           checkpoint(run, "advanced", this.cwd);
           this.notifyBlockedAttempt(run, `worker escalated ${taskReport.escalation.level}: ${taskReport.escalation.summary || "decision required before progress can resume"}`);
           return;

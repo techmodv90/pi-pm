@@ -1477,12 +1477,35 @@ func workItemPlanningAmend(db *sql.DB, args []string) error {
 	if activeRuns != 0 {
 		return errors.New("planning amendment requires no active pipeline runs")
 	}
-	var verificationEvidence int
-	if err = tx.QueryRow(descendantCTE+` SELECT COUNT(*) FROM work_item_verification_reports WHERE work_item_id IN (SELECT id FROM execution)`, targetID).Scan(&verificationEvidence); err != nil {
+	// Scoped evidence invalidation (GAP-139): verification evidence whose own surface
+	// text intersects a substitution loses its authority (retired as blocked history);
+	// non-intersecting evidence survives so bounded amendments stay usable after
+	// children close instead of collapsing into a full planning reset.
+	type evidenceRow struct{ id, text string }
+	evidenceRows, err := tx.Query(descendantCTE+` SELECT v.id, COALESCE(v.summary,'')||char(10)||COALESCE(v.rri_t_json,'')||char(10)||COALESCE(c.summary,'')||char(10)||COALESCE(c.report_markdown,'') FROM work_item_verification_reports v LEFT JOIN work_item_completion_reports c ON c.id=v.completion_report_id WHERE v.work_item_id IN (SELECT id FROM execution)`, targetID)
+	if err != nil {
 		return err
 	}
-	if verificationEvidence != 0 {
-		return errors.New("planning amendment cannot invalidate existing aggregate verification evidence; use planning reset")
+	var affectedEvidence []evidenceRow
+	for evidenceRows.Next() {
+		var row evidenceRow
+		if err = evidenceRows.Scan(&row.id, &row.text); err != nil {
+			evidenceRows.Close()
+			return err
+		}
+		for _, sub := range payload.Substitutions {
+			if strings.Contains(row.text, sub.Old) {
+				affectedEvidence = append(affectedEvidence, row)
+				break
+			}
+		}
+	}
+	evidenceRows.Close()
+	for _, row := range affectedEvidence {
+		marker := " [superseded by planning amendment " + shortID() + ": verified content contains an amended value]"
+		if _, err = tx.Exec(`UPDATE work_item_verification_reports SET status='blocked', summary=summary||? WHERE id=? AND status='passed'`, marker, row.id); err != nil {
+			return err
+		}
 	}
 	for _, sub := range payload.Substitutions {
 		var keyed []string
@@ -1653,8 +1676,9 @@ func workItemPlanningAmend(db *sql.DB, args []string) error {
 		"requirements_changed": requirementsChanged,
 		"decisions_changed":    decisionsChanged,
 		"packs_staled":         packsStaled,
+		"evidence_retired":     len(affectedEvidence),
 	})
-	summary := fmt.Sprintf("Owner amended planning lineage: %d artifact stages superseded, %d requirements and %d decisions substituted, %d instruction packs staled", len(changedStages), requirementsChanged, decisionsChanged, packsStaled)
+	summary := fmt.Sprintf("Owner amended planning lineage: %d artifact stages superseded, %d requirements and %d decisions substituted, %d instruction packs staled, %d verification reports retired", len(changedStages), requirementsChanged, decisionsChanged, packsStaled, len(affectedEvidence))
 	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,?,?,?,?)`, "wie-"+shortID(), targetID, "planning_amendment", "owner", summary, string(eventPayload)); err != nil {
 		return err
 	}

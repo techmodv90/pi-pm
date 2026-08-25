@@ -2274,3 +2274,76 @@ func TestWorkItemEscalationLifecycle(t *testing.T) {
 		t.Fatalf("post-resolution claim = %#v", afterClaim)
 	}
 }
+
+func TestWorkItemPlanningAmendmentRetiresIntersectingEvidenceOnly(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Evidence Amend Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-ev1','`+id+`','REQ-001','Ports','Given the dev stack
+When services boot
+Then they listen on port 9173')`)
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-ev2','`+id+`','REQ-002','Scaffold','Given a login route
+When rendered
+Then the scaffold mounts')`)
+	for _, stage := range []string{"scan", "rri", "vision", "blueprint"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	contract := strings.Replace(validContractArtifact, `"behavior":"Persist workflow state"`, `"behavior":"Persist workflow state; health endpoint serves on port 9173"`, 1)
+	contractArtifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contract))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", contractArtifact["id"].(string), "approved")
+	graph := `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]},{"key":"T01","type":"task","name":"First","parent_key":"F01","goal":"First","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["serve on port 9173"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}],"skillFamilies":[]},{"key":"B01","type":"bug","name":"Second","parent_key":"F01","goal":"Second","requirement_keys":["REQ-002"],"depends_on":["T01"],"priority":"P0","module":"core","files":["y.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["y.go"]},"verification":[{"command":"go test ./...","required":true}],"skillFamilies":[]}]}`
+	graphArtifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graph))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", graphArtifact["id"].(string), "approved")
+	runPic(t, bin, root, home, "work-item", "materialize", id)
+
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var portChildID, scaffoldChildID string
+	if err = db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='T01'`, id).Scan(&portChildID); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='B01'`, id).Scan(&scaffoldChildID); err != nil {
+		t.Fatal(err)
+	}
+	// Verification evidence on the port child intersects the substitution target;
+	// evidence on the scaffold child shares no substituted content.
+	runSQLite(t, dbPath, `INSERT INTO work_item_verification_reports(id,work_item_id,status,summary,rri_t_json,verified_by_role) VALUES('wivr-port','`+portChildID+`','passed','ports migration verified','{"scenarios":[{"evidence":"binds port 9173"}]}','contractor')`)
+	runSQLite(t, dbPath, `INSERT INTO work_item_verification_reports(id,work_item_id,status,summary,rri_t_json,verified_by_role) VALUES('wivr-scaffold','`+scaffoldChildID+`','passed','login scaffold verified','{"scenarios":[{"evidence":"scaffold mounts"}]}','contractor')`)
+
+	result := asObject(t, runPic(t, bin, root, home, "work-item", "planning-amend", portChildID, "owner", `{"reason":"owner corrected dev ports from 9 prefix to 5 prefix","substitutions":[{"old":"9173","new":"55173"}]}`))
+	if result["changed_stages"] == nil {
+		t.Fatalf("amendment result missing changed_stages: %#v", result)
+	}
+
+	var retiredStatus, retiredSummary string
+	if err = db.QueryRow(`SELECT status,summary FROM work_item_verification_reports WHERE id='wivr-port'`).Scan(&retiredStatus, &retiredSummary); err != nil {
+		t.Fatal(err)
+	}
+	if retiredStatus != "blocked" || !strings.Contains(retiredSummary, "planning amendment") {
+		t.Fatalf("intersecting evidence not retired: status=%q summary=%q", retiredStatus, retiredSummary)
+	}
+	var survivorStatus string
+	if err = db.QueryRow(`SELECT status FROM work_item_verification_reports WHERE id='wivr-scaffold'`).Scan(&survivorStatus); err != nil {
+		t.Fatal(err)
+	}
+	if survivorStatus != "passed" {
+		t.Fatalf("non-intersecting evidence must keep its authority, got %q", survivorStatus)
+	}
+	var amendedGraph string
+	if err = db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='task_graph'`, id).Scan(&amendedGraph); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(amendedGraph, "9173") || !strings.Contains(amendedGraph, "55173") {
+		t.Fatalf("task graph not amended")
+	}
+}

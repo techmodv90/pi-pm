@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
@@ -537,4 +537,30 @@ test("a valid existing worker session file is preserved for continuation", async
   }) as any);
   await handle.result;
   assert.equal(readFileSync(sessionPath, "utf8"), '{"type":"session"}\n');
+});
+
+test("session bound to a vanished recorded working directory is set aside and relaunch falls back to fresh", async () => {
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-runner-"));
+  const sessionPath = join(cwd, ".pi", "runtime", "runs", "wip-gonecwd", "session.jsonl");
+  mkdirSync(dirname(sessionPath), { recursive: true });
+  const vanished = join(cwd, "gone-worktree");
+  writeFileSync(sessionPath, JSON.stringify({ type: "session", version: 3, id: "x", cwd: vanished }) + "\n");
+  let args: string[] = [];
+  const handle = startSubagent({
+    agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "task-worker.md" },
+    task: "work",
+    cwd,
+    sessionPath,
+  }, undefined, ((_command: any, invocationArgs: string[]) => {
+    args = invocationArgs;
+    setImmediate(() => child.emit("close", 0));
+    return child;
+  }) as any);
+  await handle.result;
+  const index = args.indexOf("--session");
+  assert.equal(args[index + 1], sessionPath);
+  assert.ok(!existsSync(sessionPath), "session with a dead recorded cwd must not be resumed in place");
+  const stale = readdirSync(dirname(sessionPath)).find((name) => name.startsWith("session.jsonl.stale-"));
+  assert.ok(stale, "the stale session must be preserved aside, not deleted");
 });
