@@ -1747,7 +1747,10 @@ func TestPipelineCircuitResetClearsAutomaticWorkerRetryLimit(t *testing.T) {
 	for i := 1; i <= 3; i++ {
 		claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--explicit-retry", "1"))
 		runPic(t, bin, root, home, "work-item", "status", id, "in_progress")
-		runPic(t, bin, root, home, "workflow", "pipeline-complete", claim["id"].(string), claim["lease_token"].(string), "failed", "--error", fmt.Sprintf("attempt %d failed", i))
+		// no_progress_autofix is classified output evidence but sits outside both
+		// the deterministic-breaker and environment-fingerprint gates, so these
+		// attempts reach the unchanged-pack retry limiter this test exercises.
+		runPic(t, bin, root, home, "workflow", "pipeline-complete", claim["id"].(string), claim["lease_token"].(string), "failed", "--error", fmt.Sprintf("attempt %d failed", i), "--result-json", `{"failure_code":"no_progress_autofix"}`)
 		if shown := asObject(t, runPic(t, bin, root, home, "show", id)); asObject(t, shown["work_item"])["status"] != "open" {
 			t.Fatalf("attempt %d cleanup failed: %#v", i, shown)
 		}
@@ -1765,6 +1768,31 @@ func TestPipelineCircuitResetClearsAutomaticWorkerRetryLimit(t *testing.T) {
 	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
 	if claim["status"] != "claimed" {
 		t.Fatalf("post-reset worker claim rejected: %#v", claim)
+	}
+}
+
+func TestTransientWorkerDeathsDoNotExhaustUnchangedPackRetryLimit(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Transient deaths"))
+	id := item["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	activateTestWorkItemTIP(t, dbPath, id)
+
+	// Three worker attempts that died without output (provider abort, timeout,
+	// subagent child failure): no failure_code, no artifact. These are not
+	// evidence about instruction content and must not trip the unchanged-pack
+	// limiter, which would deadlock the item (circuit reset requires an active
+	// pack; failed claims roll the generated pack back).
+	for i := 1; i <= 3; i++ {
+		claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
+		runPic(t, bin, root, home, "work-item", "status", id, "in_progress")
+		runPic(t, bin, root, home, "workflow", "pipeline-complete", claim["id"].(string), claim["lease_token"].(string), "failed", "--error", "subagent child failed")
+	}
+
+	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
+	if claim["status"] != "claimed" {
+		t.Fatalf("transient deaths must not block a fresh worker claim: %#v", claim)
 	}
 }
 

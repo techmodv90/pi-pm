@@ -325,7 +325,13 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	}
 	if stage == "worker" && opts["explicit-retry"] != "1" && opts["review-fix"] != "1" {
 		var unchangedPackAttempts int
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND stage='worker' AND instruction_pack_hash=? AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, packHash, taskID).Scan(&unchangedPackAttempts); err != nil {
+		// Unchanged-pack limiter invariant: only attempts that produced output
+		// evidence (a completion/artifact or a classified failure_code) count
+		// against the instruction content. Transient provider deaths record no
+		// failure_code and must not exhaust retries, otherwise the item deadlocks:
+		// failed claims roll back the generated TIP and pipeline-circuit-reset
+		// then refuses for lack of an active pack.
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND stage='worker' AND instruction_pack_hash=? AND NOT (status IN ('failed','blocked','expired') AND CASE WHEN json_valid(result_json) THEN json_extract(result_json,'$.failure_code') ELSE '' END='') AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, packHash, taskID).Scan(&unchangedPackAttempts); err != nil {
 			return err
 		}
 		if unchangedPackAttempts >= maxAutomaticWorkerAttempts {
