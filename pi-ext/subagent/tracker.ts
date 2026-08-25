@@ -72,7 +72,7 @@ export class AgentRunTracker {
   event(runId: string, type: AgentEventType, summary: string): void {
     const run = this.runs.get(runId);
     if (!run) return;
-    const event = { at: Date.now(), type, summary: summary.slice(0, 4000) };
+    const event = { at: Date.now(), type, summary: singleLine(summary).slice(0, 4000) };
     run.activityState = type === "tool" ? `using ${summary}` : type === "tool_result" ? "processing tool result" : type === "message" ? "thinking" : type === "stderr" ? "process reported an error" : type;
     run.activityAt = event.at;
     run.heartbeatAt = event.at;
@@ -240,10 +240,19 @@ export function formatAgentFooter(runs: AgentRun[], _width: number, _now = Date.
   return `${active} active · ${open.length} open`;
 }
 
+// TUI contract: one rendered line per string. Task text and child-process output
+// contain newlines/control chars that would break pi-tui's diff-based redraw.
+export function singleLine(text: string): string {
+  return text.replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
+}
+
 export function renderAgentWidget(runs: AgentRun[], width: number, now = Date.now()): string[] {
   const active = runs.filter((run) => run.status === "running");
   if (!active.length) return [];
-  const truncate = (value: string) => value.length <= width ? value : `${value.slice(0, Math.max(0, width - 3))}...`;
+  const truncate = (value: string) => {
+    const flat = singleLine(value);
+    return flat.length <= width ? flat : `${flat.slice(0, Math.max(0, width - 3))}...`;
+  };
   const elapsed = (run: AgentRun) => {
     const seconds = Math.max(0, Math.floor((now - run.startedAt) / 1000));
     return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;

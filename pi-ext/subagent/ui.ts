@@ -1,7 +1,7 @@
 import type { ExtensionAPI, ExtensionContext, Theme } from "@mariozechner/pi-coding-agent";
 import { matchesKey, truncateToWidth, visibleWidth, type TUI } from "@mariozechner/pi-tui";
 
-import { agentActivityLabel, agentRunTracker, formatAgentFooter, renderAgentWidget, type AgentRun } from "./tracker.ts";
+import { agentActivityLabel, agentRunTracker, formatAgentFooter, renderAgentWidget, singleLine, type AgentRun } from "./tracker.ts";
 
 export type AgentViewTab = "activity" | "prompt" | "output" | "details";
 const tabs: AgentViewTab[] = ["activity", "prompt", "output", "details"];
@@ -28,7 +28,7 @@ function wrap(text: string, width: number): string[] {
 
 export function renderAgentView(runs: AgentRun[], selected: number, tab: AgentViewTab, width: number, height: number, now = Date.now()): string[] {
   const maxWidth = Math.max(24, width);
-  const line = (text: string) => truncateToWidth(text, maxWidth, "...");
+  const line = (text: string) => truncateToWidth(singleLine(text), maxWidth, "...");
   const output = [line("Agent Runs"), line("[Up/Down] select  [Tab] view  [x] stop  [Esc] close")];
   if (!runs.length) return [...output, "", "No agent runs in this session."];
   const safeSelected = Math.min(Math.max(selected, 0), runs.length - 1);

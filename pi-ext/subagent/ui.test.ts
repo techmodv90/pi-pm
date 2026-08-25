@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { renderAgentView } from "./ui.ts";
-import type { AgentRun } from "./tracker.ts";
+import { renderAgentWidget, type AgentRun } from "./tracker.ts";
 
 const run: AgentRun = {
   runId: "run-12345678",
@@ -32,4 +32,16 @@ test("agent view scrolls the run list with the selected run", () => {
   const view = renderAgentView(runs, 7, "activity", 72, 20, 61_000).join("\n");
   assert.match(view, /> starting\s+task-worker t-7/);
   assert.doesNotMatch(view, /task-worker t-0/);
+});
+test("rendered lines never contain embedded newlines or control characters", () => {
+  const messy: AgentRun = {
+    ...run,
+    task: "First line\n\nSecond line\r\nwith CRLF",
+    events: [{ at: 2_000, type: "stderr", summary: "\x1b[31mE: failed\x1b[0m\nat line 2\nat line 3" }],
+  };
+  const control = /[\r\n\x00-\x1f\x7f]/;
+  for (const tab of ["activity", "prompt", "output", "details"] as const) {
+    assert.ok(renderAgentView([messy], 0, tab, 72, 20).every((line) => !control.test(line)), `tab ${tab}`);
+  }
+  assert.ok(renderAgentWidget([messy], 120).every((line) => !control.test(line)));
 });
