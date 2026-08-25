@@ -384,13 +384,21 @@ func workflowPipelineCircuitReset(db *sql.DB, args []string) error {
 		return err
 	}
 	defer tx.Rollback()
+	// Circuit-reset pack invariant: owner reset identifies the execution input
+	// being changed, so it needs a pack snapshot — but not necessarily an active
+	// one. A failed claim rolls back its freshly generated TIP, so a deadlock can
+	// persist with zero active packs (limiter blocks the claim that would create
+	// one); fall back to the latest inactive pack to keep reset reachable.
 	pack, err := queryOne(tx, `SELECT * FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, taskID)
 	if err != nil {
-		return errors.New("pipeline circuit reset requires one active instruction pack")
+		pack, err = queryOne(tx, `SELECT * FROM work_item_instruction_packs WHERE work_item_id=? ORDER BY version DESC LIMIT 1`, taskID)
+		if err != nil {
+			return errors.New("pipeline circuit reset requires an existing instruction pack")
+		}
 	}
 	snapshotHash := persistedText(pack["content_hash"])
 	if snapshotHash == "" {
-		return errors.New("pipeline circuit reset requires an active instruction pack hash")
+		return errors.New("pipeline circuit reset requires an instruction pack hash")
 	}
 	// No-progress reset invariant: resetting the counter must identify the changed
 	// execution input, otherwise the same TIP/environment can loop indefinitely.

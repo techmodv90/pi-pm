@@ -1819,6 +1819,38 @@ func TestPipelineCircuitResetClearsAutomaticWorkerRetryLimit(t *testing.T) {
 	}
 }
 
+// Circuit reset must stay reachable when no active pack exists: a failed claim
+// rolls back its generated TIP, so the limiter can deadlock an item whose packs
+// are all stale/inactive (npvn.app wi-b83be214 incident). Reset falls back to
+// the latest inactive pack.
+func TestPipelineCircuitResetWorksWithoutActivePack(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Reset without active pack"))
+	id := item["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	activateTestWorkItemTIP(t, dbPath, id)
+
+	// Three classified failures exhaust the unchanged-pack retry limit.
+	for i := 1; i <= 3; i++ {
+		claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--explicit-retry", "1"))
+		runPic(t, bin, root, home, "work-item", "status", id, "in_progress")
+		runPic(t, bin, root, home, "workflow", "pipeline-complete", claim["id"].(string), claim["lease_token"].(string), "failed", "--error", fmt.Sprintf("attempt %d failed", i), "--result-json", `{"failure_code":"no_progress_autofix"}`)
+	}
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"); !strings.Contains(out, "automatic worker retry limit reached") {
+		t.Fatalf("expected retry limit rejection, got: %s", out)
+	}
+
+	// Simulate the rolled-back claim: no active instruction pack remains.
+	runSQLite(t, dbPath, `UPDATE work_item_instruction_packs SET status='inactive' WHERE work_item_id='`+id+`'`)
+
+	// Owner reset must succeed despite zero active packs.
+	event := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-circuit-reset", id, "--reason", "runner repaired after rollback", "--change-type", "runner", "--evidence-json", `{"failed_run_id":"all","changed_fingerprint":"runner-v2"}`, "--actor-role", "owner"))
+	if event["event_type"] != "pipeline_circuit_reset" {
+		t.Fatalf("circuit reset failed without active pack: %#v", event)
+	}
+}
+
 func TestTransientWorkerDeathsDoNotExhaustUnchangedPackRetryLimit(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
