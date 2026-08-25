@@ -126,3 +126,14 @@ test("executable continuation follows TIP execution gates", () => {
   assert.match(buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "owner_acceptance" }, { title: "Feature", type: "feature" }), /accept_aggregate_work_item/);
   assert.match(buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "merge_pending" }, { title: "Feature", type: "feature" }), /merge_aggregate_work_item/);
 });
+test("task-worker escalation ladder is prompt-encoded and fail-closed", () => {
+  const source = readFileSync(new URL("../agents/task-worker.md", import.meta.url), "utf8");
+  assert.match(source, /escalation_ladder/);
+  assert.match(source, /Mechanical L3 floor/);
+  assert.match(source, /Artifact contradiction/);
+  assert.match(source, /Under-determination/);
+  assert.match(source, /When unsure between levels, escalate upward/);
+  assert.match(source, /status=\\"escalated\\"|status="escalated"/);
+  assert.match(source, /checked_sources/);
+  assert.match(source, /Never finish with a prose question inside a success summary/);
+});

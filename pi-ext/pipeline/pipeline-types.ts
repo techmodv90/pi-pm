@@ -29,6 +29,7 @@ export interface PipelineRunRecord {
   environment_fingerprint?: string;
   base_commit?: string;
   error?: string;
+  created_at?: string;
 
   skillFamilies?: string[];
   taskPrompt?: string;

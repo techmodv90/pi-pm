@@ -48,6 +48,10 @@ func cmdWorkflow(args []string) error {
 		return workflowEventAdd(db, rest)
 	case "events":
 		return workflowList(db, rest, `SELECT * FROM work_item_events WHERE work_item_id=? ORDER BY created_at DESC`)
+	case "escalation-save":
+		return workflowEscalationSave(db, rest)
+	case "escalation-resolve":
+		return workflowEscalationResolve(db, rest)
 	case "pipeline-claim":
 		return workflowPipelineClaim(db, rest)
 	case "pipeline-circuit-reset":

@@ -2223,3 +2223,54 @@ Then refused','C-1')`)
 	runSQLite(t, dbPath, `INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at) VALUES('pr-amend','`+childID+`','worker',1,'claimed','tok','2999-01-01T00:00:00Z')`)
 	runPicError(t, bin, root, home, "work-item", "planning-amend", childID, "owner", `{"reason":"r","substitutions":[{"old":"6173","new":"7173"}]}`)
 }
+
+func TestWorkItemEscalationLifecycle(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Escalation leaf"))
+	id := item["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	activateTestWorkItemTIP(t, dbPath, id)
+	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
+	runID := claim["id"].(string)
+	report := `{"level":"L2","checked_sources":["active TIP","Contract obligations"],"summary":"two valid implementations diverge by tradeoff","questions":["which session store"],"options":["sqlite","memory"],"recommendation":"sqlite"}`
+
+	if out := runPicError(t, bin, root, home, "workflow", "escalation-save", id, "--pipeline-run-id", runID, "--report-json", `{"level":"L2"}`); !strings.Contains(out, "checked_sources") {
+		t.Fatalf("escalation-save accepted a report without checked_sources: %s", out)
+	}
+	escalation := asObject(t, runPic(t, bin, root, home, "workflow", "escalation-save", id, "--pipeline-run-id", runID, "--report-json", report))
+	escalationID := escalation["id"].(string)
+	if escalation["status"] != "open" || escalation["level"] != "L2" {
+		t.Fatalf("escalation save = %#v", escalation)
+	}
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var runStatus, packID, itemStatus string
+	if err = db.QueryRow(`SELECT status,instruction_pack_id FROM pipeline_runs WHERE id=?`, runID).Scan(&runStatus, &packID); err != nil || runStatus != "blocked" || packID == "" {
+		t.Fatalf("escalated run status=%q pack=%q err=%v", runStatus, packID, err)
+	}
+	if err = db.QueryRow(`SELECT status FROM work_items WHERE id=?`, id).Scan(&itemStatus); err != nil || itemStatus != "open" {
+		t.Fatalf("escalated work item status=%q err=%v", itemStatus, err)
+	}
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"); !strings.Contains(out, "open escalation") {
+		t.Fatalf("claim not gated by open escalation: %s", out)
+	}
+	if out := runPicError(t, bin, root, home, "workflow", "escalation-resolve", id, escalationID, `{"decision":"use sqlite"}`, "--actor-role", "owner"); !strings.Contains(out, "contractor") {
+		t.Fatalf("non-contractor resolution accepted: %s", out)
+	}
+	resolved := asObject(t, runPic(t, bin, root, home, "workflow", "escalation-resolve", id, escalationID, `{"decision":"use sqlite"}`, "--actor-role", "contractor"))
+	if resolved["status"] != "resolved" {
+		t.Fatalf("resolution = %#v", resolved)
+	}
+	var events int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='escalation_resolved'`, id).Scan(&events); err != nil || events != 1 {
+		t.Fatalf("escalation_resolved events=%d err=%v", events, err)
+	}
+	afterClaim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
+	if afterClaim["stage"] != "worker" {
+		t.Fatalf("post-resolution claim = %#v", afterClaim)
+	}
+}

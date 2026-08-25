@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, runnerRepairEvidence, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, runnerRepairEvidence, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
 
@@ -1226,4 +1226,41 @@ test("session fallback removes corrupt files instead of failing the relaunch", (
   const source = readFileSync(new URL("./runner.ts", import.meta.url).pathname.replace("/pipeline/", "/subagent/"), "utf8");
   assert.match(source, /if \(spec\.sessionPath\)/);
   assert.match(source, /rmSync\(spec\.sessionPath/);
+});
+
+test("escalated worker reports carry a structured, source-audited escalation payload", () => {
+  const escalation = { level: "L2", checked_sources: ["active TIP constraints", "Contract OB-001"], summary: "two valid stores", questions: ["which store"], options: [{ name: "sqlite" }], recommendation: "sqlite" };
+  const document = `<completion_report tip_id="tip-1" version="1" status="escalated"><files_changed>None</files_changed><test_results>Not run</test_results><issues_discovered>Undetermined session store</issues_discovered><deviations>None</deviations><suggestions>None</suggestions><escalation>${JSON.stringify(escalation).replace(/&/g, "&amp;")}</escalation></completion_report>`;
+  const parsed = parseTaskCompletionReport(document);
+  assert.equal(parsed.status, "escalated");
+  assert.equal(parsed.escalation.level, "L2");
+  assert.deepEqual(parsed.escalation.checked_sources, ["active TIP constraints", "Contract OB-001"]);
+  const missingSources = document.replace(/"checked_sources":\[[^\]]*\],/, "");
+  assert.throws(() => parseTaskCompletionReport(missingSources), /checked_sources/);
+  assert.throws(() => parseTaskCompletionReport(document.replace(/"level":"L2"/, "\"level\":\"L1\"")), /level L2 or L3/);
+  assert.throws(() => parseTaskCompletionReport(document.replace(/<escalation>[^<]*<\/escalation>/, "")), /escalation section/);
+});
+
+test("scheduler persists escalations fail-closed and injects resolutions at relaunch", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /taskReport\.status === "escalated"/);
+  assert.match(source, /"workflow", "escalation-save", run\.task_id, "--pipeline-run-id", run\.id, "--report-json"/);
+  assert.match(source, /buildEscalationResolutionContext\(data, parsePipelineRuns\(execPic\(\["workflow", "pipeline-runs", taskId\], cwd\)\)\)/);
+  const builder = source.slice(source.indexOf("export function buildEscalationResolutionContext"), source.indexOf("function stageAgent"));
+  assert.match(builder, /status === "resolved"/);
+  assert.match(builder, /String\(entry\.resolved_at \|\| ""\) > lastRunStart/);
+});
+
+test("escalation resolutions are authoritative in the next worker prompt", () => {
+  const data = { escalations: [
+    { id: "wies-1", level: "L2", status: "resolved", resolution_json: '{"decision":"use sqlite"}', instruction_pack_id: "wip-9", resolved_at: "2026-01-02 00:00:00" },
+    { id: "wies-2", level: "L3", status: "open", resolution_json: "", instruction_pack_id: "wip-9", resolved_at: "" },
+    { id: "wies-3", level: "L2", status: "resolved", resolution_json: "{}", instruction_pack_id: "wip-9", resolved_at: "2026-01-01 00:00:00" },
+  ] };
+  const runs = [{ created_at: "2026-01-01 12:00:00" }];
+  const context = buildEscalationResolutionContext(data, runs as any);
+  assert.match(context, /ESCALATION RESOLUTIONS/);
+  assert.match(context, /use sqlite/);
+  assert.doesNotMatch(context, /wies-3/, "resolutions predating the latest run are already consumed");
+  assert.equal(buildEscalationResolutionContext({ escalations: [data.escalations[1]] }, runs as any), "");
 });

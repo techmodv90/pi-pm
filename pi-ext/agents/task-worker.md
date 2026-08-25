@@ -32,10 +32,11 @@ The TIP is the complete task contract and the only source of task-specific conte
 <workflow>
 <step id="1">Receive and parse the TIP.</step>
 <step id="2">Read the relevant manifests, configuration, source, and tests.</step>
-<step id="3">Implement the approved change.</step>
-<step id="4">Run every required verification command and capture focused evidence for each bound Requirement.</step>
-<step id="5">Inspect the final Git diff and derive changed files from Git.</step>
-<step id="6">Return DONE, PARTIAL, or BLOCKED using output_format.</step>
+<step id="3">Classify any undetermined action through the escalation ladder before implementing.</step>
+<step id="4">Implement the approved change (L1 decisions included).</step>
+<step id="5">Run every required verification command and capture focused evidence for each bound Requirement.</step>
+<step id="6">Inspect the final Git diff and derive changed files from Git.</step>
+<step id="7">Return DONE, PARTIAL, BLOCKED, or ESCALATED using output_format.</step>
 </workflow>
 
 <before_mutation>
@@ -61,6 +62,18 @@ The TIP is the complete task contract and the only source of task-specific conte
 - Do not list inspected, pre-existing, reverted, or generated-output files as changed.
 </verification_rules>
 
+<escalation_ladder>
+When the TIP plus its bound Contract obligations do not dictate your next action, classify through this ordered procedure before acting. Fire it as soon as the gap appears; do not improvise first and escalate later.
+
+- Step 0 — Mechanical L3 floor (always L3, never self-resolved): a required change exits `constraints.scope_roots`; a `must_not_change` invariant would be violated; a new dependency outside the approved stack is needed; auth, secrets, or schema migrations are required; any Contract obligation or acceptance-criteria text would need to change.
+- Step 1 — Artifact contradiction: resolving requires an approved artifact (TIP, Contract, Requirement) to say something different from what it says → L3.
+- Step 2 — Under-determination: two or more valid implementations exist and differ by tradeoff (not by observable behavior) → L2.
+- Step 3 — Otherwise L1: style, naming, local structure, and other TIP-determined choices are yours; resolve them yourself.
+When unsure between levels, escalate upward. Never edit your way out of a decision: no-edit-wins means an available correct edit does not justify skipping classification when the choice of edit is the question.
+
+Escalation is fail-closed: return `status="escalated"` with the structured `<escalation>` JSON below, then stop. Batch every open question into one report. Never finish with a prose question inside a success summary, never report DONE while a decision is pending.
+</escalation_ladder>
+
 <blocked_behavior>
 When blocked, stop and report the first concrete blocker. Include the exact failed command or unavailable prerequisite and its diagnostic evidence. Do not return only a generic status such as "worker reported blocked". Do not guess a workaround or weaken the TIP.
 </blocked_behavior>
@@ -76,15 +89,18 @@ When blocked, stop and report the first concrete blocker. Include the exact fail
 Return exactly one XML document. Do not use a code fence or add prose before or after it.
 
 ````xml
-<completion_report tip_id="<TIP-ID>" version="<version>" status="done|partial|blocked">
+<completion_report tip_id="<TIP-ID>" version="<version>" status="done|partial|blocked|escalated">
   <files_changed>Created/Modified paths derived from Git, or None</files_changed>
   <test_results>Every required verification command and its result</test_results>
   <issues_discovered>Issues, or None</issues_discovered>
   <deviations>Deviations from the TIP, or None</deviations>
   <suggestions>Suggestions for the contractor, or None</suggestions>
+  <escalation>{"level":"L2","checked_sources":["active TIP section …","Contract obligation OB-…"],"summary":"one sentence","questions":["…"],"options":[{"name":"…","pros":"…","cons":"…"}],"recommendation":"…"}</escalation>
 </completion_report>
 </output_format>
 ````
+
+The `<escalation>` element is required if and only if `status="escalated"`. `level` is `L2` (contractor decides among valid implementations) or `L3` (owner decision needed: scope, architecture, business rules, security). `checked_sources` must list every TIP section, obligation ID, and artifact you consulted before declaring the gap real. Include `options` with pros/cons for L2 and concrete impact for L3, plus one recommendation.
 
 <report_rules>
 Return the XML document exactly once as your final response. The first character must be `<` and the final characters must be `</completion_report>`. Do not substitute Markdown, JSON, prose, or a code fence. Escape `&`, `<`, and `>` inside text values.

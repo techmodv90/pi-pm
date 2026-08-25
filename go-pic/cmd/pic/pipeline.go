@@ -16,6 +16,8 @@ var pipelineTerminalStatuses = []string{"completed", "failed", "blocked", "cance
 
 const pipelineRunsTableSQL = `CREATE TABLE IF NOT EXISTS pipeline_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','vision','blueprint','contracts','task_graph','worker','review','autofix')), attempt INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'claimed' CHECK(status IN ('claimed','running','completed','failed','blocked','cancelled','expired')), lease_token TEXT NOT NULL, lease_expires_at TEXT NOT NULL, instruction_pack_id TEXT DEFAULT '', instruction_pack_version INTEGER DEFAULT 0, instruction_pack_hash TEXT DEFAULT '', effective_contract_snapshot_id TEXT DEFAULT '', effective_contract_snapshot_hash TEXT DEFAULT '', agent_model TEXT DEFAULT '', environment_fingerprint TEXT DEFAULT '', base_commit TEXT DEFAULT '', subagent_run_id TEXT DEFAULT '', child_index INTEGER DEFAULT 0, async_dir TEXT DEFAULT '', result_json TEXT DEFAULT '', error TEXT DEFAULT '', integrated_patch_path TEXT DEFAULT '', integrated_patch_hash TEXT DEFAULT '', integrated_at TEXT DEFAULT '', artifact_saved_at TEXT DEFAULT '', candidate_run_id TEXT DEFAULT '', candidate_patch_hash TEXT DEFAULT '', review_fix_cycle INTEGER DEFAULT 0, profile_version INTEGER DEFAULT 0, profile_hash TEXT DEFAULT '', advanced_at TEXT DEFAULT '', migration_status TEXT DEFAULT 'legacy', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '', UNIQUE(task_id, stage, attempt))`
 
+const workItemEscalationsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_escalations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, pipeline_run_id TEXT NOT NULL UNIQUE REFERENCES pipeline_runs(id), instruction_pack_id TEXT NOT NULL, instruction_pack_version INTEGER NOT NULL, instruction_pack_hash TEXT NOT NULL, level TEXT NOT NULL CHECK(level IN ('L2','L3')), status TEXT NOT NULL CHECK(status IN ('open','resolved')), report_json TEXT NOT NULL, resolution_json TEXT DEFAULT '', resolved_by TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), resolved_at TEXT DEFAULT '')`
+
 const workItemCompletionReportsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_completion_reports (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, pipeline_run_id TEXT NOT NULL UNIQUE REFERENCES pipeline_runs(id), instruction_pack_id TEXT NOT NULL, instruction_pack_version INTEGER NOT NULL, instruction_pack_hash TEXT NOT NULL, status TEXT NOT NULL CHECK(status IN ('done','partial','blocked')), summary TEXT DEFAULT '', report_markdown TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`
 
 const maxAutomaticWorkerAttempts = 3
@@ -119,6 +121,15 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	defer tx.Rollback()
 	if err = expirePipelineLeases(tx, taskID, stage); err != nil {
 		return err
+	}
+	// Open-escalation scheduling gate (GAP-138): no claim of any stage may proceed
+	// while an unresolved escalation exists for this Work Item.
+	var openEscalations int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_escalations WHERE work_item_id=? AND status='open'`, taskID).Scan(&openEscalations); err != nil {
+		return err
+	}
+	if openEscalations > 0 {
+		return fmt.Errorf("pipeline claim rejected: %d open escalation(s) require contractor resolution", openEscalations)
 	}
 	// Resolve the versioned Plan/Implement/QA profile exactly once at the first
 	// claim and bind this claim to the persisted profile version and hash.
@@ -463,6 +474,104 @@ func workflowPipelineModel(db *sql.DB, args []string) error {
 		return errors.New("pipeline model update rejected: stale or invalid lease")
 	}
 	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+}
+
+// Escalation persistence (GAP-138): the scheduler saves one structured escalation
+// report per completed worker run. The row is bound to the run's active-TIP lineage
+// so a resolution can never be replayed against a retired pack, and the run is
+// blocked and its claim released in the same transaction.
+func workflowEscalationSave(db *sql.DB, args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: pic workflow escalation-save <task-id> --pipeline-run-id <id> --report-json <json>")
+	}
+	taskID := args[0]
+	opts, err := parseOptions(args[1:])
+	if err != nil || opts["pipeline-run-id"] == "" || opts["report-json"] == "" {
+		return errors.New("escalation-save requires --pipeline-run-id and --report-json")
+	}
+	var report map[string]any
+	if err = json.Unmarshal([]byte(opts["report-json"]), &report); err != nil {
+		return fmt.Errorf("escalation report must be valid JSON: %w", err)
+	}
+	level, _ := report["level"].(string)
+	if level != "L2" && level != "L3" {
+		return errors.New("escalation report requires level L2 or L3")
+	}
+	// Presence-only audit floor: the artifact-contradiction test stays auditable.
+	checkedSources, _ := report["checked_sources"].([]any)
+	if len(checkedSources) == 0 {
+		return errors.New("escalation report requires a nonempty checked_sources list")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var packID, packHash string
+	var packVersion int
+	query := `SELECT p.id,p.version,p.content_hash FROM work_item_instruction_packs p JOIN pipeline_runs r ON r.instruction_pack_id=p.id AND r.instruction_pack_version=p.version AND r.instruction_pack_hash=p.content_hash WHERE p.work_item_id=? AND p.status='active' AND r.id=? AND r.task_id=p.work_item_id AND r.stage IN ('worker','autofix') AND r.status IN ('claimed','running')`
+	if err = tx.QueryRow(query, taskID, opts["pipeline-run-id"]).Scan(&packID, &packVersion, &packHash); err != nil {
+		return errors.New("escalation requires an active worker run bound to the Work Item TIP")
+	}
+	id := "wies-" + shortID()
+	if _, err = tx.Exec(`INSERT INTO work_item_escalations(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,level,status,report_json) VALUES(?,?,?,?,?,?,?,'open',?)`, id, taskID, opts["pipeline-run-id"], packID, packVersion, packHash, level, normalizeJSONText(opts["report-json"])); err != nil {
+		return err
+	}
+	result, err := tx.Exec(`UPDATE pipeline_runs SET status='blocked',error=?,updated_at=datetime('now'),completed_at=datetime('now') WHERE id=? AND status IN ('claimed','running')`, "escalation: "+level, opts["pipeline-run-id"])
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errors.New("escalation rejected: run is not claimable")
+	}
+	if _, err = tx.Exec(`UPDATE work_items SET status='open',claimed_at='',claimed_by='' WHERE id=? AND status='in_progress'`, taskID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,'worker_escalated','worker',?,?)`, "wie-"+shortID(), taskID, "worker escalated "+level+" on TIP "+packID, normalizeJSONText(opts["report-json"])); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return outputOne(db, `SELECT * FROM work_item_escalations WHERE id=?`, id)
+}
+
+func workflowEscalationResolve(db *sql.DB, args []string) error {
+	if len(args) < 3 {
+		return errors.New("usage: pic workflow escalation-resolve <task-id> <escalation-id> <resolution-json> --actor-role contractor")
+	}
+	taskID, escalationID := args[0], args[1]
+	opts, err := parseOptions(args[3:])
+	if err != nil || validateWorkflowActor(opts["actor-role"], "contractor") != nil {
+		return errors.New("escalation resolution requires actor_role=contractor")
+	}
+	var resolution map[string]any
+	if err = json.Unmarshal([]byte(args[2]), &resolution); err != nil {
+		return fmt.Errorf("escalation resolution must be valid JSON: %w", err)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var packID string
+	if err = tx.QueryRow(`SELECT instruction_pack_id FROM work_item_escalations WHERE id=? AND work_item_id=? AND status='open'`, escalationID, taskID).Scan(&packID); err != nil {
+		return errors.New("escalation resolution requires an open escalation for this Work Item")
+	}
+	result, err := tx.Exec(`UPDATE work_item_escalations SET status='resolved',resolution_json=?,resolved_by=?,resolved_at=datetime('now') WHERE id=? AND status='open'`, normalizeJSONText(args[2]), opts["actor-role"], escalationID)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errors.New("escalation resolution rejected: already resolved")
+	}
+	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,'escalation_resolved','contractor',?,?)`, "wie-"+shortID(), taskID, "escalation "+escalationID+" resolved on TIP "+packID, normalizeJSONText(args[2])); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return outputOne(db, `SELECT * FROM work_item_escalations WHERE id=?`, escalationID)
 }
 
 func workflowPipelineComplete(db *sql.DB, args []string) error {

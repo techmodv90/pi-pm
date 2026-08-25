@@ -465,7 +465,7 @@ function activePackDoneReports(data: any, activePack: any): any[] {
         || (!decision.related_type && decision.created_at >= report.created_at)))));
 }
 
-export function parseTaskCompletionReport(output: string): { status: "done" | "partial" | "blocked"; markdown: string; blocker: string } {
+export function parseTaskCompletionReport(output: string): { status: "done" | "partial" | "blocked" | "escalated"; markdown: string; blocker: string; escalation?: any } {
   const documents = [...output.matchAll(/<completion_report\b[\s\S]*?<\/completion_report>/g)].map((match) => match[0]);
   if (documents.length !== 1) throw new Error("worker output must contain one completion_report XML document");
   const document = documents[0]!.replace(/<([^<>\s]+)&gt;/g, "&lt;$1&gt;");
@@ -477,16 +477,29 @@ export function parseTaskCompletionReport(output: string): { status: "done" | "p
     throw new Error(`worker output contains invalid XML: ${error instanceof Error ? error.message : String(error)}`);
   }
   const status = String(parsed?.["@_status"] || "").toLowerCase();
-  if (!["done", "partial", "blocked"].includes(status)) throw new Error("worker output has invalid status");
+  if (!["done", "partial", "blocked", "escalated"].includes(status)) throw new Error("worker output has invalid status");
   const sections = Object.fromEntries(["files_changed", "test_results", "issues_discovered", "deviations", "suggestions"].map((section) => {
     const text = completionSectionText(parsed?.[section]);
     if (!text) throw new Error(`worker output missing ${section}`);
     return [section, text];
   }));
+  let escalation: any;
+  if (status === "escalated") {
+    const raw = typeof parsed?.escalation === "string" ? parsed.escalation.trim() : "";
+    if (!raw) throw new Error("escalated worker output requires one escalation section containing the structured report JSON");
+    try {
+      escalation = JSON.parse(raw);
+    } catch (error) {
+      throw new Error(`escalation section must be valid JSON: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    if (!(["L2", "L3"].includes(escalation.level))) throw new Error("escalation report requires level L2 or L3");
+    // Presence-only audit floor (GAP-138): makes the artifact-contradiction test auditable.
+    if (!Array.isArray(escalation.checked_sources) || escalation.checked_sources.length === 0) throw new Error("escalation report requires a nonempty checked_sources list");
+  }
   const blocker = [sections.issues_discovered, sections.deviations]
     .filter((value) => value && value.toLowerCase() !== "none")
     .join(" ");
-  return { status: status as "done" | "partial" | "blocked", markdown: document, blocker };
+  return { status: status as "done" | "partial" | "blocked" | "escalated", markdown: document, blocker, ...(escalation ? { escalation } : {}) };
 }
 
 function completionSectionText(value: unknown): string {
@@ -1019,6 +1032,23 @@ function saveWorkerReport(run: PipelineRun, cwd: string, taskReport: { status: "
   if (result.error) throw new Error(result.error);
 }
 
+/**
+ * Escalation resolution injection (GAP-138): resolutions recorded after every existing
+ * pipeline run have not been seen by any worker yet; inject them into the next relaunch.
+ */
+export function buildEscalationResolutionContext(data: any, runs: PipelineRun[]): string {
+  const escalations = Array.isArray(data?.escalations) ? data.escalations : [];
+  const lastRunStart = runs.map((run) => String(run.created_at || "")).sort().at(-1) || "";
+  const pending = escalations.filter((entry: any) => entry.status === "resolved" && String(entry.resolved_at || "") > lastRunStart);
+  if (pending.length === 0) return "";
+  const lines = pending.map((entry: any) => {
+    let resolution: any = {};
+    try { resolution = JSON.parse(entry.resolution_json || "{}"); } catch {}
+    return `- Escalation ${entry.id} (${entry.level}, TIP ${entry.instruction_pack_id}): ${JSON.stringify(resolution)}`;
+  });
+  return `\n\n## ESCALATION RESOLUTIONS\nThe following escalations raised by a previous attempt on this TIP have been resolved. These decisions are authoritative contractor/owner answers: apply them exactly, do not re-litigate them, and do not re-escalate the same question without new evidence.\n\n${lines.join("\n")}\n`;
+}
+
 function stageAgent(stage: PipelineStage): string {
   if (stage === "contracts") throw new Error("Contract drafting is Contractor-owned");
   return ({ scan: "task-scout", rri: "rri-persona", vision: "task-planner", blueprint: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
@@ -1099,7 +1129,7 @@ function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string 
     if (stage === "review") return buildWorkItemReviewerHandoff(taskId);
     if (stage === "autofix") return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildAutofixContext(data);
     const currentReview = currentFailedReview(parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)), activePack);
-    return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data);
+    return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data) + buildEscalationResolutionContext(data, parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)));
   }
   const data = withInheritedParentWorkflowArtifacts(raw, cwd);
   if (stage === "scan") return buildWorkItemScanPrompt(data.work_item, data.project);
@@ -1108,7 +1138,7 @@ function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string 
     const verificationReports = execPic(["workflow", "verifications", taskId], cwd);
     return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildAutofixContext({ ...data, verification_reports: Array.isArray(verificationReports) ? verificationReports : data.verification_reports });
   }
-  return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildWorkerCorrectionContext(data);
+  return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildWorkerCorrectionContext(data) + buildEscalationResolutionContext(data, parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)));
 }
 
 export function rejectedCandidatePatch(data: any, runs: PipelineRun[], cwd: string): string | undefined {
@@ -1677,6 +1707,16 @@ export class PipelineScheduler {
             if (statSync(patch).size > 0) execFileSync("git", ["apply", "--check", patch], { cwd: this.cwd, stdio: "pipe" });
           }
         }
+        if (taskReport.status === "escalated") {
+          // Fail-closed escalation (GAP-138): persist the structured report bound to the
+          // run's TIP lineage, block the run, release the claim, and stop — never retry
+          // or continue downstream while the escalation is open.
+          const saved = execPic(["workflow", "escalation-save", run.task_id, "--pipeline-run-id", run.id, "--report-json", JSON.stringify(taskReport.escalation)], this.cwd);
+          if (saved.error) throw new Error(saved.error);
+          checkpoint(run, "advanced", this.cwd);
+          this.notifyBlockedAttempt(run, `worker escalated ${taskReport.escalation.level}: ${taskReport.escalation.summary || "decision required before progress can resume"}`);
+          return;
+        }
         if (taskReport.status !== "done") {
           const reason = taskReport.blocker || `worker reported ${taskReport.status}`;
           execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", reason, "--result-json", JSON.stringify({ ...pipelineFailureResult(reason), blocker: reason, completion_report: taskReport.markdown })], this.cwd);
@@ -1773,6 +1813,7 @@ export class PipelineScheduler {
 
     for (const entry of group) {
       const report = parseTaskCompletionReport(outputFor(entry));
+      if (report.status === "escalated") throw new Error("escalated run cannot be integrated");
       const data = normalizePipelineData(execPic(["show", entry.task_id], this.cwd));
       const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
       const constraints = JSON.parse(activePack?.constraints_json || "{}");
@@ -1827,6 +1868,7 @@ export class PipelineScheduler {
     const data = normalizePipelineData(raw);
     if ((data.completion_reports || []).some((report: any) => report.status === "done" && report.pipeline_run_id === run.id)) return;
     const report = parseTaskCompletionReport(outputFor(run));
+    if (report.status === "escalated") throw new Error("escalated run cannot be integrated");
     const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
     const constraints = JSON.parse(activePack?.constraints_json || "{}");
     const workspace = JSON.parse(readFileSync(join(run.async_dir || "", "workspace.json"), "utf8"));
@@ -1835,7 +1877,9 @@ export class PipelineScheduler {
       const saved = execPic(["work-item", "completion-save", run.task_id, "done", "--pipeline-run-id", run.id, "--summary", "Reviewed implementation completed", "--report-markdown", report.markdown], this.cwd);
       if (saved.error) throw new Error(saved.error);
     } else {
-      saveWorkerReport(run, this.cwd, report, { changedFiles, diffSummary: "Reviewed implementation completed" });
+      // The escalated guard above makes this narrowing safe: escalated runs never integrate.
+      const integrationStatus = report.status as "done" | "partial" | "blocked";
+      saveWorkerReport(run, this.cwd, { status: integrationStatus, markdown: report.markdown }, { changedFiles, diffSummary: "Reviewed implementation completed" });
     }
   }
 

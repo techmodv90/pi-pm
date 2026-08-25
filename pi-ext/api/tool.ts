@@ -53,7 +53,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
       parameters: Type.Object({
         action: StringEnum([
           "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview", "save_rri_interview",
-          "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "preview_artifact", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "amend_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
+          "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "preview_artifact", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "resolve_escalation", "amend_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
           "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
           "relate_work_items", "reset_pipeline_circuit",
         ] as const),
@@ -86,6 +86,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         evidence_json: Type.Optional(Type.String({ description: "JSON evidence supporting a pipeline circuit reset" })),
         claimant: Type.Optional(Type.String({ description: "Worker or scheduler claiming the Work Item" })),
         deferrable: Type.Optional(Type.Boolean({ description: "Whether the Work Item is deferred" })),
+        escalation_id: Type.Optional(Type.String({ description: "Open escalation ID (wies-…) to resolve with a recorded decision" })),
       }),
   
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
@@ -319,6 +320,13 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           case "reset_work_item_execution": {
             if (!params.id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id and actor_role must be owner after explicit owner approval" }], details: {}, isError: true };
             args = ["work-item", "execution-reset", params.id, params.actor_role];
+            break;
+          }
+          case "resolve_escalation": {
+            if (!params.id || !params.escalation_id || !params.content || params.actor_role !== "contractor") {
+              return { content: [{ type: "text", text: "Error: id, escalation_id, content (a JSON string such as {\"decision\":\"use sqlite\",\"rationale\":\"...\"}), and actor_role=contractor are required; owner answers flow through the contractor" }], details: {}, isError: true };
+            }
+            args = ["workflow", "escalation-resolve", params.id, params.escalation_id, params.content, "--actor-role", params.actor_role];
             break;
           }
           case "amend_work_item_planning": {

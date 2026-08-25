@@ -53,13 +53,14 @@ func cmdShow(args []string) error {
 		ownerDecisions, _ := queryMaps(db, `SELECT * FROM work_item_owner_decisions WHERE work_item_id=? ORDER BY datetime(created_at) DESC,rowid DESC`, id)
 		requirements, _ := queryMaps(db, `SELECT * FROM requirements WHERE task_id=? OR epic_id=? ORDER BY requirement_key,id`, id, id)
 		planningOwnerDecisions, _ := queryMaps(db, `SELECT * FROM owner_decisions WHERE task_id=? OR epic_id=? ORDER BY datetime(created_at),rowid`, id, id)
+		escalations, _ := queryMaps(db, `SELECT * FROM work_item_escalations WHERE work_item_id=? ORDER BY datetime(created_at),rowid`, id)
 		ready, _ := rowExists(db, `SELECT 1 FROM work_items wi WHERE wi.id=? AND `+workItemReadySQL, id)
 		var executionState any
 		if contains([]string{"task", "bug", "chore"}, fmt.Sprint(item["type"])) {
 			state, _ := loadWorkItemExecutionState(db, id)
 			executionState = state
 		}
-		writeJSON(os.Stdout, map[string]any{"work_item": item, "ready": ready, "execution_state": executionState, "children": children, "dependencies": dependencies, "relations": relations, "artifacts": artifacts, "checkpoints": checkpoints, "instruction_packs": packs, "profiles": profiles, "completion_reports": completionReports, "verification_reports": verificationReports, "owner_decisions": ownerDecisions, "requirements": requirements, "planning_owner_decisions": planningOwnerDecisions})
+		writeJSON(os.Stdout, map[string]any{"work_item": item, "ready": ready, "execution_state": executionState, "children": children, "dependencies": dependencies, "relations": relations, "artifacts": artifacts, "checkpoints": checkpoints, "instruction_packs": packs, "profiles": profiles, "completion_reports": completionReports, "verification_reports": verificationReports, "owner_decisions": ownerDecisions, "requirements": requirements, "planning_owner_decisions": planningOwnerDecisions, "escalations": escalations})
 		return nil
 	}
 	return fmt.Errorf("Work Item %s not found", id)
