@@ -619,6 +619,52 @@ func workflowPipelineComplete(db *sql.DB, args []string) error {
 	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
 }
 
+// Round-cap blocking constraint: when a bounded review-fix loop exhausts its
+// round budget (three completed fix rounds without a passed review), the next
+// fix must not relaunch automatically. This command makes that block durable by
+// elevating the latest completed failed review to require owner action (the same
+// durable signal the claim and workflow-status gates already honor for
+// owner-approval-required verdicts) and appending a persistent owner-action
+// event with the synthesized summary, so the block survives reconciliation.
+func workflowReviewFixBlock(db *sql.DB, args []string) error {
+	if len(args) < 1 {
+		return errors.New("usage: pic workflow review-fix-block <task-id> [--summary <text>]")
+	}
+	opts, err := parseOptions(args[1:])
+	if err != nil {
+		return err
+	}
+	taskID := args[0]
+	summary := opts["summary"]
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var reviewID string
+	err = tx.QueryRow(`SELECT id FROM pipeline_runs WHERE task_id=? AND stage='review' AND status='completed' AND json_valid(result_json) AND json_extract(result_json,'$.review_status')='failed' ORDER BY rowid DESC LIMIT 1`, taskID).Scan(&reviewID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("review-fix block requires a completed failed review for the task")
+	}
+	if err != nil {
+		return err
+	}
+	result, err := tx.Exec(`UPDATE pipeline_runs SET result_json=json_set(result_json, '$.owner_approval_required', json('true'), '$.review_fix_round_cap', ?), updated_at=datetime('now') WHERE id=? AND status='completed' AND stage='review' AND json_valid(result_json)`, summary, reviewID)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errors.New("review-fix block rejected: completed failed review not mutable")
+	}
+	if err = addEvent(tx, taskID, "review_fix_round_cap", "orchestrator", summary, map[string]any{"pipeline_run_id": reviewID, "owner_action_required": true, "summary": summary}); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, reviewID)
+}
+
 func workflowPipelineCheckpoint(db *sql.DB, args []string) error {
 	if len(args) < 3 {
 		return errors.New("pipeline-checkpoint requires run id, lease token, and checkpoint")

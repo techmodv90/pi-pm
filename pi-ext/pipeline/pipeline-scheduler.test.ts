@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, runnerRepairEvidence, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
 
@@ -455,6 +455,42 @@ test("critical review deviations pause instead of relaunching a worker", () => {
   const review = { stage: "review", status: "completed", candidate_run_id: "pr-1", candidate_patch_hash: "hash", result_json: JSON.stringify({ review_status: "failed", owner_approval_required: true }) };
   assert.equal(nextPipelineStage({ instruction_packs: [pack], completion_reports: [], work_item: { review_status: "failed" } }, [candidate, review]), null);
   assert.throws(() => parseReviewReport('<review_report status="passed"><owner_approval_required>true</owner_approval_required><notes>ok</notes><findings></findings></review_report>'), /cannot require owner approval/);
+});
+
+test("round-cap owner block is durable: nextPipelineStage stops relaunching the fix worker", () => {
+  const pack = { status: "active", id: "tip-1", version: 1, content_hash: "pack-hash" };
+  const candidate = { id: "pr-1", stage: "worker", status: "completed", instruction_pack_hash: "pack-hash", artifact_saved_at: "now", integrated_patch_hash: "hash" };
+  // Three completed fix rounds, then the review carries the persisted owner block.
+  const fixRounds = [
+    { id: "pr-f1", stage: "worker", status: "completed", review_fix_cycle: 1, instruction_pack_hash: "pack-hash" },
+    { id: "pr-f2", stage: "worker", status: "completed", review_fix_cycle: 2, instruction_pack_hash: "pack-hash" },
+    { id: "pr-f3", stage: "worker", status: "completed", review_fix_cycle: 3, instruction_pack_hash: "pack-hash" },
+  ];
+  const review = { id: "pr-r", stage: "review", status: "completed", candidate_run_id: "pr-1", candidate_patch_hash: "hash", result_json: JSON.stringify({ review_status: "failed", owner_approval_required: true, review_fix_round_cap: "round cap reached: three fix rounds without a passed review" }) };
+  assert.equal(reviewCycleCount([candidate, review, ...fixRounds]), 3);
+  // After the durable round-cap block the scheduler no longer dispatches a fix worker.
+  assert.equal(nextPipelineStage({ instruction_packs: [pack], completion_reports: [], work_item: { review_status: "failed" } }, [candidate, review, ...fixRounds]), null);
+});
+
+test("round cap counts completed fix rounds only and reads the numeric legacy owner block", () => {
+  const pack = { status: "active", id: "tip-1", version: 1, content_hash: "pack-hash" };
+  const candidate = { id: "pr-1", stage: "worker", status: "completed", instruction_pack_hash: "pack-hash", artifact_saved_at: "now", integrated_patch_hash: "hash" };
+  // Cycle number 2 was consumed by a failed claim; only cycles 1 and 3 completed.
+  const runs = [
+    candidate,
+    { id: "pr-f1", stage: "worker", status: "completed", review_fix_cycle: 1, instruction_pack_hash: "pack-hash" },
+    { id: "pr-f2", stage: "worker", status: "failed", review_fix_cycle: 2, instruction_pack_hash: "pack-hash" },
+    { id: "pr-f3", stage: "worker", status: "completed", review_fix_cycle: 3, instruction_pack_hash: "pack-hash" },
+  ];
+  assert.equal(reviewCycleCount(runs), 2);
+  // Two completed rounds must not trip the round-3 cap: with a failed review
+  // that carries no owner block, the scheduler still dispatches the fix worker.
+  const plainFailedReview = { id: "pr-r0", stage: "review", status: "completed", candidate_run_id: "pr-1", candidate_patch_hash: "hash", result_json: JSON.stringify({ review_status: "failed", owner_approval_required: false }) };
+  assert.equal(nextPipelineStage({ instruction_packs: [pack], completion_reports: [], work_item: { review_status: "failed" } }, [...runs, plainFailedReview]), "worker");
+  // Legacy numeric owner block (workflowReviewFixBlock persisted 1 before the
+  // boolean fix) must still stop the relaunch loop.
+  const numericBlockReview = { id: "pr-r", stage: "review", status: "completed", candidate_run_id: "pr-1", candidate_patch_hash: "hash", result_json: JSON.stringify({ review_status: "failed", owner_approval_required: 1 }) };
+  assert.equal(nextPipelineStage({ instruction_packs: [pack], completion_reports: [], work_item: { review_status: "failed" } }, [...runs, numericBlockReview]), null);
 });
 
 test("nextPipelineStage stops after task review", () => {
@@ -1093,7 +1129,8 @@ test("owned runner completion persists output and Task-specific worktree patch e
   execFileSync("git", ["add", "file.txt"], { cwd: repo });
   execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
   const runId = `agent-${Date.now()}`;
-  const worktree = join(tmpdir(), `pi-task-worktree-${runId}`);
+  const worktree = join(repo, ".pi", "worktrees", runId);
+  mkdirSync(join(repo, ".pi", "worktrees"), { recursive: true });
   execFileSync("git", ["worktree", "add", "-qb", `pi-agent-${runId}`, worktree], { cwd: repo });
   writeFileSync(join(worktree, "file.txt"), "changed\n");
   writeFileSync(join(worktree, "new.txt"), "new\n");
@@ -1128,6 +1165,39 @@ test("owned runner completion persists output and Task-specific worktree patch e
   assert.match(patch, /new\.txt/);
   assert.doesNotMatch(patch, /test-results/);
   assert.equal(JSON.parse(readFileSync(join(artifactDir, "status.json"), "utf8")).state, "completed");
+});
+
+test("a transient-provider exhaustion persists failure_code=transient_provider into the status artifact", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-transient-status-"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  writeFileSync(join(repo, "work.go"), "package work\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+
+  const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
+  const scheduler = new PipelineScheduler(pi) as any;
+  const runId = `agent-transient-${Date.now()}`;
+  const artifactDir = join(repo, ".pi-subagents", "pipeline", "pr-transient");
+  mkdirSync(artifactDir, { recursive: true });
+  scheduler.cwd = repo;
+  scheduler.agentRuns.set(runId, { id: "pr-transient", task_id: "t-1", stage: "worker", lease_token: "lease", async_dir: artifactDir, child_index: 0 });
+  await scheduler.persistAgentResult({
+    runId,
+    agent: "task-worker",
+    task: "work",
+    exitCode: 1,
+    failureCode: "transient_provider",
+    errorMessage: "transient provider fault (empty_output) after 2 in-claim retries; exhausted without consuming a numbered attempt",
+    messages: [],
+    stderr: "",
+    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+  });
+  const status = JSON.parse(readFileSync(join(artifactDir, "status.json"), "utf8"));
+  assert.equal(status.state, "failed");
+  assert.equal(status.failure_code, "transient_provider");
+  assert.match(status.error, /without consuming a numbered attempt/);
 });
 
 test("worker scope only blocks protected task-system paths", () => {
@@ -1279,4 +1349,76 @@ test("a failed escalation-save surfaces the worker's escalation payload instead 
   assert.match(block, /completion_report: taskReport\.markdown/);
   assert.match(block, /escalation: taskReport\.escalation/);
   assert.doesNotMatch(block, /throw new Error\(saved\.error\)/);
+});
+
+test("fix workers receive synthesized P0/P1/P2 findings with a defer list, never the raw dump", () => {
+  const current_review = {
+    notes: "verbose reviewer background that must not reach the fix worker raw",
+    findings: [
+      "Critical: verification failing with corrupt data risk",
+      "Wire expectedVersion through the API",
+      "Style: rename the helper for clarity",
+      "The lint nit is non-blocking and deferred",
+    ],
+  };
+  const context = buildWorkerCorrectionContext({ current_review });
+  assert.match(context, /P0 \(critical, must fix\):[\s\S]+verification failing/);
+  assert.match(context, /P1 \(important, fix now\):[\s\S]+Wire expectedVersion/);
+  assert.match(context, /P2 \(minor, address if touching\):[\s\S]+rename the helper/);
+  assert.match(context, /Deferred \(non-blocking[\s\S]+lint nit/);
+  assert.doesNotMatch(context, /verbose reviewer background/);
+});
+
+test("finding synthesis classifies below the severity model", () => {
+  const s = synthesizeReviewFindings(["Critical security bug", "normal change", "Minor naming", "defer this nit"]);
+  assert.deepEqual(s.p0, ["Critical security bug"]);
+  assert.deepEqual(s.p1, ["normal change"]);
+  assert.deepEqual(s.p2, ["Minor naming"]);
+  assert.deepEqual(s.deferred, ["defer this nit"]);
+});
+
+test("targeted re-review prompt asks exactly the three review-fix questions", () => {
+  const prompt = buildTargetedReReviewInstructions();
+  assert.match(prompt, /RESOLVED - was each P0\/P1 correction finding from the prior failed review resolved by this fix\?/);
+  assert.match(prompt, /NEW DEFECT - did the fix introduce a new defect within the blast radius/);
+  assert.match(prompt, /PRIOR NOTES STANDING - do the prior P1 and P2 notes from the last review still stand unchanged/);
+  assert.doesNotMatch(prompt, /Review Instructions/);
+});
+
+test("review-fix round count derives from completed fix worker cycles", () => {
+  const runs = [
+    { stage: "worker", status: "completed", review_fix_cycle: 1 },
+    { stage: "review", status: "completed", review_fix_cycle: undefined },
+    { stage: "worker", status: "completed", review_fix_cycle: 3 },
+    { stage: "worker", status: "completed", review_fix_cycle: 2 },
+  ] as any;
+  assert.equal(reviewCycleCount(runs), 3);
+  assert.equal(reviewCycleCount([{ stage: "review", review_fix_cycle: undefined }] as any), 0);
+});
+
+test("review-fix round count ignores non-completed fix worker runs", () => {
+  const incomplete = [
+    { stage: "worker", status: "running", review_fix_cycle: 5 },
+    { stage: "worker", status: "failed", review_fix_cycle: 4 },
+    { stage: "worker", status: "blocked", review_fix_cycle: 3 },
+    { stage: "worker", status: "cancelled", review_fix_cycle: 2 },
+    { stage: "worker", status: "expired", review_fix_cycle: 1 },
+  ] as any;
+  assert.equal(reviewCycleCount(incomplete), 0);
+  // Mixed set: only the completed cycles advance the cap.
+  const mixed = [
+    { stage: "worker", status: "running", review_fix_cycle: 5 },
+    { stage: "worker", status: "failed", review_fix_cycle: 4 },
+    { stage: "worker", status: "completed", review_fix_cycle: 2 },
+  ] as any;
+  assert.equal(reviewCycleCount(mixed), 1);
+});
+
+test("round cap produces a synthesized owner-action block for the next fix", () => {
+  const block = buildReviewFixCapBlock("wi-1", ["Critical security bug", "Wire expectedVersion"]);
+  assert.match(block, /round cap \(3\) reached/);
+  assert.match(block, /Owner action required/);
+  assert.match(block, /P0 \(critical, must fix\):[\s\S]+security bug/);
+  assert.match(block, /P1 \(important, fix now\):[\s\S]+Wire expectedVersion/);
+  assert.match(block, /will not relaunch automatically/);
 });

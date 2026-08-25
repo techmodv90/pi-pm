@@ -67,6 +67,8 @@ export interface SubagentSpec {
   preparedWorktree?: string;
   /** Host-side pi session file (create-or-continue) pinned outside the worktree; enables review-fix resume. */
   sessionPath?: string;
+  /** Backoff base (ms) between in-claim transient-provider retries; defaults to RUNNER_TRANSIENT_BACKOFF_MS. */
+  transientBackoffMs?: number;
 }
 
 export interface SubagentHandle {
@@ -83,7 +85,9 @@ export function assertManagedAcceptance(spec: SubagentSpec): void {
 }
 
 export async function prepareSubagentWorktree(cwd: string, initialPatchPath?: string, runId: string = randomUUID()): Promise<{ runId: string; cwd: string }> {
-  const worktree = join(tmpdir(), `pi-task-worktree-${runId}`);
+  const worktreeRoot = join(cwd, ".pi", "worktrees");
+  mkdirSync(worktreeRoot, { recursive: true, mode: 0o700 });
+  const worktree = join(worktreeRoot, runId);
   await execFileAsync("git", ["worktree", "add", "-b", `pi-agent-${runId}`, worktree, "HEAD"], { cwd });
   try {
     if (initialPatchPath && statSync(initialPatchPath).size > 0) {
@@ -108,7 +112,7 @@ export async function prepareSubagentWorktree(cwd: string, initialPatchPath?: st
 
 export function removeSubagentWorktree(cwd: string, worktree: string, runId: string): void {
   const branch = `pi-agent-${runId}`;
-  if (basename(worktree) !== `pi-task-worktree-${runId}`) throw new Error(`refusing to remove unowned worktree: ${worktree}`);
+  if (basename(worktree) !== runId) throw new Error(`refusing to remove unowned worktree: ${worktree}`);
   const canonicalWorktree = existsSync(worktree) ? realpathSync(worktree) : worktree;
   const registration = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd, encoding: "utf8" })
     .trim().split(/\n\n+/).find((block) => {
@@ -132,7 +136,7 @@ export function cleanupOrphanedSubagentWorktrees(cwd: string, activeRunIds: Read
   for (const block of blocks) {
     const path = block.match(/^worktree (.+)$/m)?.[1];
     const branch = block.match(/^branch refs\/heads\/pi-agent-(.+)$/m)?.[1];
-    if (!path || !branch || activeRunIds.has(branch) || basename(path) !== `pi-task-worktree-${branch}`) continue;
+    if (!path || !branch || activeRunIds.has(branch) || basename(path) !== branch) continue;
     removeSubagentWorktree(cwd, path, branch);
   }
 }
@@ -192,8 +196,11 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
     ? gitStatusOrUndefined(spec.cwd)
     : undefined;
   if (spec.isolation === "worktree") {
-    runCwd = spec.preparedWorktree || join(tmpdir(), `pi-task-worktree-${id}`);
-    if (!spec.preparedWorktree) execFileSync("git", ["worktree", "add", "-b", `pi-agent-${id}`, runCwd, "HEAD"], { cwd: spec.cwd, stdio: "pipe" });
+    runCwd = spec.preparedWorktree || join(spec.cwd, ".pi", "worktrees", id);
+    if (!spec.preparedWorktree) {
+      mkdirSync(join(spec.cwd, ".pi", "worktrees"), { recursive: true, mode: 0o700 });
+      execFileSync("git", ["worktree", "add", "-b", `pi-agent-${id}`, runCwd, "HEAD"], { cwd: spec.cwd, stdio: "pipe" });
+    }
     if (!spec.preparedWorktree && spec.initialPatchPath && statSync(spec.initialPatchPath).size > 0) {
       execFileSync("git", ["apply", "--check", spec.initialPatchPath], { cwd: runCwd, stdio: "pipe" });
       execFileSync("git", ["apply", spec.initialPatchPath], { cwd: runCwd, stdio: "pipe" });
@@ -402,4 +409,94 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
     result: resultPromise,
     stop: () => stopChild(),
   };
+}
+
+// Transient provider fault classification constraint: the runner classifies
+// output BEFORE any downstream XML validation so empty-output and inference-
+// abort faults are retried inside the same claim instead of being surfaced as
+// malformed-verdict failures. A completed agent that returned assistant text is
+// never transient.
+export type RunnerTransientFault = "empty_output" | "inference_abort" | "none";
+
+export const RUNNER_TRANSIENT_RETRIES = 2;
+export const RUNNER_TRANSIENT_BACKOFF_MS = 500;
+
+export function classifyRunnerTransientFault(result: SubagentResult): RunnerTransientFault {
+  if (result.stopReason === "aborted") return "none";
+  const diagnostic = `${result.errorMessage || ""}\n${result.stderr || ""}`;
+  if (/inference[\s_-]?abort|inference\s+error|empty[\s_-]?(?:model|provider)[\s_-]?(?:output|response)|provider[\s_-]?error/i.test(diagnostic)) return "inference_abort";
+  // Empty assistant output is transient independently of exit code: a provider
+  // that returns no text (even with a nonzero child exit and no matching
+  // diagnostic) must still be retried in-claim rather than misclassified as a
+  // normal failure. Explicit user aborts are excluded above.
+  if (!finalAssistantText(result.messages || []).trim()) return "empty_output";
+  return "none";
+}
+
+export function runnerTransientBackoffMs(retryIndex: number, spec: SubagentSpec): number {
+  const base = spec.transientBackoffMs !== undefined ? spec.transientBackoffMs : RUNNER_TRANSIENT_BACKOFF_MS;
+  return base * Math.max(1, retryIndex);
+}
+
+// In-claim transient retry constraint: retry at most RUNNER_TRANSIENT_RETRIES
+// times inside the same claim (same runId, no numbered pipeline attempt
+// consumed), resetting the isolated worktree between attempts. On exhaustion the
+// handled result is tagged failure_code=transient_provider.
+
+// Candidate-state restore constraint: a retry must run against the same attested
+// candidate as the original launch. git reset --hard HEAD alone discards the
+// uncommitted initial patch that prepareSubagentWorktree applied, so after the
+// reset we reapply and revalidate spec.initialPatchPath (mirroring the
+// reverse-check integration fallback used at preparation time).
+export function resetSubagentWorktreeToCandidate(spec: SubagentSpec, assignedWorktree: string, cwd: string): void {
+  execFileSync("git", ["-C", assignedWorktree, "reset", "--hard", "HEAD"], { cwd, stdio: "pipe" });
+  // Retry-state cleanliness constraint: git reset --hard leaves untracked files
+  // from the failed attempt in place, so a retry could inherit generated or newly
+  // created artifacts and diverge from the attested candidate. Drop untracked
+  // paths before reapplying the patch; no -x, ignored build output stays.
+  execFileSync("git", ["-C", assignedWorktree, "clean", "-fd"], { cwd, stdio: "pipe" });
+  if (!spec.initialPatchPath || statSync(spec.initialPatchPath).size === 0) return;
+  try {
+    execFileSync("git", ["apply", "--check", spec.initialPatchPath], { cwd: assignedWorktree, stdio: "pipe" });
+    execFileSync("git", ["apply", spec.initialPatchPath], { cwd: assignedWorktree, stdio: "pipe" });
+  } catch (error) {
+    // Review recovery: mirror preparation; the candidate patch may already be
+    // integrated in the base commit, in which case applying is a no-op.
+    try { execFileSync("git", ["apply", "--reverse", "--check", spec.initialPatchPath], { cwd: assignedWorktree, stdio: "pipe" }); }
+    catch { throw error; }
+  }
+}
+
+export function startSubagentResilient(spec: SubagentSpec, onUpdate?: (update: SubagentUpdate) => void, spawnProcess: SpawnFunction = spawn): SubagentHandle {
+  const runId = spec.runId || randomUUID();
+  const boundSpec: SubagentSpec = { ...spec, runId };
+  let handle = startSubagent(boundSpec, onUpdate, spawnProcess);
+  let currentStop = () => handle.stop();
+  const result = (async (): Promise<SubagentResult> => {
+    let retry = 0;
+    for (;;) {
+      const attempt = await handle.result;
+      const fault = classifyRunnerTransientFault(attempt);
+      if (fault === "none" || retry >= RUNNER_TRANSIENT_RETRIES) {
+        if (fault !== "none") {
+          // Mark the run failed (not completed) so the scheduler blocks the stage
+          // via the transient_provider classification instead of treating the
+          // empty output as a completed worker that then fails XML validation.
+          attempt.exitCode = 1;
+          attempt.failureCode = "transient_provider";
+          attempt.errorMessage = `transient provider fault (${fault}) after ${retry} in-claim ${retry === 1 ? "retry" : "retries"}; exhausted without consuming a numbered attempt`;
+        }
+        return attempt;
+      }
+      retry++;
+      if (attempt.workspace?.assignedWorktree) {
+        try { resetSubagentWorktreeToCandidate(spec, attempt.workspace.assignedWorktree, spec.cwd); }
+        catch {}
+      }
+      await new Promise((resolve) => setTimeout(resolve, runnerTransientBackoffMs(retry, spec)));
+      handle = startSubagent(boundSpec, onUpdate, spawnProcess);
+      currentStop = () => handle.stop();
+    }
+  })();
+  return { id: runId, result, stop: () => currentStop() };
 }

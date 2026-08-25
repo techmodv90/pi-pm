@@ -18,7 +18,7 @@ import { buildTaskVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemReview
 import { planStagesForProfile, normalizePlanningDepth, type PlanningDepth, type PlanningStage } from "../tasking/workflow-modes.ts";
 import { getBlockingTaskDependencies } from "../tasking/workflow-gates.ts";
 import { discoverAgents } from "../subagent/agents.ts";
-import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, startSubagent, type SubagentHandle } from "../subagent/runner.ts";
+import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, startSubagent, startSubagentResilient, type SubagentHandle } from "../subagent/runner.ts";
 
 import type { SubagentResult } from "../subagent/types.ts";
 import { parsePipelineRuns, type PipelineRunRecord, type PipelineStage } from "./pipeline-types.ts";
@@ -400,7 +400,13 @@ export function nextPipelineStage(data: any, runs: any[] = []): PipelineStage | 
 function reviewRequiresOwner(runs: any[], candidate: any): boolean {
   const review = runs.find((run: any) => run.stage === "review" && run.status === "completed"
     && run.candidate_run_id === candidate?.id && run.candidate_patch_hash === candidate?.integrated_patch_hash);
-  try { return JSON.parse(review?.result_json || "{}").owner_approval_required === true; } catch { return false; }
+  try {
+    // Numeric-1 constraint: workflowReviewFixBlock historically persisted the
+    // durable owner block as JSON number 1; accept both boolean and numeric
+    // forms so legacy rows still stop the fix-worker relaunch loop.
+    const flag = JSON.parse(review?.result_json || "{}").owner_approval_required;
+    return flag === true || flag === 1 || flag === "true";
+  } catch { return false; }
 }
 
 function reviewStatusForCandidate(runs: any[], candidate: any): "passed" | "failed" | "" {
@@ -670,6 +676,46 @@ function assertCleanGit(cwd: string): void {
       throw new Error("Async pipeline requires .pi/tasks.db* and .pi-subagents/ to be ignored by Git.");
     }
   }
+}
+
+// Targeted re-review constraint: a follow-up review after a review-fix round
+// answers exactly three questions (finding resolved, new defect in blast radius,
+// prior P1/P2 notes standing) instead of a full re-review.
+export function buildTargetedReReviewInstructions(): string {
+  return [
+    "\n## TARGETED RE-REVIEW",
+    "This is a follow-up review after a review-fix round. Answer exactly these three targeted questions and fold your answers into the canonical review_report notes:",
+    "1. RESOLVED - was each P0/P1 correction finding from the prior failed review resolved by this fix?",
+    "2. NEW DEFECT - did the fix introduce a new defect within the blast radius of the changed files?",
+    "3. PRIOR NOTES STANDING - do the prior P1 and P2 notes from the last review still stand unchanged, including any deferred P2 items?",
+    "Return status=failed only when a P0/P1 finding remains unresolved or the fix introduced a defect in its blast radius.",
+  ].join("\n") + "\n";
+}
+
+export function reviewCycleCount(runs: PipelineRunRecord[]): number {
+  // Round-cap constraint: only COMPLETED review-fix worker runs advance the cap,
+  // counted as DISTINCT cycle numbers. go-pic assigns review_fix_cycle as MAX+1
+  // per claim, so a failed or transiently exhausted fix claim consumes a cycle
+  // number without completing; max() would overcount completed rounds and trip
+  // the cap before three fix rounds actually finished.
+  return new Set(runs.filter((run) => run.stage === "worker" && run.status === "completed" && (run.review_fix_cycle || 0) >= 1)
+    .map((run) => run.review_fix_cycle)).size;
+}
+
+export function buildReviewFixCapBlock(taskId: string, findings: string[]): string {
+  const synthesis = synthesizeReviewFindings(findings);
+  return [
+    `review-fix round cap (${REVIEW_FIX_ROUND_LIMIT}) reached for ${taskId}: the unchanged active instruction pack cannot relaunch the fix worker.`,
+    `Owner action required. Synthesized unresolved findings:`,
+    renderSynthesizedFindings(synthesis),
+    `Resolve the remaining P0/P1 findings in a fresh instruction pack, accept a deferral for the deferred items, or otherwise direct the next fix; the scheduler will not relaunch automatically.`,
+  ].filter(Boolean).join("\n");
+}
+
+function reviewStagePrompt(taskId: string, cwd: string): string {
+  const handoff = buildWorkItemReviewerHandoff(taskId);
+  const runs = parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd));
+  return reviewCycleCount(runs) >= 1 ? handoff + buildTargetedReReviewInstructions() : handoff;
 }
 
 // Worker session lineage (GAP-137): key on the instruction pack ID so review-fix
@@ -992,6 +1038,7 @@ export function filterGeneratedFiles(paths: string[], constraints: any): { chang
 }
 
 export function pipelineFailureResult(reason: string): Record<string, string> {
+  if (reason.includes("transient provider fault") || reason.includes("inference") || reason.includes("empty_output") || reason.includes("inference_abort")) return { failure_code: "transient_provider" };
   if (reason.includes("worker artifact invalid") || reason.includes("worker patch missing")) return { failure_code: "worker_artifact_invalid" };
   if (reason.includes("autofix made no repository changes")) return { failure_code: "no_progress_autofix" };
   if (reason.includes("Agent is already processing") || reason.includes("stale or invalid lease") || reason.includes("lease expired") || reason.includes("pipeline bind rejected")) return { failure_code: "runner_protocol_invalid" };
@@ -1054,13 +1101,56 @@ function stageAgent(stage: PipelineStage): string {
   return ({ scan: "task-scout", rri: "rri-persona", vision: "task-planner", blueprint: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
 }
 
+export const REVIEW_FIX_ROUND_LIMIT = 3;
+
+// Finding synthesis constraint: a failed review's findings are classified into
+// P0/P1/P2 classes plus an explicit defer list before reaching the fix worker.
+// The fix worker receives only that synthesis, never the raw corrections dump.
+// Classification follows the reviewer severity model (Critical/Important/Minor
+// from task-reviewer.md): Critical -> P0, Important -> P1, Minor -> P2, and
+// explicitly non-blocking items land in the defer list.
+export interface SynthesizedFindings {
+  p0: string[];
+  p1: string[];
+  p2: string[];
+  deferred: string[];
+}
+
+export function synthesizeReviewFindings(findings: string[]): SynthesizedFindings {
+  const buckets: SynthesizedFindings = { p0: [], p1: [], p2: [], deferred: [] };
+  for (const raw of findings) {
+    const finding = String(raw || "").trim();
+    if (!finding) continue;
+    const lower = finding.toLowerCase();
+    if (/defer|non-blocking|hold\s+off|optional|timebox/i.test(lower)) buckets.deferred.push(finding);
+    else if (/critical|must|secure|vulnerab|crash|data loss|corrupt|unsafe|deadlock|acceptance criterion|denial of service|failing (?:ci|test|build|verification)/i.test(lower)) buckets.p0.push(finding);
+    else if (/minor|style|naming|refactor|suggest|cosmetic|nitpick|typo/i.test(lower)) buckets.p2.push(finding);
+    else buckets.p1.push(finding);
+  }
+  return buckets;
+}
+
+export function renderSynthesizedFindings(synthesis: SynthesizedFindings, notes = ""): string {
+  const sections: string[] = [];
+  if (synthesis.p0.length) sections.push(`P0 (critical, must fix):\n${synthesis.p0.map((finding) => `- ${finding}`).join("\n")}`);
+  if (synthesis.p1.length) sections.push(`P1 (important, fix now):\n${synthesis.p1.map((finding) => `- ${finding}`).join("\n")}`);
+  if (synthesis.p2.length) sections.push(`P2 (minor, address if touching):\n${synthesis.p2.map((finding) => `- ${finding}`).join("\n")}`);
+  if (synthesis.deferred.length) sections.push(`Deferred (non-blocking, explicitly set aside):\n${synthesis.deferred.map((finding) => `- ${finding}`).join("\n")}`);
+  const body = sections.join("\n\n");
+  return notes ? `${notes}\n\n${body}` : body;
+}
+
 export function buildWorkerCorrectionContext(data: any): string {
   if (!data?.current_review && (data.canonical || data?.work_item?.review_status !== "failed")) return "";
-  const findings = data.current_review
-    ? [data.current_review.notes, ...(data.current_review.findings || []).map((finding: string) => `- ${finding}`)].filter(Boolean).join("\n\n")
-    : String(data.work_item.review_notes || "").trim();
-  if (!findings) throw new Error("failed review is missing persisted correction findings");
-  return `\n\n## REVIEW CORRECTIONS\nThe rejected candidate is already applied to the assigned worktree. This is a review-fix run, not a verification-only run: make the required edits for every finding below and return a non-empty patch whose SHA-256 differs from the rejected candidate. Do not report DONE or claim the fix is complete without changing the worktree. Git-derived changed files will be assessed by Reviewer.\n\n${findings}\n`;
+  // Synthesis gate constraint: the fix worker receives only classified findings.
+  // A structured failed review contributes its <finding> entries (never the raw
+  // notes dump); a legacy review_notes fallback is treated as one finding.
+  const rawFindings = data.current_review
+    ? (data.current_review.findings || []).filter((value: unknown) => value && String(value).trim())
+    : [String(data.work_item.review_notes || "").trim()].filter(Boolean);
+  if (!rawFindings.length) throw new Error("failed review is missing persisted correction findings");
+  const synthesis = synthesizeReviewFindings(rawFindings);
+  return `\n\n## REVIEW CORRECTIONS (synthesized findings only)\nThe rejected candidate is already applied to the assigned worktree. This is a review-fix run, not a verification-only run: make the required edits for every P0 and P1 finding below and return a non-empty patch whose SHA-256 differs from the rejected candidate. Do not report DONE or claim the fix is complete without changing the worktree. Git-derived changed files will be assessed by Reviewer.\n\n${renderSynthesizedFindings(synthesis)}\n`;
 }
 
 export function buildOwnerRejectionContext(data: any): string {
@@ -1126,14 +1216,14 @@ function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string 
     const data = normalizePipelineData(raw);
     const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
     if (!activePack) throw new Error(`Work Item ${taskId} requires one active instruction pack`);
-    if (stage === "review") return buildWorkItemReviewerHandoff(taskId);
+    if (stage === "review") return reviewStagePrompt(taskId, cwd);
     if (stage === "autofix") return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildAutofixContext(data);
     const currentReview = currentFailedReview(parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)), activePack);
     return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data) + buildEscalationResolutionContext(data, parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)));
   }
   const data = withInheritedParentWorkflowArtifacts(raw, cwd);
   if (stage === "scan") return buildWorkItemScanPrompt(data.work_item, data.project);
-  if (stage === "review") return buildWorkItemReviewerHandoff(taskId);
+  if (stage === "review") return reviewStagePrompt(taskId, cwd);
   if (stage === "autofix") {
     const verificationReports = execPic(["workflow", "verifications", taskId], cwd);
     return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildAutofixContext({ ...data, verification_reports: Array.isArray(verificationReports) ? verificationReports : data.verification_reports });
@@ -1235,14 +1325,18 @@ export class PipelineScheduler {
       writeFileSync(join(run.async_dir, `output-${run.child_index || 0}.log`), output, { mode: 0o600 });
       if (result.workspace) writeFileSync(join(run.async_dir, "workspace.json"), JSON.stringify(result.workspace, null, 2), { mode: 0o600 });
       if (completed && isMutationStage(run.stage)) await this.writeWorkerPatch(run, result);
-      writeFileSync(join(run.async_dir, "status.json"), JSON.stringify({ state: completed ? "completed" : "failed", error: result.errorMessage || result.stderr || "", steps: [{ status, model: result.model || "" }] }), { mode: 0o600 });
+      // Transient-fault classification persistence constraint: carry the runner's
+      // in-claim transient provider classification into the status artifact so the
+      // reconciliation completion (pipeline-complete --result-json) can surface
+      // durable failure_code=transient_provider instead of a generic failure.
+      writeFileSync(join(run.async_dir, "status.json"), JSON.stringify({ state: completed ? "completed" : "failed", error: result.errorMessage || result.stderr || "", failure_code: completed ? "" : result.failureCode || "", steps: [{ status, model: result.model || "" }] }), { mode: 0o600 });
       if (result.workspace?.assignedWorktree) removeSubagentWorktree(this.cwd, result.workspace.assignedWorktree, result.runId);
       this.agentHandles.delete(result.runId);
       this.agentRuns.delete(result.runId);
       this.queueReconcile();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
-      if (run.async_dir) writeFileSync(join(run.async_dir, "status.json"), JSON.stringify({ state: "failed", error: message, steps: [{ status: "failed", error: message }] }), { mode: 0o600 });
+      if (run.async_dir) writeFileSync(join(run.async_dir, "status.json"), JSON.stringify({ state: "failed", error: message, failure_code: result.failureCode || "", steps: [{ status: "failed", error: message }] }), { mode: 0o600 });
       if (result.workspace?.assignedWorktree) try { removeSubagentWorktree(this.cwd, result.workspace.assignedWorktree, result.runId); } catch {}
       this.agentHandles.delete(result.runId);
       this.agentRuns.delete(result.runId);
@@ -1518,6 +1612,24 @@ export class PipelineScheduler {
         const runs = this.pipelineRuns(taskId);
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
         if (stage === "worker" && currentFailedReview(runs, activePack)) {
+          const cycle = reviewCycleCount(runs);
+          if (cycle >= REVIEW_FIX_ROUND_LIMIT) {
+            // Round-cap persistence constraint: persist the owner-action block
+            // durably BEFORE refusing the launch, so the failed review is elevated
+            // to owner-approval-required and nextPipelineStage/claim gates stop
+            // relaunching the fix worker across reconciliation (a transient throw
+            // alone would leave the failed review eligible for a repeated launch).
+            const failedReview = currentFailedReview(runs, activePack);
+            const capBlock = buildReviewFixCapBlock(taskId, failedReview?.findings || []);
+            try {
+              const blocked = execPic(["workflow", "review-fix-block", taskId, "--summary", capBlock], this.cwd);
+              if (blocked.error) throw new Error(blocked.error);
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              throw new Error(`round-cap block persisted with error (${message}); owner action still required:\n\n${capBlock}`);
+            }
+            throw new Error(capBlock);
+          }
           reviewFixTaskIds.add(taskId);
           const rejectedPatch = rejectedCandidatePatch(data, runs, this.cwd);
           if (rejectedPatch) initialPatchPaths.set(taskId, rejectedPatch);
@@ -1609,7 +1721,7 @@ export class PipelineScheduler {
             handle = startRriFanout(spec, personaAgent, this.handoffs);
           } else handle = stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)
             ? startFullScanFanout(spec, agent)
-            : startSubagent({ ...spec, agent }, (update) => {
+            : startSubagentResilient({ ...spec, agent }, (update) => {
                 this.reportProgress(runId, taskId, stage, update.event, finalAssistantText(update.result.messages));
               });
         } catch (error) {
@@ -1660,7 +1772,15 @@ export class PipelineScheduler {
         if (childStatus !== "complete" && childStatus !== "completed") {
           const childError = status.steps?.[run.child_index || 0]?.error;
           const reason = childError || status.error || `subagent child ${childStatus}`;
-          execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "failed", "--error", reason], this.cwd);
+          // Transient-fault classification persistence constraint: the runner's in-claim
+          // transient provider classification (surfaced via status.failure_code from
+          // status.json) must reach the durable pipeline run result. It takes precedence
+          // over the reason-string mapping so exhaustion always lands as failure_code=
+          // transient_provider on the blocked stage, feeding the existing block event path.
+          const failureCode = typeof status.failure_code === "string" && status.failure_code ? status.failure_code : pipelineFailureResult(reason).failure_code;
+          const completeArgs = ["workflow", "pipeline-complete", run.id, run.lease_token, "failed", "--error", reason];
+          if (failureCode) completeArgs.push("--result-json", JSON.stringify({ failure_code: failureCode }));
+          execPic(completeArgs, this.cwd);
           checkpoint(run, "advanced", this.cwd);
           this.notifyBlockedAttempt(run, reason);
           continue;

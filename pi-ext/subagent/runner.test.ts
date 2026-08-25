@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { assertManagedAcceptance, buildPiInvocation, finalAssistantText, parseJsonEvent, prepareSubagentWorktree, removeSubagentWorktree, startSubagent } from "./runner.ts";
+import { assertManagedAcceptance, buildPiInvocation, classifyRunnerTransientFault, finalAssistantText, parseJsonEvent, prepareSubagentWorktree, removeSubagentWorktree, RUNNER_TRANSIENT_RETRIES, startSubagent, startSubagentResilient } from "./runner.ts";
 import { AgentRunTracker } from "./tracker.ts";
 
 process.env.PI_TASK_HERDR_PANEL = "0";
@@ -338,7 +338,7 @@ test("failed candidate preparation removes its owned worktree and branch", async
   writeFileSync(patch, "not a patch\n");
   await assert.rejects(() => prepareSubagentWorktree(repo, patch, "invalid-test"));
   assert.throws(() => execFileSync("git", ["show-ref", "--verify", "refs/heads/pi-agent-invalid-test"], { cwd: repo, stdio: "pipe" }));
-  assert.throws(() => readFileSync(join(tmpdir(), "pi-task-worktree-invalid-test", "work.go"), "utf8"));
+  assert.throws(() => readFileSync(join(repo, ".pi", "worktrees", "invalid-test", "work.go"), "utf8"));
 });
 
 test("owned worktree cleanup removes only the matching task-system branch", async () => {
@@ -563,4 +563,145 @@ test("session bound to a vanished recorded working directory is set aside and re
   assert.ok(!existsSync(sessionPath), "session with a dead recorded cwd must not be resumed in place");
   const stale = readdirSync(dirname(sessionPath)).find((name) => name.startsWith("session.jsonl.stale-"));
   assert.ok(stale, "the stale session must be preserved aside, not deleted");
+});
+
+function spawnWithOutcomes(outcomes: Array<string | null>, exitCode = 0) {
+  let index = 0;
+  return (_command: any, _args: any) => {
+    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+    const output = outcomes[Math.min(index++, outcomes.length - 1)];
+    setImmediate(() => {
+      if (output) child.stdout.emit("data", `${output}\n`);
+      child.emit("close", exitCode);
+    });
+    return child;
+  };
+}
+
+const VALID_OUTPUT = '{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"done"}]}}';
+
+test("runner classifies transient provider faults before XML validation", () => {
+  // Empty output: a completed child with no assistant text.
+  const base = { runId: "r", agent: { name: "task-worker" }, task: "work", cwd: "/repo", exitCode: 0, messages: [], stderr: "", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 } };
+  assert.equal(classifyRunnerTransientFault({ ...base, messages: [] }), "empty_output");
+  // Empty output with a nonzero exit and no matching diagnostic is still transient:
+  // empty assistant output is classified independently of exit code.
+  assert.equal(classifyRunnerTransientFault({ ...base, exitCode: 1, messages: [], stderr: "runtime: goroutine stack exceeds", errorMessage: "child exited with code 1" }), "empty_output");
+  // Valid XML output path: assistant text present => never transient.
+  assert.equal(classifyRunnerTransientFault({ ...base, messages: [{ role: "assistant", content: [{ type: "text", text: "<review_report status='passed'/>" }] }] }), "none");
+  // Inference-abort provider error.
+  assert.equal(classifyRunnerTransientFault({ ...base, exitCode: 1, errorMessage: "inference-abort: upstream provider closed the stream", stderr: "" }), "inference_abort");
+  assert.equal(classifyRunnerTransientFault({ ...base, exitCode: 1, stderr: "provider error: empty model response" }), "inference_abort");
+  // User aborts are never transient, even with empty output.
+  assert.equal(classifyRunnerTransientFault({ ...base, stopReason: "aborted", exitCode: 1 }), "none");
+});
+
+test("runner resilient retry keeps a valid first output without consuming retries", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-resilient-valid-"));
+  const handle = startSubagentResilient({ agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "worker.md" }, task: "work", cwd, transientBackoffMs: 1 }, undefined, spawnWithOutcomes([VALID_OUTPUT]));
+  const result = await handle.result;
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.failureCode, undefined);
+  assert.equal(finalAssistantText(result.messages), "done");
+});
+
+test("runner resilient retry recovers from empty output inside the same claim", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-resilient-recover-"));
+  // First two attempts produce empty output; the third succeeds => exactly 2 in-claim retries.
+  const handle = startSubagentResilient({ agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "worker.md" }, task: "work", cwd, transientBackoffMs: 1 }, undefined, spawnWithOutcomes([null, null, VALID_OUTPUT]));
+  const result = await handle.result;
+  assert.equal(result.exitCode, 0);
+  assert.equal(result.failureCode, undefined);
+  assert.equal(finalAssistantText(result.messages), "done");
+});
+
+test("runner resilient retry exhausts at the boundary and tags transient_provider", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-resilient-exhaust-"));
+  // All attempts empty => RUNNER_TRANSIENT_RETRIES + 1 calls, tagging on exhaustion.
+  assert.equal(RUNNER_TRANSIENT_RETRIES, 2);
+  let calls = 0;
+  const handle = startSubagentResilient({ agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "worker.md" }, task: "work", cwd, transientBackoffMs: 1 }, undefined, ((_command: any, _args: any, _options: any) => {
+    calls++;
+    const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+    setImmediate(() => child.emit("close", 0));
+    return child;
+  }) as any);
+  const result = await handle.result;
+  assert.equal(calls, RUNNER_TRANSIENT_RETRIES + 1);
+  assert.equal(result.failureCode, "transient_provider");
+  assert.match(result.errorMessage || "", /without consuming a numbered attempt/);
+});
+
+test("worktrees are created under repo/.pi/worktrees/<runId> and removed through ownership checks", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-subagent-worktree-location-"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  writeFileSync(join(repo, "work.go"), "package work\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+  const prepared = await prepareSubagentWorktree(repo, undefined, "loc-test");
+  assert.equal(prepared.cwd, join(repo, ".pi", "worktrees", "loc-test"));
+  assert.ok(existsSync(prepared.cwd));
+  try {
+    removeSubagentWorktree(repo, prepared.cwd, "loc-test");
+    assert.ok(!existsSync(prepared.cwd));
+  } finally {
+    rmSync(join(repo, ".pi", "worktrees", "loc-test"), { recursive: true, force: true });
+  }
+});
+
+test("an in-claim retry restores the rejected candidate patch to the isolated worktree", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-subagent-resilient-candidate-"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  writeFileSync(join(repo, "work.go"), "package work\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+  // Attest the rejected-candidate patch against the base without committing it.
+  writeFileSync(join(repo, "work.go"), "package work\n\nconst CANDIDATE = 1\n");
+  execFileSync("git", ["add", "work.go"], { cwd: repo });
+  const patch = join(repo, "candidate.patch");
+  writeFileSync(patch, execFileSync("git", ["diff", "--cached"], { cwd: repo, encoding: "utf8" }));
+  execFileSync("git", ["reset", "-q"], { cwd: repo });
+  writeFileSync(join(repo, "work.go"), "package work\n");
+  const prepared = await prepareSubagentWorktree(repo, patch, "retry-cand");
+  try {
+    let calls = 0;
+    let candidateRestored = false;
+    let untrackedRemoved = false;
+    const handle = startSubagentResilient(
+      { agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "worker.md" }, task: "work", cwd: repo, isolation: "worktree", preparedWorktree: prepared.cwd, initialPatchPath: patch, transientBackoffMs: 1 },
+      undefined,
+      ((_command: any, _args: any, options: any) => {
+        calls++;
+        const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+        setImmediate(() => {
+          if (calls === 1) {
+            // A failed attempt left an untracked artifact behind: the retry reset
+            // must remove it so the retry starts from pure candidate state.
+            writeFileSync(join(options.cwd as string, "retry-artifact.txt"), "stale");
+            // Empty output: a transient fault that triggers the reset+reapply retry.
+            child.emit("close", 0);
+          } else {
+            untrackedRemoved = !existsSync(join(options.cwd as string, "retry-artifact.txt"));
+            candidateRestored = readFileSync(join(options.cwd as string, "work.go"), "utf8").includes("CANDIDATE");
+            child.stdout.emit("data", `${VALID_OUTPUT}\n`);
+            child.emit("close", 0);
+          }
+        });
+        return child;
+      }) as any,
+    );
+    const result = await handle.result;
+    assert.equal(calls, 2);
+    assert.equal(candidateRestored, true, "candidate patch must be reapplied after the retry reset");
+    assert.equal(untrackedRemoved, true, "untracked artifacts from the failed attempt must not survive the retry reset");
+    assert.equal(result.failureCode, undefined);
+    assert.equal(finalAssistantText(result.messages), "done");
+  } finally {
+    removeSubagentWorktree(repo, prepared.cwd, "retry-cand");
+    rmSync(join(repo, ".pi", "worktrees", "retry-cand"), { recursive: true, force: true });
+  }
 });
