@@ -21,3 +21,4 @@ tasks.db-wal
 go-pic/dist/
 go-pic/pic
 go-pic/web/build/
+.claude/
