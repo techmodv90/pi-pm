@@ -64,6 +64,8 @@ func cmdWorkflow(args []string) error {
 		return workflowPipelineModel(db, rest)
 	case "pipeline-complete":
 		return workflowPipelineComplete(db, rest)
+	case "review-fix-block":
+		return workflowReviewFixBlock(db, rest)
 	case "pipeline-runs":
 		return workflowPipelineRuns(db, rest)
 	case "pipeline-active":

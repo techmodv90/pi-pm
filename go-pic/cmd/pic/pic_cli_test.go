@@ -1735,6 +1735,54 @@ func TestPipelineCircuitResetRestoresCanonicalRunnerRetry(t *testing.T) {
 	}
 }
 
+func TestReviewFixCapPersistsBlockedOwnerAction(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Review fix cap"))
+	id := item["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	activateTestWorkItemTIP(t, dbPath, id)
+	suffix := strings.TrimPrefix(id, "wi-")
+	// Seed a completed failed review bound to a completed mutation candidate with
+	// three completed review-fix rounds (review_fix_cycle=3), so the round cap is hit.
+	runSQLite(t, dbPath, `INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,integrated_patch_path,integrated_patch_hash,artifact_saved_at,completed_at,advanced_at) VALUES('pr-cand','`+id+`','worker',1,'completed','lease-cand',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','candidate.patch','patch-hash',datetime('now'),datetime('now'),datetime('now')); INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,candidate_run_id,candidate_patch_hash,review_fix_cycle,result_json,completed_at,advanced_at) VALUES('pr-rev','`+id+`','review',1,'completed','lease-rev',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','pr-cand','patch-hash',3,'{"review_status":"failed","candidate_run_id":"pr-cand","candidate_patch_hash":"patch-hash"}',datetime('now'),datetime('now')); UPDATE work_items SET review_status='failed' WHERE id='`+id+`';`)
+
+	blocked := asObject(t, runPic(t, bin, root, home, "workflow", "review-fix-block", id, "--summary", "round cap reached: three fix rounds without a passed review"))
+	if blocked["id"] != "pr-rev" {
+		t.Fatalf("review-fix-block returned run = %#v", blocked)
+	}
+	// The failed review is now owner-approval-required durably, so the next fix
+	// claim is rejected instead of relaunching, and it stays rejected across
+	// reconciliation (repeated claim attempts).
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--review-fix", "1"); !strings.Contains(out, "requires owner approval") {
+		t.Fatalf("first post-cap claim = %s", out)
+	}
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--review-fix", "1"); !strings.Contains(out, "requires owner approval") {
+		t.Fatalf("reconciled post-cap claim = %s", out)
+	}
+	runs := runPic(t, bin, root, home, "workflow", "pipeline-runs", id).([]any)
+	reviewResult := ""
+	for _, r := range runs {
+		if asObject(t, r)["id"] == "pr-rev" {
+			reviewResult = fmt.Sprint(asObject(t, r)["result_json"])
+		}
+	}
+	if !strings.Contains(reviewResult, `"owner_approval_required":true`) || !strings.Contains(reviewResult, "round cap reached") {
+		t.Fatalf("review result did not persist owner-action block: %s", reviewResult)
+	}
+	events := runPic(t, bin, root, home, "workflow", "events", id).([]any)
+	foundRoundCap := false
+	for _, ev := range events {
+		if asObject(t, ev)["event_type"] == "review_fix_round_cap" {
+			foundRoundCap = true
+			break
+		}
+	}
+	if !foundRoundCap {
+		t.Fatalf("missing durable review_fix_round_cap owner-action event: %#v", events)
+	}
+}
+
 func TestPipelineCircuitResetClearsAutomaticWorkerRetryLimit(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)

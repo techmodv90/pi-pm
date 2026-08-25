@@ -50,6 +50,8 @@ export interface SubagentResult {
   model?: string;
   stopReason?: string;
   errorMessage?: string;
+  /** Stable classification tag for transient provider faults surfaced after in-claim retries exhaust. */
+  failureCode?: string;
   workspace?: SubagentWorkspace;
 }
 
