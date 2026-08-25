@@ -86,6 +86,8 @@ func cmdWorkItem(args []string) error {
 		return workItemArtifactApprove(db, args[1:])
 	case "planning-reset":
 		return workItemPlanningReset(db, args[1:])
+	case "planning-amend":
+		return workItemPlanningAmend(db, args[1:])
 	case "execution-reset":
 		return workItemExecutionReset(db, args[1:])
 	case "approve-deviations":
@@ -1422,6 +1424,245 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 		return err
 	}
 	return outputOne(db, `SELECT `+workItemColumns+` FROM work_items WHERE id=?`, targetID)
+}
+
+// Owner-only bounded amendment: exact old→new substitutions across approved planning
+// lineage. Resolves the dual-source-of-truth hazard of injecting corrected values
+// (e.g. a port change) while frozen artifacts still state the old value, without a full re-scope.
+func workItemPlanningAmend(db *sql.DB, args []string) error {
+	if len(args) != 3 || args[1] != "owner" {
+		return errors.New("usage: pic work-item planning-amend <id> owner <amendment-json>")
+	}
+	var payload struct {
+		Reason        string `json:"reason"`
+		Substitutions []struct {
+			Old string `json:"old"`
+			New string `json:"new"`
+		} `json:"substitutions"`
+	}
+	if err := json.Unmarshal([]byte(args[2]), &payload); err != nil {
+		return fmt.Errorf("invalid amendment JSON: %w", err)
+	}
+	if strings.TrimSpace(payload.Reason) == "" || len(payload.Substitutions) == 0 {
+		return errors.New("amendment requires a reason and at least one old/new substitution")
+	}
+	for _, sub := range payload.Substitutions {
+		if sub.Old == "" || sub.Old == sub.New {
+			return errors.New("each substitution requires nonempty old different from new")
+		}
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	targetID := args[0]
+	if err = tx.QueryRow(`SELECT root_work_item_id FROM work_item_materializations WHERE work_item_id=?`, args[0]).Scan(&targetID); err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	item, err := workItemByIDTx(tx, targetID)
+	if err != nil {
+		return err
+	}
+	if item["status"] == "cancelled" || item["status"] == "done" {
+		return errors.New("planning amendment requires a non-terminal Work Item")
+	}
+	descendantCTE := `WITH RECURSIVE execution(id) AS (
+		SELECT ? UNION ALL SELECT wi.id FROM work_items wi JOIN execution parent ON wi.parent_id=parent.id
+	)`
+	var activeRuns int
+	if err = tx.QueryRow(descendantCTE+` SELECT COUNT(*) FROM pipeline_runs WHERE task_id IN (SELECT id FROM execution) AND status IN ('claimed','running')`, targetID).Scan(&activeRuns); err != nil {
+		return err
+	}
+	if activeRuns != 0 {
+		return errors.New("planning amendment requires no active pipeline runs")
+	}
+	var verificationEvidence int
+	if err = tx.QueryRow(descendantCTE+` SELECT COUNT(*) FROM work_item_verification_reports WHERE work_item_id IN (SELECT id FROM execution)`, targetID).Scan(&verificationEvidence); err != nil {
+		return err
+	}
+	if verificationEvidence != 0 {
+		return errors.New("planning amendment cannot invalidate existing aggregate verification evidence; use planning reset")
+	}
+	for _, sub := range payload.Substitutions {
+		var keyed []string
+		rows, err := tx.Query(`SELECT requirement_key FROM requirements WHERE (epic_id=? OR task_id=?) AND contract_key!='' AND (instr(title,?)>0 OR instr(description,?)>0 OR instr(acceptance_criteria,?)>0)`, targetID, targetID, sub.Old, sub.Old, sub.Old)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var key string
+			if err = rows.Scan(&key); err != nil {
+				rows.Close()
+				return err
+			}
+			keyed = append(keyed, key)
+		}
+		rows.Close()
+		if len(keyed) > 0 {
+			return fmt.Errorf("contract-keyed requirements %v are immutable and contain %q; replan instead", keyed, sub.Old)
+		}
+	}
+	type stageChange struct {
+		Stage        string `json:"stage"`
+		ArtifactID   string `json:"artifact_id"`
+		FromRevision int    `json:"from_revision"`
+		ToRevision   int    `json:"to_revision"`
+	}
+	var changedStages []stageChange
+	checkpoints, err := tx.Query(`SELECT c.id,c.stage,a.id,a.revision,a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? ORDER BY c.rowid`, targetID)
+	if err != nil {
+		return err
+	}
+	type checkpointBinding struct {
+		id, stage, artifactID, content string
+		revision                       int
+	}
+	var bindings []checkpointBinding
+	for checkpoints.Next() {
+		var b checkpointBinding
+		if err = checkpoints.Scan(&b.id, &b.stage, &b.artifactID, &b.revision, &b.content); err != nil {
+			checkpoints.Close()
+			return err
+		}
+		bindings = append(bindings, b)
+	}
+	checkpoints.Close()
+	for _, b := range bindings {
+		updated := b.content
+		for _, sub := range payload.Substitutions {
+			updated = strings.ReplaceAll(updated, sub.Old, sub.New)
+		}
+		if updated == b.content {
+			continue
+		}
+		var nextRevision int
+		if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage=?`, targetID, b.stage).Scan(&nextRevision); err != nil {
+			return err
+		}
+		newID, newHash := "wia-"+shortID(), hashJSON(updated)
+		if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?,?,?,?,?)`, newID, targetID, b.stage, nextRevision, updated, newHash); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`UPDATE workflow_checkpoints SET artifact_id=?,artifact_revision=?,content_hash=? WHERE id=?`, newID, nextRevision, newHash, b.id); err != nil {
+			return err
+		}
+		changedStages = append(changedStages, stageChange{Stage: b.stage, ArtifactID: newID, FromRevision: b.revision, ToRevision: nextRevision})
+	}
+	applyToColumns := func(table, idColumn string, columns []string) (int, error) {
+		query := `SELECT id,` + strings.Join(columns, ",") + ` FROM ` + table + ` WHERE epic_id=? OR task_id=?`
+		rows, err := tx.Query(query, targetID, targetID)
+		if err != nil {
+			return 0, err
+		}
+		defer rows.Close()
+		changed := 0
+		for rows.Next() {
+			vals := make([]any, len(columns))
+			ptrs := make([]any, len(columns))
+			for i := range vals {
+				ptrs[i] = &vals[i]
+			}
+			var rowID string
+			dest := append([]any{&rowID}, ptrs...)
+			if err = rows.Scan(dest...); err != nil {
+				return 0, err
+			}
+			updates := map[string]string{}
+			rowChanged := false
+			for i, col := range columns {
+				text, _ := vals[i].(string)
+				updatedText := text
+				for _, sub := range payload.Substitutions {
+					updatedText = strings.ReplaceAll(updatedText, sub.Old, sub.New)
+				}
+				if updatedText != text {
+					updates[col] = updatedText
+					rowChanged = true
+				}
+			}
+			if rowChanged {
+				sets, args := "", []any{}
+				for col, val := range updates {
+					if sets != "" {
+						sets += ","
+					}
+					sets += col + "=?"
+					args = append(args, val)
+				}
+				args = append(args, rowID)
+				if _, err = tx.Exec(`UPDATE `+table+` SET `+sets+` WHERE id=?`, args...); err != nil {
+					return 0, err
+				}
+				changed++
+			}
+		}
+		return changed, rows.Err()
+	}
+	requirementsChanged, err := applyToColumns("requirements", "", []string{"title", "description", "acceptance_criteria"})
+	if err != nil {
+		return err
+	}
+	decisionsChanged, err := applyToColumns("owner_decisions", "", []string{"decision", "notes"})
+	if err != nil {
+		return err
+	}
+	if len(changedStages) == 0 && requirementsChanged == 0 && decisionsChanged == 0 {
+		return errors.New("no occurrence of any substitution target found in approved planning lineage")
+	}
+	packIDs := []any{}
+	selectArgs := []any{targetID}
+	packQuery := descendantCTE + ` SELECT DISTINCT p.id FROM work_item_instruction_packs p WHERE p.work_item_id IN (SELECT id FROM execution) AND p.status IN ('active','inactive') AND (`
+	conditions := []string{}
+	for _, sub := range payload.Substitutions {
+		conditions = append(conditions, "instr(p.content_json,?)>0")
+		selectArgs = append(selectArgs, sub.Old)
+	}
+	packQuery += strings.Join(conditions, " OR ") + ")"
+	packRows, err := tx.Query(packQuery, selectArgs...)
+	if err != nil {
+		return err
+	}
+	for packRows.Next() {
+		var packID string
+		if err = packRows.Scan(&packID); err != nil {
+			packRows.Close()
+			return err
+		}
+		packIDs = append(packIDs, packID)
+	}
+	packRows.Close()
+	packsStaled := 0
+	if len(packIDs) > 0 {
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(packIDs)), ",")
+		res, err := tx.Exec(`UPDATE work_item_instruction_packs SET status='stale',stale_at=datetime('now') WHERE status IN ('active','inactive') AND id IN (`+placeholders+`)`, packIDs...)
+		if err != nil {
+			return err
+		}
+		affected, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		packsStaled = int(affected)
+	}
+	substitutionPayload, _ := json.Marshal(payload.Substitutions)
+	eventPayload, _ := json.Marshal(map[string]any{
+		"reason":               payload.Reason,
+		"substitutions":        json.RawMessage(substitutionPayload),
+		"changed_stages":       changedStages,
+		"requirements_changed": requirementsChanged,
+		"decisions_changed":    decisionsChanged,
+		"packs_staled":         packsStaled,
+	})
+	summary := fmt.Sprintf("Owner amended planning lineage: %d artifact stages superseded, %d requirements and %d decisions substituted, %d instruction packs staled", len(changedStages), requirementsChanged, decisionsChanged, packsStaled)
+	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,?,?,?,?)`, "wie-"+shortID(), targetID, "planning_amendment", "owner", summary, string(eventPayload)); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	writeJSON(os.Stdout, map[string]any{"work_item_id": targetID, "reason": payload.Reason, "changed_stages": changedStages, "requirements_changed": requirementsChanged, "decisions_changed": decisionsChanged, "packs_staled": packsStaled})
+	return nil
 }
 
 func workItemExecutionReset(db *sql.DB, args []string) error {

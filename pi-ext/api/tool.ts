@@ -53,7 +53,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
       parameters: Type.Object({
         action: StringEnum([
           "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview", "save_rri_interview",
-          "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "preview_artifact", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
+          "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "preview_artifact", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "amend_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
           "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
           "relate_work_items", "reset_pipeline_circuit",
         ] as const),
@@ -75,6 +75,8 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         parent_id: Type.Optional(Type.String({ description: "Parent aggregate Work Item ID" })),
         labels: Type.Optional(Type.Array(Type.String(), { description: "Work Item labels" })),
         deviation_ids: Type.Optional(Type.Array(Type.String(), { description: "Requirement IDs approved for deferment" })),
+        reason: Type.Optional(Type.String({ description: "Owner-recorded reason for a bounded planning amendment" })),
+        substitutions: Type.Optional(Type.Array(Type.Object({ old: Type.String(), new: Type.String() }), { description: "Exact old→new string pairs for amend_work_item_planning; every occurrence across approved planning artifacts, requirements, and owner decisions is replaced" })),
         stage: Type.Optional(StringEnum(["scan", "rri", "vision", "blueprint", "contracts", "task_graph"] as const)),
         artifact_id: Type.Optional(Type.String({ description: "Immutable Work Item artifact ID" })),
         completion_report_id: Type.Optional(Type.String({ description: "Current integrated Completion Report ID" })),
@@ -317,6 +319,15 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           case "reset_work_item_execution": {
             if (!params.id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id and actor_role must be owner after explicit owner approval" }], details: {}, isError: true };
             args = ["work-item", "execution-reset", params.id, params.actor_role];
+            break;
+          }
+          case "amend_work_item_planning": {
+            if (!params.id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id and actor_role must be owner after explicit owner confirmation of the exact substitutions" }], details: {}, isError: true };
+            const substitutions = params.substitutions;
+            if (!params.reason || !Array.isArray(substitutions) || substitutions.length === 0 || substitutions.some((s) => !s?.old || s.old === s?.new)) {
+              return { content: [{ type: "text", text: "Error: reason and a nonempty substitutions array of {old,new} exact-string pairs are required" }], details: {}, isError: true };
+            }
+            args = ["work-item", "planning-amend", params.id, params.actor_role, JSON.stringify({ reason: params.reason, substitutions })];
             break;
           }
           case "reject_work_item_scan": {

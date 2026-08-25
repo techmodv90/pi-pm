@@ -2094,3 +2094,132 @@ func TestRemainingCommandGroups(t *testing.T) {
 		t.Fatalf("search returned no rows")
 	}
 }
+
+func TestWorkItemPlanningAmendment(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Amend Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-amend','`+id+`','REQ-001','Ports','Given the dev stack
+When services boot
+Then they listen on port 9173')`)
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria,contract_key) VALUES('req-keyed','`+id+`','REQ-002','Keyed','Given locked
+When changed
+Then refused','C-1')`)
+	runSQLite(t, dbPath, `INSERT INTO owner_decisions(id,epic_id,decision_type,decision) VALUES('od-amend','`+id+`','port_prefix','dev ports use 9173')`)
+	contract := strings.Replace(validContractArtifact, `"behavior":"Persist workflow state"`, `"behavior":"Persist workflow state; health endpoint serves on port 9173"`, 1)
+	for _, stage := range []string{"scan", "rri", "vision", "blueprint"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	contractArtifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contract))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", contractArtifact["id"].(string), "approved")
+	graph := `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]},{"key":"T01","type":"task","name":"First","parent_key":"F01","goal":"First","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["serve on port 9173"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}],"skillFamilies":[]},{"key":"B01","type":"bug","name":"Second","parent_key":"F01","goal":"Second","requirement_keys":["REQ-002"],"depends_on":["T01"],"priority":"P0","module":"core","files":["y.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["y.go"]},"verification":[{"command":"go test ./...","required":true}],"skillFamilies":[]}]}`
+	graphArtifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graph))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", graphArtifact["id"].(string), "approved")
+	runPic(t, bin, root, home, "work-item", "materialize", id)
+
+	var childID string
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='T01'`, id).Scan(&childID); err != nil {
+		t.Fatal(err)
+	}
+	packContent := `{"schemaVersion":3,"skillFamilies":[],"goal":"Serve on port 9173","files":["x.go"],"business_rules":["port 9173"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}]}`
+	pack := asObject(t, runPic(t, bin, root, home, "workflow", "instruction-pack-save", childID, "--source-type", "standalone_task", "--content-json", packContent, "--requirement-ids-json", `["req-amend"]`, "--activate", "1"))
+	packID := pack["id"].(string)
+
+	// Refusals: non-owner role, keyed immutable requirement, nothing to substitute.
+	runPicError(t, bin, root, home, "work-item", "planning-amend", childID, "contractor", `{"reason":"r","substitutions":[{"old":"9173","new":"6173"}]}`)
+	runPicError(t, bin, root, home, "work-item", "planning-amend", childID, "owner", `{"reason":"r","substitutions":[{"old":"locked","new":"6173"}]}`)
+
+	result := asObject(t, runPic(t, bin, root, home, "work-item", "planning-amend", childID, "owner", `{"reason":"owner corrected dev ports from 9 prefix to 6 prefix","substitutions":[{"old":"9173","new":"6173"}]}`))
+	changed := result["changed_stages"].([]any)
+	foundContracts, foundGraph := false, false
+	for _, entry := range changed {
+		stage := entry.(map[string]any)["stage"].(string)
+		if stage == "contracts" {
+			foundContracts = true
+		}
+		if stage == "task_graph" {
+			foundGraph = true
+		}
+	}
+	if !foundContracts || !foundGraph || len(changed) != 2 {
+		t.Fatalf("changed stages = %#v", changed)
+	}
+
+	var reqAcceptance string
+	if err = db.QueryRow(`SELECT acceptance_criteria FROM requirements WHERE id='req-amend'`).Scan(&reqAcceptance); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(reqAcceptance, "9173") || !strings.Contains(reqAcceptance, "6173") {
+		t.Fatalf("requirement not amended: %q", reqAcceptance)
+	}
+	var decisionText string
+	if err = db.QueryRow(`SELECT decision FROM owner_decisions WHERE id='od-amend'`).Scan(&decisionText); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(decisionText, "6173") {
+		t.Fatalf("owner decision not amended: %q", decisionText)
+	}
+	var oldRevisions int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='contracts'`, id).Scan(&oldRevisions); err != nil {
+		t.Fatal(err)
+	}
+	var checkpointRevision int
+	var checkpointHash string
+	var newContractHash string
+	if err = db.QueryRow(`SELECT c.artifact_revision,c.content_hash,a.content_hash FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='contracts'`, id).Scan(&checkpointRevision, &checkpointHash, &newContractHash); err != nil {
+		t.Fatal(err)
+	}
+	if checkpointRevision != 2 || checkpointHash != newContractHash || oldRevisions != 2 {
+		t.Fatalf("contracts checkpoint revision=%d hash=%q artifact_rows=%d", checkpointRevision, checkpointHash, oldRevisions)
+	}
+	var amendedGraph string
+	if err = db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='task_graph'`, id).Scan(&amendedGraph); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(amendedGraph, "9173") || !strings.Contains(amendedGraph, "6173") {
+		t.Fatalf("task graph not amended")
+	}
+	var packStatus string
+	if err = db.QueryRow(`SELECT status FROM work_item_instruction_packs WHERE id=?`, packID).Scan(&packStatus); err != nil {
+		t.Fatal(err)
+	}
+	if packStatus != "stale" {
+		t.Fatalf("pack status after amendment = %q", packStatus)
+	}
+	var events int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='planning_amendment'`, id).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 {
+		t.Fatalf("planning_amendment events = %d", events)
+	}
+	var children int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE parent_id=? OR parent_id IN (SELECT id FROM work_items WHERE parent_id=?)`, id, id).Scan(&children); err != nil {
+		t.Fatal(err)
+	}
+	if children != 3 {
+		t.Fatalf("amendment disturbed materialized children: %d", children)
+	}
+	if status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id)); status["next_stage"] != "authorize" && status["next_stage"] != "implement" && status["next_stage"] != "instruction_pack" && status["next_stage"] != "aggregate_verification" {
+		t.Fatalf("post-amendment aggregate status = %#v", status)
+	}
+
+	// Re-running with no remaining occurrences must be refused.
+	runPicError(t, bin, root, home, "work-item", "planning-amend", childID, "owner", `{"reason":"r","substitutions":[{"old":"9173","new":"6173"}]}`)
+
+	// Active pipeline runs block amendment.
+	runSQLite(t, dbPath, `INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at) VALUES('pr-amend','`+childID+`','worker',1,'claimed','tok','2999-01-01T00:00:00Z')`)
+	runPicError(t, bin, root, home, "work-item", "planning-amend", childID, "owner", `{"reason":"r","substitutions":[{"old":"6173","new":"7173"}]}`)
+}
