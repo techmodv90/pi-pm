@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 import { assertManagedAcceptance, buildPiInvocation, finalAssistantText, parseJsonEvent, prepareSubagentWorktree, removeSubagentWorktree, startSubagent } from "./runner.ts";
 import { AgentRunTracker } from "./tracker.ts";
@@ -473,4 +473,68 @@ test("read-only agent ignores task database runtime changes", async () => {
   }) as any);
   const result = await handle.result;
   assert.notEqual(result.errorMessage?.includes("read_only_repository_mutation"), true);
+});
+test("sessionPath replaces --no-session with pi create-or-continue session binding", async () => {
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-runner-"));
+  const sessionPath = join(cwd, ".pi", "runtime", "runs", "wip-sessionpack", "session.jsonl");
+  let args: string[] = [];
+  const handle = startSubagent({
+    agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "task-worker.md" },
+    task: "work",
+    cwd,
+    sessionPath,
+  }, undefined, ((_command: any, invocationArgs: string[]) => {
+    args = invocationArgs;
+    setImmediate(() => child.emit("close", 0));
+    return child;
+  }) as any);
+  await handle.result;
+  assert.ok(!args.includes("--no-session"), "session-bound workers must not run with --no-session");
+  const index = args.indexOf("--session");
+  assert.equal(args[index + 1], sessionPath);
+});
+
+test("corrupt worker session file is removed so the relaunch falls back to fresh", async () => {
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-runner-"));
+  const sessionPath = join(cwd, ".pi", "runtime", "runs", "wip-corrupt", "session.jsonl");
+  mkdirSync(dirname(sessionPath), { recursive: true });
+  writeFileSync(sessionPath, "this is not a jsonl session file");
+  let args: string[] = [];
+  const handle = startSubagent({
+    agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "task-worker.md" },
+    task: "work",
+    cwd,
+    sessionPath,
+  }, undefined, ((_command: any, invocationArgs: string[]) => {
+    args = invocationArgs;
+    setImmediate(() => child.emit("close", 0));
+    return child;
+  }) as any);
+  await handle.result;
+  const index = args.indexOf("--session");
+  assert.equal(args[index + 1], sessionPath);
+  assert.ok(!existsSync(sessionPath), "corrupt session file must be deleted before pi recreates it fresh");
+});
+
+test("a valid existing worker session file is preserved for continuation", async () => {
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-runner-"));
+  const sessionPath = join(cwd, ".pi", "runtime", "runs", "wip-resume", "session.jsonl");
+  mkdirSync(dirname(sessionPath), { recursive: true });
+  writeFileSync(sessionPath, '{"type":"session"}\n');
+  let args: string[] = [];
+  const handle = startSubagent({
+    agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "task-worker.md" },
+    task: "work",
+    cwd,
+    sessionPath,
+  }, undefined, ((_command: any, invocationArgs: string[]) => {
+    args = invocationArgs;
+    setImmediate(() => child.emit("close", 0));
+    return child;
+  }) as any);
+  await handle.result;
+  assert.equal(readFileSync(sessionPath, "utf8"), '{"type":"session"}\n');
 });

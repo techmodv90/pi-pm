@@ -1,8 +1,8 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, existsSync, mkdtempSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
@@ -65,6 +65,8 @@ export interface SubagentSpec {
   herdrPanel?: HerdrPanel;
   initialPatchPath?: string;
   preparedWorktree?: string;
+  /** Host-side pi session file (create-or-continue) pinned outside the worktree; enables review-fix resume. */
+  sessionPath?: string;
 }
 
 export interface SubagentHandle {
@@ -202,7 +204,32 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
   const promptPath = join(promptDir, "system-prompt.md");
   writeFileSync(promptPath, spec.agent.systemPrompt, { encoding: "utf8", mode: 0o600 });
   const skillDirectories = spec.skillDirectories ?? resolveSkillDirectories({ baselineSkills: spec.agent.skills || [], skillFamilies: spec.skillFamilies || [], cwd: spec.cwd });
-  const args = ["--mode", "json", "-p", "--no-session", "-ne", "--extension", fileURLToPath(new URL("../index.ts", import.meta.url))];
+  const args = ["--mode", "json", "-p", "-ne", "--extension", fileURLToPath(new URL("../index.ts", import.meta.url))];
+  if (spec.sessionPath) {
+    // Worker session binding (GAP-137): pin the conversation host-side so a review-fix
+    // relaunch continues it. Lineage is the path key (instruction pack ID), so a retired
+    // TIP can never resume; a corrupt file falls back to fresh creation.
+    const sessionDir = dirname(spec.sessionPath);
+    mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+    try {
+      const runsRoot = dirname(sessionDir);
+      for (const entry of readdirSync(runsRoot)) {
+        const sibling = join(runsRoot, entry);
+        if (sibling === sessionDir) continue;
+        if (Date.now() - statSync(sibling).mtimeMs > 24 * 60 * 60 * 1000) rmSync(sibling, { recursive: true, force: true });
+      }
+    } catch {}
+    let resumable = false;
+    try {
+      const fd = openSync(spec.sessionPath, "r");
+      const head = Buffer.alloc(1);
+      readSync(fd, head, 0, 1, 0);
+      closeSync(fd);
+      resumable = head[0] === 0x7b; // JSONL session files start with '{'
+    } catch {}
+    if (!resumable) rmSync(spec.sessionPath, { force: true });
+    args.push("--session", spec.sessionPath);
+  } else args.push("--no-session");
   if (spec.agent.model) args.push("--model", spec.agent.model);
   if (spec.agent.thinking) args.push("--thinking", spec.agent.thinking);
   if (spec.agent.tools?.length) args.push("--tools", spec.agent.tools.join(","));

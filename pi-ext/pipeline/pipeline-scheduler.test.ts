@@ -1212,3 +1212,18 @@ test("failed review corrections are handed to worker", () => {
   assert.match(context, /Wire expectedVersion/);
   assert.match(context, /already applied to the assigned worktree/);
 });
+
+test("worker launches bind sessions to the claimed instruction pack host-side", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  // Session path must derive from the claimed pack ID (TIP lineage), not the run ID,
+  // so review-fix relaunches resume the same conversation and retired packs never do.
+  assert.match(source, /spec\.sessionPath = workerSessionPath\(this\.cwd, activePack\?\.id \|\| claim\.instruction_pack_id \|\| taskId\)/);
+  assert.match(source, /function workerSessionPath\(cwd: string, packKey: string\)/);
+  assert.match(source, /\.pi", "runtime", "runs", packKey, "session\.jsonl"/);
+});
+
+test("session fallback removes corrupt files instead of failing the relaunch", () => {
+  const source = readFileSync(new URL("./runner.ts", import.meta.url).pathname.replace("/pipeline/", "/subagent/"), "utf8");
+  assert.match(source, /if \(spec\.sessionPath\)/);
+  assert.match(source, /rmSync\(spec\.sessionPath/);
+});

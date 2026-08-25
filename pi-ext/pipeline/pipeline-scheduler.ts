@@ -659,6 +659,13 @@ function assertCleanGit(cwd: string): void {
   }
 }
 
+// Worker session lineage (GAP-137): key on the instruction pack ID so review-fix
+// relaunches resume the same conversation while a retired TIP (execution reset or
+// repair mints a new pack) can never inherit the old session.
+function workerSessionPath(cwd: string, packKey: string): string {
+  return join(cwd, ".pi", "runtime", "runs", packKey, "session.jsonl");
+}
+
 export function pipelineSpawnParams(stage: PipelineStage, task: any, cwd: string): any {
   const spec: any = { agent: task.agent, task: task.task, cwd, stage, taskId: task.taskId, acceptance: stage === "review" ? "attested" : "checked", ...(task.skillFamilies ? { skillFamilies: task.skillFamilies } : {}) };
   if (isMutationStage(stage) || stage === "review") spec.isolation = "worktree";
@@ -1533,7 +1540,10 @@ export class PipelineScheduler {
         if (stage === "rri") taskPrompt += `\n\nComplete RRI source context:\n${JSON.stringify({ work_item: data.work_item, scan_reports: data.scan_reports, requirements: data.requirements || [], owner_decisions: data.owner_decisions || [] })}`;
         const task = { agent: stageAgent(stage), task: taskPrompt, taskId, ...(isMutationStage(stage) || stage === "review" ? { skillFamilies } : {}) };
         const spec = pipelineSpawnParams(stage, task, this.cwd);
-        if (stage === "worker") spec.initialPatchPath = initialPatchPaths.get(taskId);
+        if (stage === "worker") {
+          spec.initialPatchPath = initialPatchPaths.get(taskId);
+          spec.sessionPath = workerSessionPath(this.cwd, activePack?.id || claim.instruction_pack_id || taskId);
+        }
         if (stage === "review") {
           const candidate = this.pipelineRuns(taskId).find((entry) => entry.id === claim.candidate_run_id);
           if (!candidate?.integrated_patch_path || candidate.integrated_patch_hash !== claim.candidate_patch_hash || !existsSync(candidate.integrated_patch_path)) {
