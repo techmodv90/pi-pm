@@ -20,7 +20,8 @@ test("tracker exposes live agent state and persists its prompt and events", () =
   assert.equal(run?.status, "running");
   assert.equal(run?.events.at(-1)?.summary, "read");
   assert.equal(formatAgentFooter(tracker.list(), 120), "1 active · 1 open");
-  assert.match(renderAgentWidget(tracker.list(), 80).join("\n"), /Fix the deploy race/);
+  assert.match(renderAgentWidget(tracker.list(), 80).join("\n"), /t-42/);
+  assert.doesNotMatch(renderAgentWidget(tracker.list(), 80).join("\n"), /deploy race/);
   assert.match(renderAgentWidget(tracker.list(), 80).join("\n"), /using read/);
   assert.match(renderAgentWidget(tracker.list(), 120).join("\n"), /↻ 1 · 0 tok \(i 10k\/o 2\.4k\) · 2 tools/);
   assert.equal(tracker.stop("run-12345678"), true);
@@ -71,6 +72,24 @@ test("tracker marks a live but silent run stalled without making it terminal", (
 
   assert.match(agentActivityLabel(run, 1 + AGENT_STALL_AFTER_MS), /stalled: no activity/);
   assert.equal(run.status, "running");
+});
+
+test("tracker touch refreshes the heartbeat so streaming stdout suppresses the stall label", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-touch-"));
+  const tracker = new AgentRunTracker();
+  tracker.start({ runId: "streaming", agent: "task-worker", task: "Build", cwd });
+  const startedAt = tracker.get("streaming")!.startedAt;
+
+  tracker.touch("streaming");
+
+  const run = tracker.get("streaming")!;
+  assert.ok(run.heartbeatAt! >= startedAt);
+  assert.equal(agentActivityLabel(run, run.heartbeatAt! + 1_000).includes("stalled"), false);
+  assert.equal(run.status, "running");
+
+  tracker.finish("streaming", "completed");
+  tracker.touch("streaming");
+  assert.notEqual(tracker.get("streaming")?.status, "running");
 });
 
 test("tracker projects managed process and turn lifecycle in the live widget", () => {

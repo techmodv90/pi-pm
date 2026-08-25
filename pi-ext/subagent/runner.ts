@@ -276,7 +276,9 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
   let stopChild = () => {};
   let deadlineTimer: NodeJS.Timeout | undefined;
   let abortListener: (() => void) | undefined;
-  tracker.start({ runId: id, agent: spec.agent.name, task: spec.task, cwd: runCwd, stage: spec.stage, taskId: spec.taskId, stop: () => stopChild() });
+  // Tracker state must outlive worktree cleanup: persist under the host repo,
+  // not the worktree cwd that gets removed when the run completes.
+  tracker.start({ runId: id, agent: spec.agent.name, task: spec.task, cwd: spec.cwd, stage: spec.stage, taskId: spec.taskId, stop: () => stopChild() });
   const appendHerdrLog = (message: string) => {
     if (!herdrHandle) return;
     try { appendFileSync(herdrLogPath, `${message.replace(/\s+/g, " ").trim().slice(0, 4000)}\n`, { encoding: "utf8", mode: 0o600 }); } catch {}
@@ -360,6 +362,9 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
         onUpdate?.({ result, event: event.type === "message_end" ? "message" : "tool_result" });
       };
       child.stdout?.on("data", (data: Buffer | string) => {
+        // Any stdout bytes prove the child is alive even between message_end
+        // events, so long silent model turns must not trip the stall detector.
+        tracker.touch(id);
         buffer += data.toString();
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";

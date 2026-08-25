@@ -250,6 +250,9 @@ test("isolated worker binds the child process and tool root to one canonical wor
   assert.equal(result.workspace?.gitToplevel, result.workspace?.assignedWorktree);
   assert.equal(result.workspace?.readToolRoot, spawnedCwd);
   assert.match(result.workspace?.statusAfter || "", /work\.go/);
+  // Tracker state must persist in the host repo so worktree cleanup cannot
+  // destroy the run's metrics evidence.
+  assert.equal(existsSync(join(repo, ".pi-subagents", "runs", result.runId, "state.json")), true);
 });
 
 test("isolated correction worker starts with the reviewed candidate patch applied", async () => {

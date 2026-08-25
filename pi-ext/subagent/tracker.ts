@@ -69,6 +69,15 @@ export class AgentRunTracker {
     return run;
   }
 
+  // Liveness heartbeat from raw child stdout: cheap in-memory touch (no persist)
+  // so streaming output between message_end events keeps the stall detector quiet.
+  touch(runId: string): void {
+    const run = this.runs.get(runId);
+    if (!run || run.status !== "running") return;
+    run.heartbeatAt = Date.now();
+    this.emit();
+  }
+
   event(runId: string, type: AgentEventType, summary: string): void {
     const run = this.runs.get(runId);
     if (!run) return;
@@ -273,7 +282,7 @@ export function renderAgentWidget(runs: AgentRun[], width: number, now = Date.no
     const child = Boolean(run.parentRunId);
     const branch = index === ordered.length - 1 ? "└─" : "├─";
     const activity = agentActivityLabel(run, now);;
-    lines.push(truncate(`${child ? "│  " : ""}${branch} · ${run.agent}  ${run.task || run.taskId || ""} · ${elapsed(run)} · ${usage(run)}`));
+    lines.push(truncate(`${child ? "│  " : ""}${branch} · ${run.agent}  ${run.taskId || run.task || ""} · ${elapsed(run)} · ${usage(run)}`));
     lines.push(truncate(`${child ? "│  " : ""}${index === ordered.length - 1 ? "   " : "│  "}└ ${activity}`));
   });
   return lines;
