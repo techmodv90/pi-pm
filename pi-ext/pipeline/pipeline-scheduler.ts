@@ -298,6 +298,17 @@ export function renderCanonicalInstructionPackXml(item: any, pack: any): string 
   return output;
 }
 
+// Resumable execution states constraint: an interrupted pipeline (expired/stale
+// review run, scheduler death mid-autofix) leaves next_stage parked at a runnable
+// stage with no active run. Selection must pick these up; nextPipelineStage stays
+// the final arbiter and returns null for owner blocks, so over-selection here is
+// safe — under-selection deadlocks the item forever.
+export const RESUMABLE_NEXT_STAGES = ["implement", "review", "autofix"];
+
+export function isResumableExecutionState(state: any): boolean {
+  return RESUMABLE_NEXT_STAGES.includes(state?.next_stage);
+}
+
 export function canonicalReadyLeafIds(root: any, load: (id: string) => any): string[] {
   const ready: string[] = [];
   const visit = (data: any): void => {
@@ -309,7 +320,7 @@ export function canonicalReadyLeafIds(root: any, load: (id: string) => any): str
       return;
     }
     if (["task", "bug", "chore"].includes(item.type)) {
-      if (data.ready || (data.execution_state?.review_status === "failed" && data.execution_state?.next_stage === "implement")) ready.push(item.id);
+      if (data.ready || isResumableExecutionState(data.execution_state)) ready.push(item.id);
     }
   };
   visit(root);
@@ -471,7 +482,7 @@ function activePackDoneReports(data: any, activePack: any): any[] {
         || (!decision.related_type && decision.created_at >= report.created_at)))));
 }
 
-export function parseTaskCompletionReport(output: string): { status: "done" | "partial" | "blocked" | "escalated"; markdown: string; blocker: string; escalation?: any } {
+export function parseTaskCompletionReport(output: string): { status: "done" | "partial" | "blocked" | "escalated"; markdown: string; blocker: string; escalation?: any; failure_metadata?: Record<string, string> } {
   const documents = [...output.matchAll(/<completion_report\b[\s\S]*?<\/completion_report>/g)].map((match) => match[0]);
   if (documents.length !== 1) throw new Error("worker output must contain one completion_report XML document");
   const document = documents[0]!.replace(/<([^<>\s]+)&gt;/g, "&lt;$1&gt;");
@@ -505,7 +516,26 @@ export function parseTaskCompletionReport(output: string): { status: "done" | "p
   const blocker = [sections.issues_discovered, sections.deviations]
     .filter((value) => value && value.toLowerCase() !== "none")
     .join(" ");
-  return { status: status as "done" | "partial" | "blocked" | "escalated", markdown: document, blocker, ...(escalation ? { escalation } : {}) };
+  // Advisory worker-supplied triage hints (failure_metadata): malformed or hostile
+  // values are dropped, never trusted for control flow — the owner still decides.
+  let failureMetadata: Record<string, string> | undefined;
+  const metaRaw = typeof parsed?.failure_metadata === "string" ? parsed.failure_metadata.trim() : "";
+  if (metaRaw) {
+    try {
+      const candidate = JSON.parse(metaRaw);
+      if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+        failureMetadata = Object.fromEntries(
+          Object.entries(candidate)
+            .filter(([, value]) => typeof value === "string" && (value as string).length <= 500)
+            .slice(0, 8),
+        ) as Record<string, string>;
+        if (!Object.keys(failureMetadata).length) failureMetadata = undefined;
+      }
+    } catch {
+      // advisory only: unparseable metadata is omitted, never fatal
+    }
+  }
+  return { status: status as "done" | "partial" | "blocked" | "escalated", markdown: document, blocker, ...(escalation ? { escalation } : {}), ...(failureMetadata ? { failure_metadata: failureMetadata } : {}) };
 }
 
 function completionSectionText(value: unknown): string {
@@ -1480,8 +1510,12 @@ export class PipelineScheduler {
     const taskIds = [...new Set([
       ...(Array.isArray(ready) ? ready.map((item: any) => item.id) : []),
       ...(Array.isArray(listed) ? listed.filter((item: any) => ["task", "bug", "chore"].includes(item.type) && item.status === "in_progress").map((item: any) => item.id).filter((id: any) => {
+        // Auto-batch must not touch items with a live claim; explicit retries are
+        // guarded by the one-active-run-per-(task,stage) unique index instead.
+        const runs = this.pipelineRuns(id);
+        if (runs.some((run: any) => run.status === "claimed" || run.status === "running")) return false;
         const state = execPic(["work-item", "workflow-status", id], ctx.cwd);
-        return state.review_status === "failed" && state.next_stage === "implement";
+        return isResumableExecutionState(state);
       }) : []),
     ])].filter((id: any): id is string => typeof id === "string");
     if (!taskIds.length) return { launches: [], blocked: "No authorized dependency-ready executable Work Items" };
@@ -1850,7 +1884,7 @@ export class PipelineScheduler {
         }
         if (taskReport.status !== "done") {
           const reason = taskReport.blocker || `worker reported ${taskReport.status}`;
-          execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", reason, "--result-json", JSON.stringify({ ...pipelineFailureResult(reason), blocker: reason, completion_report: taskReport.markdown })], this.cwd);
+          execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", reason, "--result-json", JSON.stringify({ ...pipelineFailureResult(reason), blocker: reason, completion_report: taskReport.markdown, ...(taskReport.failure_metadata ? { failure_metadata: taskReport.failure_metadata } : {}) })], this.cwd);
           checkpoint(run, "advanced", this.cwd);
           this.notifyBlockedAttempt(run, reason);
           return;

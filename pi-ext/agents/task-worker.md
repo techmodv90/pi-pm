@@ -96,11 +96,14 @@ Return exactly one XML document. Do not use a code fence or add prose before or 
   <deviations>Deviations from the TIP, or None</deviations>
   <suggestions>Suggestions for the contractor, or None</suggestions>
   <escalation>{"level":"L2","checked_sources":["active TIP section …","Contract obligation OB-…"],"summary":"one sentence","questions":["…"],"options":[{"name":"…","pros":"…","cons":"…"}],"recommendation":"…"}</escalation>
+  <failure_metadata>{"category":"ENVIRONMENTAL_CONSTRAINT|CONTRACT_BOUNDARY|DEPENDENCY_MISSING|PROVIDER_FAULT|UNKNOWN","violating_variable":"config variable hit, e.g. API_PORT","runtime_value":"observed value, e.g. 95317","system_error_code":"kernel/runtime code, e.g. EADDRINUSE","evidence":"one-line verbatim diagnostic"}</failure_metadata>
 </completion_report>
 </output_format>
 ````
 
 The `<escalation>` element is required if and only if `status="escalated"`. `level` is `L2` (contractor decides among valid implementations) or `L3` (owner decision needed: scope, architecture, business rules, security). `checked_sources` must list every TIP section, obligation ID, and artifact you consulted before declaring the gap real. Include `options` with pros/cons for L2 and concrete impact for L3, plus one recommendation.
+
+The `<failure_metadata>` element is advisory and best-effort: include it when `status` is `blocked`, `partial`, or `escalated` AND one blocking variable or constraint is clearly identifiable from evidence you actually observed. Fill every field from real diagnostics, never guesses; if you cannot identify a single blocking variable with confidence, omit the entire element rather than invent values. The host treats this as a triage hint only — it never substitutes for the narrative sections.
 
 <report_rules>
 Return the XML document exactly once as your final response. The first character must be `<` and the final characters must be `</completion_report>`. Do not substitute Markdown, JSON, prose, or a code fence. Escape `&`, `<`, and `>` inside text values.

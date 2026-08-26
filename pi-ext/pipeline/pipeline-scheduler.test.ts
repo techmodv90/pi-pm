@@ -22,6 +22,14 @@ test("worker and reviewer reports require strict XML envelopes", () => {
   assert.throws(() => parseTaskCompletionReport(`${worker}\n${worker}`), /one completion_report XML/);
   assert.throws(() => parseTaskCompletionReport("**STATUS:** DONE"), /completion_report XML/);
 
+  const metaBlocked = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="blocked"><files_changed>None</files_changed><test_results>Not run</test_results><issues_discovered>Port unavailable</issues_discovered><deviations>None</deviations><suggestions>None</suggestions><failure_metadata>{"category":"ENVIRONMENTAL_CONSTRAINT","violating_variable":"API_PORT","runtime_value":"95317","system_error_code":"EADDRINUSE","evidence":"listen tcp :95317: bind: address already in use"}</failure_metadata></completion_report>`);
+  assert.deepEqual(metaBlocked.failure_metadata, { category: "ENVIRONMENTAL_CONSTRAINT", violating_variable: "API_PORT", runtime_value: "95317", system_error_code: "EADDRINUSE", evidence: "listen tcp :95317: bind: address already in use" });
+  const garbageMeta = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="blocked"><files_changed>None</files_changed><test_results>Not run</test_results><issues_discovered>X</issues_discovered><deviations>None</deviations><suggestions>None</suggestions><failure_metadata>not json at all</failure_metadata></completion_report>`);
+  assert.equal(garbageMeta.failure_metadata, undefined);
+  const arrayMeta = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="blocked"><files_changed>None</files_changed><test_results>Not run</test_results><issues_discovered>X</issues_discovered><deviations>None</deviations><suggestions>None</suggestions><failure_metadata>[1,2]</failure_metadata></completion_report>`);
+  assert.equal(arrayMeta.failure_metadata, undefined);
+  assert.equal(parseTaskCompletionReport(worker).failure_metadata, undefined);
+
   const passed = `<review_report status="passed"><notes>All criteria verified.</notes><findings></findings></review_report>`;
   assert.deepEqual(parseReviewReport(passed), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
   assert.deepEqual(parseReviewReport(`Reviewer output:\n${passed}\nDone.`), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
@@ -263,6 +271,18 @@ test("canonicalReadyLeafIds traverses materialized children of executable parent
   };
   const root = { work_item: { id: "parent", type: "task" }, ready: false, children: [{ id: "child" }] };
   assert.deepEqual(canonicalReadyLeafIds(root, (id) => details[id]), ["child"]);
+});
+
+test("canonicalReadyLeafIds resumes items interrupted mid review or autofix", () => {
+  const details: Record<string, any> = {
+    root: { work_item: { id: "root", type: "feature" }, children: [{ id: "stalled_review" }, { id: "dead_autofix" }, { id: "owner_block" }] },
+    // Expired review run: next_stage parked at review, no durable failed status.
+    stalled_review: { work_item: { id: "stalled_review", type: "task" }, ready: false, execution_state: { next_stage: "review", review_status: "" } },
+    dead_autofix: { work_item: { id: "dead_autofix", type: "task" }, ready: false, execution_state: { next_stage: "autofix", verification_status: "failed" } },
+    // Owner block parks with no runnable stage; must NOT be selected.
+    owner_block: { work_item: { id: "owner_block", type: "task" }, ready: false, execution_state: { next_stage: "", owner_approval_required: true } },
+  };
+  assert.deepEqual(canonicalReadyLeafIds(details.root, (id) => details[id]), ["stalled_review", "dead_autofix"]);
 });
 
 test("canonicalReadyLeafIds treats cancelled children as absent", () => {
