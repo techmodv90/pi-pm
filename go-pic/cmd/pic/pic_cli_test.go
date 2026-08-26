@@ -2363,8 +2363,8 @@ func TestWorkItemEscalationLifecycle(t *testing.T) {
 	if err = db.QueryRow(`SELECT status FROM work_items WHERE id=?`, id).Scan(&itemStatus); err != nil || itemStatus != "open" {
 		t.Fatalf("escalated work item status=%q err=%v", itemStatus, err)
 	}
-	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"); !strings.Contains(out, "open escalation") {
-		t.Fatalf("claim not gated by open escalation: %s", out)
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"); !strings.Contains(out, "open escalation") || !strings.Contains(out, escalationID) {
+		t.Fatalf("claim not gated by open escalation with ID: %s", out)
 	}
 	if out := runPicError(t, bin, root, home, "workflow", "escalation-resolve", id, escalationID, `{"decision":"use sqlite"}`, "--actor-role", "owner"); !strings.Contains(out, "contractor") {
 		t.Fatalf("non-contractor resolution accepted: %s", out)

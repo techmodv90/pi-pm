@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 )
 
 var pipelineStages = []string{"scan", "rri", "vision", "blueprint", "contracts", "task_graph", "worker", "review", "autofix"}
@@ -124,12 +125,27 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	}
 	// Open-escalation scheduling gate (GAP-138): no claim of any stage may proceed
 	// while an unresolved escalation exists for this Work Item.
-	var openEscalations int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_escalations WHERE work_item_id=? AND status='open'`, taskID).Scan(&openEscalations); err != nil {
+	// List the blocking IDs so contractors can resolve without hunting through
+	// show output; escalation-resolve requires the exact wies-* ID.
+	escalationRows, err := tx.Query(`SELECT id FROM work_item_escalations WHERE work_item_id=? AND status='open' ORDER BY datetime(created_at), rowid`, taskID)
+	if err != nil {
 		return err
 	}
-	if openEscalations > 0 {
-		return fmt.Errorf("pipeline claim rejected: %d open escalation(s) require contractor resolution", openEscalations)
+	var escalationIDs []string
+	for escalationRows.Next() {
+		var escalationID string
+		if err = escalationRows.Scan(&escalationID); err != nil {
+			escalationRows.Close()
+			return err
+		}
+		escalationIDs = append(escalationIDs, escalationID)
+	}
+	escalationRows.Close()
+	if err = escalationRows.Err(); err != nil {
+		return err
+	}
+	if len(escalationIDs) > 0 {
+		return fmt.Errorf("pipeline claim rejected: %d open escalation(s) require contractor resolution: %s", len(escalationIDs), strings.Join(escalationIDs, ", "))
 	}
 	// Resolve the versioned Plan/Implement/QA profile exactly once at the first
 	// claim and bind this claim to the persisted profile version and hash.
