@@ -1,0 +1,3 @@
+# notes
+TODO fix obvious bug here someday
+legacy content stays as-is

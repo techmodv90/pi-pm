@@ -1,0 +1,2 @@
+Pre-existing context file. Present before the worker run started.
+The worker may read this file but must never list it as changed.

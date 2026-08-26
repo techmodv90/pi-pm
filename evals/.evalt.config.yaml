@@ -1,0 +1,23 @@
+profiles:
+  worker:
+    harness: pi
+    extra-args:
+      - "--model"
+      - "cliproxy/ds-4-flash"
+      - "--thinking"
+      - "high"
+      - "--tools"
+      - "read,bash,edit,write"
+      - "--append-system-prompt"
+      - "task-worker-system.md"
+
+profile: worker
+
+reviewer:
+  profile: worker
+  default-pass-threshold: 0.8
+
+run:
+  concurrent-tests: 1
+  timeout-ms: 240000
+  max-turns: 12
