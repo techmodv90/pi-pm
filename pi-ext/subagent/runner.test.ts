@@ -18,6 +18,70 @@ test("managed pipeline stages require their acceptance contract", () => {
   assert.throws(() => assertManagedAcceptance({ ...base, stage: "review" }), /requires acceptance attested/);
 });
 
+const silentChild = () => {
+  // Emulates SIGTERM semantics: process-group kill fails (ESRCH), fallback
+  // child.kill terminates and the closed event carries the signal exit code.
+  const child: any = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), pid: 424242 });
+  child.kill = () => { setImmediate(() => child.emit("close", 137)); return true; };
+  return child;
+};
+
+function spawnNeverExiting(child: any) {
+  return (() => child) as any;
+}
+
+// Watchdog/deadline timers are unref'd; a ref'd interval holds the event loop
+// open until the awaited result settles (cleared in each watchdog test).
+const keepEventLoopAlive = () => setInterval(() => {}, 50);
+
+test("deadline kills a hung review-stage child", async () => {
+  const tracker = new AgentRunTracker();
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-review-deadline-"));
+  const handle = startSubagent({
+    agent: { name: "task-reviewer", description: "", systemPrompt: "", source: "packaged", filePath: "task-reviewer.md" },
+    task: "review",
+    cwd,
+    stage: "review",
+    acceptance: "attested",
+    tracker,
+    deadlineMs: 30,
+    herdrPanel: { available: () => false, open: () => ({ paneId: "" }), close: () => {} },
+  }, undefined, spawnNeverExiting(silentChild()));
+  const keepAlive = keepEventLoopAlive();
+  try {
+    const result = await handle.result;
+    assert.equal(result.stopReason, "timed_out");
+    assert.notEqual(result.exitCode, 0);
+  } finally { clearInterval(keepAlive); }
+});
+
+test("inactivity watchdog kills a silent child and classifies provider_stall", async () => {
+  const tracker = new AgentRunTracker();
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-stall-watchdog-"));
+  const handle = startSubagentResilient({
+    agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "task-worker.md" },
+    task: "work",
+    cwd,
+    stage: "worker",
+    acceptance: "checked",
+    tracker,
+    inactivityKillMs: 30,
+    deadlineMs: 60_000,
+    herdrPanel: { available: () => false, open: () => ({ paneId: "" }), close: () => {} },
+  } as any, undefined, spawnNeverExiting(silentChild()));
+  const keepAlive = keepEventLoopAlive();
+  try {
+    const result = await handle.result;
+    assert.equal(result.stopReason, "stalled");
+    assert.match(result.errorMessage || "", /provider_stall/);
+  } finally { clearInterval(keepAlive); }
+});
+
+test("classifyRunnerTransientFault maps stalled to provider_stall", () => {
+  assert.equal(classifyRunnerTransientFault({ stopReason: "stalled" } as any), "provider_stall");
+  assert.equal(classifyRunnerTransientFault({ stopReason: "aborted" } as any), "none");
+});
+
 test("startSubagent publishes finalizing before terminal completion", async () => {
   const child = Object.assign(new EventEmitter(), {
     stdout: new EventEmitter(),

@@ -14,6 +14,10 @@ import { resolveSkillDirectories, resolvedSkillNames } from "./skills.ts";
 
 export type SpawnFunction = typeof spawn;
 export const MANAGED_WORKER_DEADLINE_MS = 30 * 60 * 1000;
+export const REVIEW_DEADLINE_MS = 20 * 60 * 1000;
+// Watchdog constraint: a managed child silent this long is wedged (provider hang),
+// not thinking — pi JSON mode emits stdout events continuously during live turns.
+export const RUNNER_INACTIVITY_KILL_MS = 15 * 60 * 1000;
 const WORKER_WRAP_UP_MS = 5_000;
 const execFileAsync = promisify(execFile);
 const defaultHerdrPanel = createHerdrPanel();
@@ -274,7 +278,11 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
   let herdrHandle: HerdrPanelHandle | undefined;
   let settled = false;
   let stopChild = () => {};
+  // Test/ops override hooks: per-spec caps so unit tests need not wait real minutes.
+  const stageDeadlineMs = (spec as any).deadlineMs ?? (spec.stage === "review" ? REVIEW_DEADLINE_MS : MANAGED_WORKER_DEADLINE_MS);
+  const inactivityKillMs = (spec as any).inactivityKillMs ?? RUNNER_INACTIVITY_KILL_MS;
   let deadlineTimer: NodeJS.Timeout | undefined;
+  let activityTimer: NodeJS.Timeout | undefined;
   let abortListener: (() => void) | undefined;
   // Tracker state must outlive worktree cleanup: persist under the host repo,
   // not the worktree cwd that gets removed when the run completes.
@@ -292,6 +300,7 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
       result.stopReason = stopReason || result.stopReason || (exitCode === 0 ? "end" : "error");
       if (abortListener) spec.signal?.removeEventListener("abort", abortListener);
       if (deadlineTimer) clearTimeout(deadlineTimer);
+      if (activityTimer) clearTimeout(activityTimer);
       if (result.workspace) {
         try {
           result.workspace.statusAfter = gitText(result.workspace.assignedWorktree, ["status", "--short"]);
@@ -361,16 +370,28 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
         tracker.event(id, tools.length ? "tool" : event.type === "tool_result_end" ? "tool_result" : "message", tools.length ? tools.join(", ") : String(text).trim());
         onUpdate?.({ result, event: event.type === "message_end" ? "message" : "tool_result" });
       };
+      const bumpActivity = () => {
+        if (activityTimer) clearTimeout(activityTimer);
+        activityTimer = setTimeout(() => {
+          if (settled) return;
+          result.stopReason = "stalled";
+          tracker.event(id, "stderr", `inactivity watchdog: no child output for ${Math.round(inactivityKillMs / 60000)}m; terminating process group`);
+          stopChild();
+        }, inactivityKillMs);
+        activityTimer.unref();
+      };
       child.stdout?.on("data", (data: Buffer | string) => {
         // Any stdout bytes prove the child is alive even between message_end
         // events, so long silent model turns must not trip the stall detector.
         tracker.touch(id);
+        bumpActivity();
         buffer += data.toString();
         const lines = buffer.split("\n");
         buffer = lines.pop() || "";
         for (const line of lines) processLine(line);
       });
       child.stderr?.on("data", (data: Buffer | string) => {
+        bumpActivity();
         const text = data.toString();
         result.stderr += text;
         appendHerdrLog(text);
@@ -380,7 +401,7 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
       child.on("close", (code) => { if (buffer.trim()) processLine(buffer); finish(code ?? 1); });
       stopChild = () => {
         if (settled) return;
-        if (result.stopReason !== "timed_out") result.stopReason = "aborted";
+        if (result.stopReason !== "timed_out" && result.stopReason !== "stalled") result.stopReason = "aborted";
         tracker.observeLifecycle(id, "interrupted");
         const pid = child?.pid;
         if (pid) {
@@ -391,15 +412,16 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
           }, WORKER_WRAP_UP_MS).unref();
         }
       };
-      if (spec.stage === "worker" || spec.stage === "autofix") {
-        deadlineTimer = setTimeout(() => {
-          if (settled) return;
-          result.stopReason = "timed_out";
-          tracker.event(id, "stderr", `worker deadline reached; terminating process group with ${WORKER_WRAP_UP_MS}ms kill grace`);
-          stopChild();
-        }, MANAGED_WORKER_DEADLINE_MS);
-        deadlineTimer.unref();
-      }
+      // Deadline constraint: EVERY managed child gets a hard wall-clock cap —
+      // reviewers previously had none, so a hung review blocked the item forever.
+      deadlineTimer = setTimeout(() => {
+        if (settled) return;
+        result.stopReason = "timed_out";
+        tracker.event(id, "stderr", `${spec.stage || "subagent"} deadline reached; terminating process group with ${WORKER_WRAP_UP_MS}ms kill grace`);
+        stopChild();
+      }, stageDeadlineMs);
+      deadlineTimer.unref();
+      bumpActivity();
       abortListener = stopChild;
       if (spec.signal?.aborted) stopChild();
       else spec.signal?.addEventListener("abort", abortListener, { once: true });
@@ -421,13 +443,16 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
 // abort faults are retried inside the same claim instead of being surfaced as
 // malformed-verdict failures. A completed agent that returned assistant text is
 // never transient.
-export type RunnerTransientFault = "empty_output" | "inference_abort" | "none";
+export type RunnerTransientFault = "empty_output" | "inference_abort" | "provider_stall" | "none";
 
 export const RUNNER_TRANSIENT_RETRIES = 2;
 export const RUNNER_TRANSIENT_BACKOFF_MS = 500;
 
 export function classifyRunnerTransientFault(result: SubagentResult): RunnerTransientFault {
   if (result.stopReason === "aborted") return "none";
+  // Watchdog kill means the provider wedged mid-run: same transient class as an
+  // inference abort, retried in-claim rather than burning a numbered attempt.
+  if (result.stopReason === "stalled") return "provider_stall";
   const diagnostic = `${result.errorMessage || ""}\n${result.stderr || ""}`;
   if (/inference[\s_-]?abort|inference\s+error|empty[\s_-]?(?:model|provider)[\s_-]?(?:output|response)|provider[\s_-]?error/i.test(diagnostic)) return "inference_abort";
   // Empty assistant output is transient independently of exit code: a provider
