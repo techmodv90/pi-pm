@@ -748,6 +748,41 @@ test("review-fix workers must change the rejected candidate patch", () => {
   assert.doesNotThrow(() => assertReviewFixChangedPatch({ review_fix_cycle: 0, candidate_patch_hash: hash } as any, patch));
 });
 
+test("justified no-op review-fix may resubmit the unchanged candidate for re-review", () => {
+  const patch = Buffer.from("reviewed candidate");
+  const hash = createHash("sha256").update(patch).digest("hex");
+  const run = { review_fix_cycle: 1, candidate_patch_hash: hash } as any;
+  // Thin justification does not unlock the escape hatch.
+  assert.throws(
+    () => assertReviewFixChangedPatch(run, patch, "looks fine to me"),
+    /review-fix produced the unchanged rejected candidate patch/,
+  );
+  // Substantive per-finding justification routes the unchanged candidate to a fresh reviewer.
+  assert.doesNotThrow(() => assertReviewFixChangedPatch(
+    run,
+    patch,
+    "P1 handoff-artifact finding is not code-actionable: pipeline already persists candidate_run_id and candidate_patch_hash on run pr-326aa704 (verified via pic show); TIP OB-008 satisfied and 35/35 verification evidence stands.",
+  ));
+});
+
+test("parseTaskCompletionReport extracts no_change_justification", () => {
+  const report = [
+    '<completion_report status="done">',
+    "<files_changed>None</files_changed>",
+    "<test_results>all pass</test_results>",
+    "<issues_discovered>None</issues_discovered>",
+    "<deviations>None</deviations>",
+    "<suggestions>None</suggestions>",
+    "<no_change_justification>P1 finding already satisfied: config present at line 12, tests green.</no_change_justification>",
+    "</completion_report>",
+  ].join("\n");
+  const parsed = parseTaskCompletionReport(report);
+  assert.equal(parsed.status, "done");
+  assert.match(parsed.no_change_justification!, /already satisfied/);
+  const plain = parseTaskCompletionReport(report.replace(/<no_change_justification>[\s\S]*?<\/no_change_justification>/, ""));
+  assert.equal(plain.no_change_justification, undefined);
+});
+
 test("obsolete failed-review patch does not block a fresh correction worker", () => {
   const repo = mkdtempSync(join(tmpdir(), "task-review-obsolete-seed-"));
   try {

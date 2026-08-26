@@ -482,7 +482,7 @@ function activePackDoneReports(data: any, activePack: any): any[] {
         || (!decision.related_type && decision.created_at >= report.created_at)))));
 }
 
-export function parseTaskCompletionReport(output: string): { status: "done" | "partial" | "blocked" | "escalated"; markdown: string; blocker: string; escalation?: any; failure_metadata?: Record<string, string> } {
+export function parseTaskCompletionReport(output: string): { status: "done" | "partial" | "blocked" | "escalated"; markdown: string; blocker: string; escalation?: any; failure_metadata?: Record<string, string>; no_change_justification?: string } {
   const documents = [...output.matchAll(/<completion_report\b[\s\S]*?<\/completion_report>/g)].map((match) => match[0]);
   if (documents.length !== 1) throw new Error("worker output must contain one completion_report XML document");
   const document = documents[0]!.replace(/<([^<>\s]+)&gt;/g, "&lt;$1&gt;");
@@ -535,7 +535,10 @@ export function parseTaskCompletionReport(output: string): { status: "done" | "p
       // advisory only: unparseable metadata is omitted, never fatal
     }
   }
-  return { status: status as "done" | "partial" | "blocked" | "escalated", markdown: document, blocker, ...(escalation ? { escalation } : {}), ...(failureMetadata ? { failure_metadata: failureMetadata } : {}) };
+  // Justified no-op path (review-fix): worker claims every P0/P1 finding is already
+  // satisfied or not code-actionable; reviewer re-arbitrates the unchanged candidate.
+  const noChangeJustification = typeof parsed?.no_change_justification === "string" ? parsed.no_change_justification.trim().slice(0, 4000) : undefined;
+  return { status: status as "done" | "partial" | "blocked" | "escalated", markdown: document, blocker, ...(escalation ? { escalation } : {}), ...(failureMetadata ? { failure_metadata: failureMetadata } : {}), ...(noChangeJustification ? { no_change_justification: noChangeJustification } : {}) };
 }
 
 function completionSectionText(value: unknown): string {
@@ -1180,7 +1183,7 @@ export function buildWorkerCorrectionContext(data: any): string {
     : [String(data.work_item.review_notes || "").trim()].filter(Boolean);
   if (!rawFindings.length) throw new Error("failed review is missing persisted correction findings");
   const synthesis = synthesizeReviewFindings(rawFindings);
-  return `\n\n## REVIEW CORRECTIONS (synthesized findings only)\nThe rejected candidate is already applied to the assigned worktree. This is a review-fix run, not a verification-only run: make the required edits for every P0 and P1 finding below and return a non-empty patch whose SHA-256 differs from the rejected candidate. Do not report DONE or claim the fix is complete without changing the worktree. Git-derived changed files will be assessed by Reviewer.\n\n${renderSynthesizedFindings(synthesis)}\n`;
+  return `\n\n## REVIEW CORRECTIONS (synthesized findings only)\nThe rejected candidate is already applied to the assigned worktree. This is a review-fix run, not a verification-only run: make the required edits for every P0 and P1 finding below and return a non-empty patch whose SHA-256 differs from the rejected candidate. Do not report DONE or claim the fix is complete without changing the worktree. Git-derived changed files will be assessed by Reviewer.\nException: if EVERY P0 and P1 finding is demonstrably already satisfied by the current worktree or cannot be addressed by a code change, you may return DONE without edits, but your completion_report must then include a <no_change_justification> section addressing each P0 and P1 finding point by point with evidence. A missing or thin justification will be rejected; Reviewer independently re-judges the candidate either way.\n\n${renderSynthesizedFindings(synthesis)}\n`;
 }
 
 export function buildOwnerRejectionContext(data: any): string {
@@ -1200,10 +1203,15 @@ export function workerIntegrationCandidate(runs: PipelineRun[]): PipelineRun | u
   return runs.find((run) => isMutationStage(run.stage) && run.artifact_saved_at && !run.integrated_at && !run.advanced_at);
 }
 
-export function assertReviewFixChangedPatch(run: PipelineRun, patch: Buffer): void {
+export function assertReviewFixChangedPatch(run: PipelineRun, patch: Buffer, noChangeJustification?: string): void {
   if ((run.review_fix_cycle || 0) < 1 || !run.candidate_patch_hash) return;
   const patchHash = createHash("sha256").update(patch).digest("hex");
-  if (patchHash === run.candidate_patch_hash) throw new Error("review-fix produced the unchanged rejected candidate patch");
+  if (patchHash !== run.candidate_patch_hash) return;
+  // Justified no-op escape hatch: a worker that proves every P0/P1 finding is already
+  // satisfied or not code-actionable may resubmit the unchanged candidate; the fresh
+  // reviewer arbitrates on merit and the distinct-cycle round cap bounds abuse.
+  if ((noChangeJustification || "").trim().length >= 40) return;
+  throw new Error("review-fix produced the unchanged rejected candidate patch");
 }
 
 export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, taskId: string): string {
@@ -1856,7 +1864,7 @@ export class PipelineScheduler {
             const patch = workerPatch(run);
             const outputPath = join(run.async_dir || "", `output-${run.child_index || 0}.log`);
             validateWorkerPatchArtifact(patch, outputPath, normalizedReport);
-            assertReviewFixChangedPatch(run, readFileSync(patch));
+            assertReviewFixChangedPatch(run, readFileSync(patch), taskReport.no_change_justification);
             if (run.stage === "autofix" && statSync(patch).size === 0) throw new Error("autofix made no repository changes");
             if (statSync(patch).size > 0) execFileSync("git", ["apply", "--check", patch], { cwd: this.cwd, stdio: "pipe" });
           }

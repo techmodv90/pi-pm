@@ -105,6 +105,8 @@ The `<escalation>` element is required if and only if `status="escalated"`. `lev
 
 The `<failure_metadata>` element is advisory and best-effort: include it when `status` is `blocked`, `partial`, or `escalated` AND one blocking variable or constraint is clearly identifiable from evidence you actually observed. Fill every field from real diagnostics, never guesses; if you cannot identify a single blocking variable with confidence, omit the entire element rather than invent values. The host treats this as a triage hint only — it never substitutes for the narrative sections.
 
+The `<no_change_justification>` element is required if and only if a review-fix instruction demands a changed patch but EVERY P0 and P1 finding is demonstrably already satisfied by the current worktree or cannot be addressed by a code change. Address each P0 and P1 finding point by point with concrete evidence (test output, file content, contract text). A missing or thin justification is rejected; Reviewer independently re-judges the candidate either way. If any finding requires an edit, make the edits instead — do not use this element to dodge real findings.
+
 <report_rules>
 Return the XML document exactly once as your final response. The first character must be `<` and the final characters must be `</completion_report>`. Do not substitute Markdown, JSON, prose, or a code fence. Escape `&`, `<`, and `>` inside text values.
 Each of the five report sections must contain plain text only. Do not add child XML elements such as `<file>`, `<command>`, `<result>`, `<issue>`, `<deviation>`, or `<suggestion>`. Escape both angle brackets: literal `<emission>` must be written as `&lt;emission&gt;`, never `<emission&gt;`.
