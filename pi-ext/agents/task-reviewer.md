@@ -8,7 +8,7 @@ inherit_context: false
 run_in_background: true
 output_transcript: true
 skills: defense-in-depth
-model: cliproxy/gpt-5.6-sol
+model: cliproxy-openai/gpt-5.6-sol
 ---
 
 # Task Reviewer Agent (@task-reviewer)
