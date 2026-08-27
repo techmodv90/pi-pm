@@ -255,9 +255,19 @@ export function singleLine(text: string): string {
   return text.replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
 }
 
+export const AGENT_FAILURE_VISIBLE_MS = 2 * 60 * 1000;
+
 export function renderAgentWidget(runs: AgentRun[], width: number, now = Date.now()): string[] {
   const active = runs.filter((run) => run.status === "running");
-  if (!active.length) return [];
+  // Recently failed/aborted runs stay visible briefly so provider deaths are
+  // diagnosable from the widget instead of only via events.jsonl.
+  const recentFailures = runs.filter(
+    (run) =>
+      (run.status === "failed" || run.status === "aborted") &&
+      run.finishedAt !== undefined &&
+      now - run.finishedAt < AGENT_FAILURE_VISIBLE_MS,
+  );
+  if (!active.length && !recentFailures.length) return [];
   const truncate = (value: string) => {
     const flat = singleLine(value);
     return flat.length <= width ? flat : `${flat.slice(0, Math.max(0, width - 3))}...`;
@@ -284,6 +294,10 @@ export function renderAgentWidget(runs: AgentRun[], width: number, now = Date.no
     const activity = agentActivityLabel(run, now);;
     lines.push(truncate(`${child ? "│  " : ""}${branch} · ${run.agent}  ${run.taskId || run.task || ""} · ${elapsed(run)} · ${usage(run)}`));
     lines.push(truncate(`${child ? "│  " : ""}${index === ordered.length - 1 ? "   " : "│  "}└ ${activity}`));
+  });
+  recentFailures.forEach((run) => {
+    const reason = run.terminalReason || run.status;
+    lines.push(truncate(`└─ ✗ ${run.agent}  ${run.taskId || run.task || ""} · ${run.status}: ${reason}`));
   });
   return lines;
 }

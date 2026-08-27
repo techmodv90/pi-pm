@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { AGENT_STALL_AFTER_MS, AgentRunTracker, agentActivityLabel, formatAgentFooter, renderAgentWidget } from "./tracker.ts";
+import { AGENT_FAILURE_VISIBLE_MS, AGENT_STALL_AFTER_MS, AgentRunTracker, agentActivityLabel, formatAgentFooter, renderAgentWidget } from "./tracker.ts";
 
 test("tracker exposes live agent state and persists its prompt and events", () => {
   const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
@@ -135,4 +135,20 @@ test("tracker syncs nested persona runs under their RRI parent", () => {
     tracker.event("run-cancelled1", "message", "thinking");
     tracker.setModel("run-cancelled1", "model-x");
   });
+});
+
+test("widget keeps recent failures visible with their terminal reason", () => {
+  const now = Date.now();
+  const failed = {
+    runId: "run-failed01", agent: "task-planner", task: "plan", cwd: "/tmp",
+    status: "failed" as const, startedAt: now - 60_000, finishedAt: now - 30_000,
+    terminalReason: "agent process exited without a terminal result", events: [],
+  };
+  const lines = renderAgentWidget([failed], 200, now).join("\n");
+  assert.match(lines, /✗ task-planner/);
+  assert.match(lines, /agent process exited without a terminal result/);
+
+  // Old failures age out; healthy-only lists render nothing.
+  const old = { ...failed, finishedAt: now - AGENT_FAILURE_VISIBLE_MS - 1_000 };
+  assert.deepEqual(renderAgentWidget([old], 200, now), []);
 });
