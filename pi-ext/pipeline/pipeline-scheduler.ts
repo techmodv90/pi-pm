@@ -32,7 +32,6 @@ const planningStages: PipelineStage[] = ["rri", "vision", "blueprint", "contract
 const RRI_T_PERSONAS = ["End User", "Business Analyst", "QA / Tester", "Developer", "Operator"] as const;
 const RRI_T_DIMENSIONS = new Set(["D1", "D2", "D3", "D4", "D5", "D6", "D7"]);
 const RRI_T_STRESS_AXES = new Set(["TIME", "DATA", "ERROR", "COLLABORATION", "EMERGENCY", "SCALE", "COMPLIANCE", "EVOLUTION"]);
-const RRI_T_RESULTS = new Set(["PASS", "ACCEPTABLE", "PAINFUL", "FAIL"]);
 
 function isPlanningStage(stage: PipelineStage): boolean { return planningStages.includes(stage); }
 
@@ -44,14 +43,29 @@ function normalizeRriTXml(output: string): string {
   return trimmed.slice(start, end + "</rri_t_persona>".length);
 }
 
+// RRI-T authoring boundary: a concrete procedure must pair a non-empty command
+// with a non-empty expected observable on opposite sides of the supported
+// `→`/`->` delimiter. An arrow alone or a blank side is not a concrete procedure.
+function hasConcreteProcedure(procedure: string): boolean {
+  const delimiter = procedure.match(/(?:→|->)/);
+  if (!delimiter || delimiter.index === undefined) return false;
+  const command = procedure.slice(0, delimiter.index).trim();
+  const expected = procedure.slice(delimiter.index + delimiter[0].length).trim();
+  return command.length > 0 && expected.length > 0;
+}
+
 export function parseRriTPersonaResult(output: string, expectedPersona: string): any {
   const xml = normalizeRriTXml(output);
   const parsed = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_", trimValues: true }).parse(xml)?.rri_t_persona;
   if (!parsed || parsed["@_persona"] !== expectedPersona) throw new Error(`RRI-T output has unexpected persona; expected ${expectedPersona}`);
   const scenarios = Array.isArray(parsed.scenarios?.scenario) ? parsed.scenarios.scenario : parsed.scenarios?.scenario ? [parsed.scenarios.scenario] : [];
   const normalized = scenarios.map((scenario: any) => {
-    const value = Object.fromEntries(["id", "dimension", "stress_axis", "requirement_id", "procedure", "evidence", "result", "remediation"].map((key) => [key, String(scenario[key] || "").trim()]));
-    if (!value.id || !RRI_T_DIMENSIONS.has(value.dimension) || !RRI_T_STRESS_AXES.has(value.stress_axis) || !value.requirement_id || !value.procedure || !value.evidence || !RRI_T_RESULTS.has(value.result)) throw new Error(`RRI-T ${expectedPersona} returned an invalid scenario`);
+    const value = Object.fromEntries(["id", "dimension", "stress_axis", "requirement_id", "procedure", "remediation_hint", "evidence", "result", "remediation"].map((key) => [key, String(scenario[key] || "").trim()]));
+    // RRI-T authoring boundary: personas author the six scenario fields only;
+    // evidence/result are contractor-phase execution records, so they are not
+    // required and are ignored when present. A concrete procedure must pair a
+    // command with its expected observable (`command → expected`).
+    if (!value.id || !RRI_T_DIMENSIONS.has(value.dimension) || !RRI_T_STRESS_AXES.has(value.stress_axis) || !value.requirement_id || !value.procedure || !hasConcreteProcedure(value.procedure) || !value.remediation_hint) throw new Error(`RRI-T ${expectedPersona} returned an invalid scenario`);
     return value;
   });
   const notApplicable = parsed.not_applicable?.topic ? (Array.isArray(parsed.not_applicable.topic) ? parsed.not_applicable.topic : [parsed.not_applicable.topic]).map((topic: any) => ({ topic: String(topic.topic || ""), reason: String(topic.reason || "") })) : [];
@@ -1346,7 +1360,7 @@ export class PipelineScheduler {
       return true;
     });
     const notApplicable = results.flatMap((result) => result.not_applicable.map((topic: any) => ({ ...topic, persona: result.persona })));
-    const counts = scenarios.reduce((summary: Record<string, number>, scenario: any) => { summary[scenario.result.toLowerCase()] = (summary[scenario.result.toLowerCase()] || 0) + 1; return summary; }, {});
+    const counts = scenarios.reduce((summary: Record<string, number>, scenario: any) => { const result = scenario.result; if (result) summary[result.toLowerCase()] = (summary[result.toLowerCase()] || 0) + 1; return summary; }, {});
     return JSON.stringify({ methodology: "rri-t", personas: uniquePersonas, scenarios, not_applicable: notApplicable, open_blockers: results.flatMap((result) => result.open_blockers), summary: counts });
   }
 

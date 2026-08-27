@@ -420,10 +420,21 @@ test("RRI persona handoffs require strict assigned-persona XML", () => {
   assert.throws(() => parseRriPersonaResult(valid.replace("<reason>Recovery policy is unspecified</reason>", ""), "QA / Tester"), /candidate question missing or invalid: reason element/);
 });
 
-test("RRI-T persona results require requirement-bound executable scenarios", () => {
-  const valid = `<rri_t_persona persona="QA / Tester"><scenarios><scenario><id>RRI-T-1</id><dimension>D3</dimension><stress_axis>ERROR</stress_axis><requirement_id>REQ-1</requirement_id><procedure>Submit invalid input</procedure><evidence>go test ./...</evidence><result>PASS</result><remediation></remediation></scenario></scenarios><not_applicable></not_applicable><open_blockers></open_blockers></rri_t_persona>`;
-  assert.equal(parseRriTPersonaResult(valid, "QA / Tester").scenarios[0].result, "PASS");
+test("RRI-T persona results accept the six-field authoring contract and ignore legacy grading fields", () => {
+  const valid = `<rri_t_persona persona="QA / Tester"><scenarios><scenario><id>RRI-T-1</id><dimension>D3</dimension><stress_axis>ERROR</stress_axis><requirement_id>REQ-1</requirement_id><procedure>Submit the empty form → inline error is shown</procedure><remediation_hint>Assert the error text on the form</remediation_hint></scenario></scenarios><not_applicable></not_applicable><open_blockers></open_blockers></rri_t_persona>`;
+  const parsed = parseRriTPersonaResult(valid, "QA / Tester");
+  assert.equal(parsed.scenarios[0].id, "RRI-T-1");
+  assert.equal(parsed.scenarios[0].remediation_hint, "Assert the error text on the form");
+  assert.equal(parsed.scenarios[0].result, "");
+  assert.equal(parseRriTPersonaResult(valid.replace("→", "->"), "QA / Tester").scenarios[0].procedure.includes("->"), true);
+  const legacy = valid.replace("<remediation_hint>", "<evidence>go test ./...</evidence><result>PASS</result><remediation></remediation><remediation_hint>");
+  assert.equal(parseRriTPersonaResult(legacy, "QA / Tester").scenarios[0].result, "PASS");
   assert.throws(() => parseRriTPersonaResult(valid.replace("REQ-1", ""), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "Submit invalid input"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "→ inline error is shown"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "Submit the empty form →"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "->"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("<remediation_hint>Assert the error text on the form</remediation_hint>", ""), "QA / Tester"), /invalid scenario/);
 });
 
 
