@@ -15,6 +15,8 @@ import { resolveSkillDirectories, resolvedSkillNames } from "./skills.ts";
 export type SpawnFunction = typeof spawn;
 export const MANAGED_WORKER_DEADLINE_MS = 30 * 60 * 1000;
 export const REVIEW_DEADLINE_MS = 20 * 60 * 1000;
+// Review-fix constraint: allow complex rejected-candidate repairs more wall time than first-pass workers.
+export const REVIEW_FIX_DEADLINE_MS = 45 * 60 * 1000;
 // Watchdog constraint: a managed child silent this long is wedged (provider hang),
 // not thinking — pi JSON mode emits stdout events continuously during live turns.
 export const RUNNER_INACTIVITY_KILL_MS = 15 * 60 * 1000;
@@ -283,7 +285,7 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
   let settled = false;
   let stopChild = () => {};
   // Test/ops override hooks: per-spec caps so unit tests need not wait real minutes.
-  const stageDeadlineMs = (spec as any).deadlineMs ?? (spec.stage === "review" ? REVIEW_DEADLINE_MS : MANAGED_WORKER_DEADLINE_MS);
+  const stageDeadlineMs = (spec as any).deadlineMs ?? (spec.stage === "review" ? REVIEW_DEADLINE_MS : spec.initialPatchPath ? REVIEW_FIX_DEADLINE_MS : MANAGED_WORKER_DEADLINE_MS);
   const inactivityKillMs = (spec as any).inactivityKillMs ?? RUNNER_INACTIVITY_KILL_MS;
   let deadlineTimer: NodeJS.Timeout | undefined;
   let activityTimer: NodeJS.Timeout | undefined;
