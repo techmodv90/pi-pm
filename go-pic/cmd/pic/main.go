@@ -401,6 +401,9 @@ func initDB(path string) error {
 			}
 		}
 	}
+	if err := migrateArtifactStageSchema(db); err != nil {
+		return fmt.Errorf("migrate artifact stage schema: %w", err)
+	}
 	statements := []string{
 		`PRAGMA journal_mode = WAL`,
 		`PRAGMA foreign_keys = ON`,
@@ -409,8 +412,8 @@ func initDB(path string) error {
 		`CREATE TABLE IF NOT EXISTS work_item_dependencies (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, depends_on_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,depends_on_work_item_id), CHECK(work_item_id!=depends_on_work_item_id))`,
 		`CREATE TABLE IF NOT EXISTS work_item_gates (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, gate_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,gate_work_item_id), CHECK(work_item_id!=gate_work_item_id))`,
 		`CREATE TABLE IF NOT EXISTS work_item_relations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, relation_type TEXT NOT NULL CHECK(relation_type IN ('blocks','gates','related')), related_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,relation_type,related_work_item_id), CHECK(work_item_id!=related_work_item_id))`,
-		`CREATE TABLE IF NOT EXISTS work_item_artifacts (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','vision','blueprint','contracts','task_graph')), revision INTEGER NOT NULL CHECK(revision>0), content TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,revision))`,
-		`CREATE TABLE IF NOT EXISTS workflow_checkpoints (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','vision','blueprint','contracts','task_graph')), artifact_id TEXT NOT NULL, artifact_revision INTEGER NOT NULL CHECK(artifact_revision>0), content_hash TEXT NOT NULL, decision_type TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,artifact_revision))`,
+		workItemArtifactsTableSQL,
+		workflowCheckpointsTableSQL,
 		`CREATE TABLE IF NOT EXISTS implementation_authorizations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, task_graph_checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), authorized_by TEXT NOT NULL, revoked_at TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
 		`CREATE TABLE IF NOT EXISTS work_item_materializations (root_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), node_key TEXT NOT NULL, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(root_work_item_id,checkpoint_id,node_key))`,
 		`CREATE TABLE IF NOT EXISTS work_item_instruction_packs (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), version INTEGER NOT NULL CHECK(version>0), status TEXT NOT NULL DEFAULT 'inactive' CHECK(status IN ('inactive','active','stale')), content_json TEXT NOT NULL, content_hash TEXT NOT NULL, activated_at TEXT DEFAULT '', stale_at TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,version))`,

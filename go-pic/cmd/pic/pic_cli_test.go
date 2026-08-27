@@ -2455,3 +2455,228 @@ Then the scaffold mounts')`)
 		t.Fatalf("task graph not amended")
 	}
 }
+
+func TestRriTScenarioArtifact(t *testing.T) {
+	t.Setenv("PI_TASK_AGENT_NAME", "")
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Scenario Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	scenariosA := `{"methodology":"rri-t","personas":["End User"],"scenarios":[{"id":"SC-1","persona":"End User","dimension":"D1","stress_axis":"TIME","requirement_id":"REQ-001","procedure":"Run the helper flow","evidence":"go test ./...","result":"PASS"}]}`
+	scenariosB := strings.Replace(scenariosA, "Run the helper flow", "Run the trimmed flow", 1)
+
+	// Unknown artifact stages stay fail-closed: rejected before any row is written.
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "bogus_stage", scenariosA); !strings.Contains(out, "usage") {
+		t.Fatalf("unknown stage error = %s", out)
+	}
+
+	// Existing planning stages keep their save/approve behavior unchanged.
+	scanArtifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "<scan_report/>"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scanArtifact["id"].(string), "accepted")
+	rriArtifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "<rri_report/>"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", rriArtifact["id"].(string), "approved")
+
+	// Fresh SQLite schema and the artifact-save stage registry accept rri_t_scenarios.
+	saved1 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosA))
+	if saved1["stage"] != "rri_t_scenarios" || saved1["revision"] != float64(1) || saved1["content_hash"] != hashJSON(scenariosA) {
+		t.Fatalf("scenario artifact = %#v", saved1)
+	}
+	// The supplementary rri_t_scenarios stage is reported for owner visibility but
+	// never becomes next_stage: the gated planning workflow still progresses normally.
+	if status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id)); status["next_stage"] != "vision" {
+		t.Fatalf("scenario save gated workflow: %#v", status)
+	}
+
+	// The saved scenario list is owner-visible through the existing show path.
+	shown := asObject(t, runPic(t, bin, root, home, "show", id))
+	scenarioRows := 0
+	for _, raw := range shown["artifacts"].([]any) {
+		row := raw.(map[string]any)
+		if row["stage"] == "rri_t_scenarios" {
+			scenarioRows++
+			if row["content"] != scenariosA || row["content_hash"] != hashJSON(scenariosA) {
+				t.Fatalf("show scenario row = %#v", row)
+			}
+		}
+	}
+	if scenarioRows != 1 {
+		t.Fatalf("show artifacts = %#v", shown["artifacts"])
+	}
+
+	// A later save creates a new immutable revision and cannot mutate the prior one.
+	saved2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosB))
+	if saved2["revision"] != float64(2) {
+		t.Fatalf("second scenario artifact = %#v", saved2)
+	}
+	if out, err := exec.Command("sqlite3", dbPath, `UPDATE work_item_artifacts SET content='mutated' WHERE id='`+saved1["id"].(string)+`';`).CombinedOutput(); err == nil || !strings.Contains(string(out), "immutable") {
+		t.Fatalf("scenario artifact mutation err=%v out=%s", err, out)
+	}
+
+	// Approve the full downstream lineage, then re-save scenarios: only downstream
+	// checkpoints (vision onward) are invalidated; scan/rri stay valid.
+	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES
+		('wia-vision','`+id+`','vision',1,'<vision/>','h-vision'),
+		('wia-blueprint','`+id+`','blueprint',1,'<blueprint/>','h-blueprint'),
+		('wia-contracts','`+id+`','contracts',1,'<contracts/>','h-contracts'),
+		('wia-graph','`+id+`','task_graph',1,'{}','h-graph');
+		INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-vision','`+id+`','vision','wia-vision',1,'h-vision','approved'),
+		('wic-blueprint','`+id+`','blueprint','wia-blueprint',1,'h-blueprint','approved'),
+		('wic-contracts','`+id+`','contracts','wia-contracts',1,'h-contracts','approved'),
+		('wic-graph','`+id+`','task_graph','wia-graph',1,'h-graph','approved')`)
+	if status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id)); status["next_stage"] != "materialize" {
+		t.Fatalf("full lineage status = %#v", status)
+	}
+	_ = asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosB))
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "vision" {
+		t.Fatalf("downstream invalidation status = %#v", status)
+	}
+	checkpoints := status["checkpoints"].(map[string]any)
+	if checkpoints["scan"] != true || checkpoints["rri"] != true || checkpoints["rri_t_scenarios"] == true || checkpoints["vision"] == true || checkpoints["blueprint"] == true || checkpoints["contracts"] == true || checkpoints["task_graph"] == true {
+		t.Fatalf("checkpoint invalidation = %#v", checkpoints)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, stage := range []string{"scan", "rri"} {
+		var count int
+		if err = db.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, id, stage).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("upstream %s checkpoint count=%d err=%v", stage, count, err)
+		}
+	}
+	for _, stage := range []string{"vision", "blueprint", "contracts", "task_graph"} {
+		var count int
+		if err = db.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, id, stage).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("downstream %s checkpoint count=%d err=%v", stage, count, err)
+		}
+	}
+	// Approved artifact history is retained, not deleted or rewritten.
+	var artifacts, scenarioArtifacts int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, id).Scan(&artifacts)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri_t_scenarios'`, id).Scan(&scenarioArtifacts)
+	if artifacts != 9 || scenarioArtifacts != 3 {
+		t.Fatalf("retained artifacts=%d scenario_artifacts=%d", artifacts, scenarioArtifacts)
+	}
+	var originalContent string
+	if err = db.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=?`, saved1["id"].(string)).Scan(&originalContent); err != nil || originalContent != scenariosA {
+		t.Fatalf("revision 1 content = %q err=%v", originalContent, err)
+	}
+}
+
+// TestRriTScenarioArtifactLegacySchemaMigration is the regression guard for the
+// pre-change database path: initDB runs on every command but never rebuilds
+// existing work_item_artifacts/workflow_checkpoints, so a project created
+// before the additive stage still carries the old CHECK constraints. The test
+// recreates those tables exactly as the old schema persisted them (old CHECK
+// list, old lookup indexes, old immutable triggers) with owned planning rows,
+// then verifies that the first rri_t_scenarios save migrates both tables,
+// preserves every pre-existing row and immutable-history trigger, and keeps the
+// existing planning checkpoints gate-compatible.
+func TestRriTScenarioArtifactLegacySchemaMigration(t *testing.T) {
+	t.Setenv("PI_TASK_AGENT_NAME", "")
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Migration Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	// Simulate the pre-change schema: drop the fresh-schema tables and rebuild
+	// them with the original CHECK constraints, triggers, and indexes, seeded
+	// with the owned scan/rri planning history of the created epic.
+	runSQLite(t, dbPath, fmt.Sprintf(`DROP TRIGGER IF EXISTS trg_work_item_artifact_immutable;
+DROP TRIGGER IF EXISTS trg_work_item_artifact_delete_immutable;
+DROP TABLE workflow_checkpoints;
+DROP TABLE work_item_artifacts;
+CREATE TABLE work_item_artifacts (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','vision','blueprint','contracts','task_graph')), revision INTEGER NOT NULL CHECK(revision>0), content TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,revision));
+CREATE TABLE workflow_checkpoints (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','vision','blueprint','contracts','task_graph')), artifact_id TEXT NOT NULL, artifact_revision INTEGER NOT NULL CHECK(artifact_revision>0), content_hash TEXT NOT NULL, decision_type TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,artifact_revision));
+CREATE INDEX idx_work_item_artifacts_item_stage ON work_item_artifacts(work_item_id,stage,revision DESC);
+CREATE INDEX idx_workflow_checkpoints_item_stage ON workflow_checkpoints(work_item_id,stage,artifact_revision DESC);
+CREATE TRIGGER trg_work_item_artifact_immutable BEFORE UPDATE ON work_item_artifacts BEGIN SELECT RAISE(ABORT,'work item artifacts are immutable'); END;
+CREATE TRIGGER trg_work_item_artifact_delete_immutable BEFORE DELETE ON work_item_artifacts WHEN EXISTS(SELECT 1 FROM workflow_checkpoints WHERE artifact_id=OLD.id) BEGIN SELECT RAISE(ABORT,'approved work item artifacts are immutable'); END;
+INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES
+  ('wia-legacy-scan','%s','scan',1,'<scan/>','h-legacy-scan'),
+  ('wia-legacy-rri','%s','rri',1,'<rri/>','h-legacy-rri');
+INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+  ('wic-legacy-scan','%s','scan','wia-legacy-scan',1,'h-legacy-scan','accepted'),
+  ('wic-legacy-rri','%s','rri','wia-legacy-rri',1,'h-legacy-rri','approved');`, id, id, id, id))
+
+	// The first pic command opens the DB and initDB migrates the old CHECK
+	// constraints; the rri_t_scenarios save must now succeed.
+	scenariosA := `{"methodology":"rri-t","personas":["End User"],"scenarios":[{"id":"SC-1","persona":"End User","dimension":"D1","stress_axis":"TIME","requirement_id":"REQ-001","procedure":"Run the helper flow","evidence":"go test ./...","result":"PASS"}]}`
+	saved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosA))
+	if saved["stage"] != "rri_t_scenarios" || saved["revision"] != float64(1) {
+		t.Fatalf("scenario artifact after legacy migration = %#v", saved)
+	}
+
+	// Both tables now carry the widened CHECK, every legacy row survived, and
+	// the lookup indexes and immutable triggers were recreated on the fresh
+	// tables rather than left behind on the renamed legacy ones.
+	var artifactsSQL, checkpointsSQL string
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='work_item_artifacts'`).Scan(&artifactsSQL); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='workflow_checkpoints'`).Scan(&checkpointsSQL); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(artifactsSQL, "rri_t_scenarios") || !strings.Contains(checkpointsSQL, "rri_t_scenarios") {
+		t.Fatalf("CHECK not widened: artifacts=%q checkpoints=%q", artifactsSQL, checkpointsSQL)
+	}
+	for _, expected := range []string{"wia-legacy-scan", "wia-legacy-rri", "wic-legacy-scan", "wic-legacy-rri", saved["id"].(string)} {
+		table := "workflow_checkpoints"
+		if strings.HasPrefix(expected, "wia-") {
+			table = "work_item_artifacts"
+		}
+		var exists int
+		if err = db.QueryRow(`SELECT COUNT(*) FROM "`+table+`" WHERE id=?`, expected).Scan(&exists); err != nil || exists != 1 {
+			t.Fatalf("row %s preserved: count=%d err=%v", expected, exists, err)
+		}
+	}
+	var triggerCount int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('trg_work_item_artifact_immutable','trg_work_item_artifact_delete_immutable') AND tbl_name='work_item_artifacts'`).Scan(&triggerCount)
+	if triggerCount != 2 {
+		t.Fatalf("immutable triggers on rebuilt table = %d", triggerCount)
+	}
+	for _, index := range []string{"idx_work_item_artifacts_item_stage", "idx_workflow_checkpoints_item_stage"} {
+		var indexCount int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?`, index, strings.TrimSuffix(strings.TrimPrefix(index, "idx_"), "_item_stage")).Scan(&indexCount)
+		if indexCount != 1 {
+			t.Fatalf("index %s not recreated", index)
+		}
+	}
+
+	// The immutable-history invariants still hold after the migration: UPDATE
+	// and approved DELETE are rejected, the legacy checkpoint lineage is intact.
+	if out, err := exec.Command("sqlite3", dbPath, `UPDATE work_item_artifacts SET content='mutated' WHERE id='`+saved["id"].(string)+`';`).CombinedOutput(); err == nil || !strings.Contains(string(out), "immutable") {
+		t.Fatalf("migrated scenario artifact mutation err=%v out=%s", err, out)
+	}
+	if out, err := exec.Command("sqlite3", dbPath, `DELETE FROM work_item_artifacts WHERE id='wia-legacy-scan';`).CombinedOutput(); err == nil || !strings.Contains(string(out), "immutable") {
+		t.Fatalf("migrated approved artifact delete err=%v out=%s", err, out)
+	}
+
+	// Existing approved scan/rri checkpoints survived the migration and still
+	// gate the planning workflow forward (next_stage vision), never backwards.
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "vision" {
+		t.Fatalf("legacy migration workflow status = %#v", status)
+	}
+	checkpoints := status["checkpoints"].(map[string]any)
+	if checkpoints["scan"] != true || checkpoints["rri"] != true || checkpoints["rri_t_scenarios"] == true {
+		t.Fatalf("legacy migration checkpoints = %#v", checkpoints)
+	}
+	var artifacts, checkpointsCount int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, id).Scan(&artifacts)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=?`, id).Scan(&checkpointsCount)
+	if artifacts != 3 || checkpointsCount != 2 {
+		t.Fatalf("legacy retained artifacts=%d checkpoints=%d", artifacts, checkpointsCount)
+	}
+}

@@ -48,6 +48,13 @@ const workItemsTableSQL = `CREATE TABLE IF NOT EXISTS work_items (
 	created_at TEXT DEFAULT (datetime('now'))
 )`
 
+// Artifact stage taxonomy constraint: rri_t_scenarios is an additive retained
+// scenario-list stage in both SQLite CHECK constraints; the original planning
+// stage names and their gating behavior stay unchanged.
+const workItemArtifactsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_artifacts (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','rri_t_scenarios','vision','blueprint','contracts','task_graph')), revision INTEGER NOT NULL CHECK(revision>0), content TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,revision))`
+
+const workflowCheckpointsTableSQL = `CREATE TABLE IF NOT EXISTS workflow_checkpoints (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','rri_t_scenarios','vision','blueprint','contracts','task_graph')), artifact_id TEXT NOT NULL, artifact_revision INTEGER NOT NULL CHECK(artifact_revision>0), content_hash TEXT NOT NULL, decision_type TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,artifact_revision))`
+
 var ownedWorkflowTableSQL = map[string]string{
 	// Canonical Work Item flow stores wi-/wip- IDs in task_id/epic_id, so these
 	// tables must not carry legacy REFERENCES tasks(id)/epics(id) constraints;
@@ -93,6 +100,46 @@ func migrateEpicWorkflowSchema(db *sql.DB) error {
 		}
 	}
 	return migrateLegacyWorkItems(db)
+}
+
+// migrateArtifactStageSchema extends the additive rri_t_scenarios CHECK
+// constraint on databases created before the stage existed. initDB runs on
+// every command but CREATE TABLE IF NOT EXISTS never touches existing tables,
+// so an existing project would keep rejecting rri_t_scenarios rows. The
+// migration rebuilds only the two stage-constrained tables, maps the original
+// artifact and checkpoint rows onto the widened schema, and leaves every other
+// table alone. The post-migration initDB statement pass recreates the
+// immutable-history triggers and lookup indexes on the rebuilt tables (they are
+// dropped here first because the old objects would otherwise travel with the
+// renamed legacy table and be dropped with it, or shadow the IF NOT EXISTS
+// recreation).
+func migrateArtifactStageSchema(db *sql.DB) error {
+	for table, createSQL := range map[string]string{
+		"work_item_artifacts":  workItemArtifactsTableSQL,
+		"workflow_checkpoints": workflowCheckpointsTableSQL,
+	} {
+		if !tableExists(db, table) {
+			continue
+		}
+		var tableSQL string
+		if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&tableSQL); err != nil {
+			return err
+		}
+		if strings.Contains(tableSQL, "rri_t_scenarios") {
+			continue
+		}
+		// Drop the artifact immutable triggers so the statement pass recreates
+		// them on the rebuilt tables instead of leaving them on the renamed one.
+		for _, trigger := range []string{"trg_work_item_artifact_immutable", "trg_work_item_artifact_delete_immutable"} {
+			if _, err := db.Exec(`DROP TRIGGER IF EXISTS ` + trigger); err != nil {
+				return err
+			}
+		}
+		if err := rebuildSchemaTable(db, table, createSQL); err != nil {
+			return fmt.Errorf("migrate %s stage CHECK: %w", table, err)
+		}
+	}
+	return nil
 }
 
 // hasLegacySubjectForeignKey reports whether table still carries a REFERENCES

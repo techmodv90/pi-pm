@@ -855,7 +855,7 @@ func workItemClaim(db *sql.DB, args []string) error {
 	return err
 }
 
-var workItemStages = []string{"scan", "rri", "vision", "blueprint", "contracts", "task_graph"}
+var workItemStages = []string{"scan", "rri", "rri_t_scenarios", "vision", "blueprint", "contracts", "task_graph"}
 
 type rriFinalization struct {
 	Requirements []struct {
@@ -1881,6 +1881,11 @@ func workItemWorkflowStatus(db *sql.DB, args []string) error {
 			return err
 		}
 		checkpoints[stage] = approved
+		// rri_t_scenarios is a supplementary retained scenario artifact: it is
+		// reported for owner visibility but never gates the planning workflow.
+		if stage == "rri_t_scenarios" {
+			continue
+		}
 		if !approved && next == "materialize" {
 			next = stage
 		}
