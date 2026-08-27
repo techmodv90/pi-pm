@@ -1920,7 +1920,7 @@ export class PipelineScheduler {
         const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state, scan_report: output })], this.cwd);
         if (result.error) throw new Error(result.error);
         const handoffId = this.handoffs.put("scan", run.task_id, output);
-        this.pi.sendUserMessage(`Scan evidence ready for contractor synthesis for ${run.task_id}. Load ephemeral handoff ${handoffId}, validate every section against source, resolve contradictions, and save one canonical Scan Report as structured XML matching this schema:\n\n${CANONICAL_SCAN_REPORT_XML_FORMAT}\n\nDo not format owner-facing Markdown; the task_manager tool renders the saved XML deterministically. Otherwise reject the scan. The handoff expires after five minutes and is never persisted.`, { deliverAs: "followUp" });
+        this.pi.sendUserMessage(`Scan evidence ready for contractor synthesis for ${run.task_id}. Load ephemeral handoff ${handoffId}, validate every section against source, resolve contradictions, and save one canonical Scan Report as structured XML matching this schema:\n\n${CANONICAL_SCAN_REPORT_XML_FORMAT}\n\nDo not format owner-facing Markdown; the task_manager tool renders the saved XML deterministically. Otherwise reject the scan. The handoff expires five minutes after first load and is never persisted.`, { deliverAs: "followUp" });
         checkpoint(run, "advanced", this.cwd);
         return;
       }
@@ -2143,7 +2143,7 @@ export class PipelineScheduler {
       : run.stage === "blueprint"
         ? "load the temporary draft with load_blueprint_draft, validate its JSON content, and use its draft_id for review_blueprint_checkpoint; revise through save_blueprint_draft if needed, then present the checked draft for owner approval; do not call save_work_item_artifact"
         : `validate the result, save the ${run.stage} artifact, and present it for owner approval`;
-    this.pi.sendUserMessage(`${run.stage.toUpperCase()} analysis ready for ${run.task_id}. Load ephemeral handoff ${handoffId}, ${action}. The handoff expires after five minutes and is never persisted.`, { deliverAs: "followUp" });
+    this.pi.sendUserMessage(`${run.stage.toUpperCase()} analysis ready for ${run.task_id}. Load ephemeral handoff ${handoffId}, ${action}. The handoff expires five minutes after first load and is never persisted.`, { deliverAs: "followUp" });
   }
 
 

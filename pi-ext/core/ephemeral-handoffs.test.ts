@@ -21,5 +21,23 @@ test("ephemeral handoffs are bounded, expire, and remain readable until finalize
 
   const expiring = store.put("scan", "wi-3", "abc");
   now = 111;
+  assert.equal(store.get(expiring, "wi-3")?.payload, "abc");
+  now = 122;
   assert.equal(store.get(expiring, "wi-3"), undefined);
+
+  const unread = store.put("scan", "wi-4", "def");
+  now = 200;
+  assert.equal(store.get(unread, "wi-4")?.payload, "def");
+  now = 211;
+  assert.equal(store.get(unread, "wi-4"), undefined);
+});
+
+test("unread ephemeral handoffs survive past the read TTL for the delivery window", () => {
+  let now = 100;
+  const store = new EphemeralHandoffStore(10, 1024, 1024, () => now, 100);
+  const late = store.put("scan", "wi-1", "123456");
+  now = 150;
+  assert.equal(store.get(late, "wi-1")?.payload, "123456");
+  now = 161;
+  assert.equal(store.get(late, "wi-1"), undefined);
 });
