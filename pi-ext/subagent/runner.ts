@@ -1,7 +1,7 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
@@ -32,6 +32,10 @@ export function buildPiInvocation(args: string[], script = process.argv[1]): { c
   const runtime = process.execPath.toLowerCase().split(/[\\/]/).pop() || "";
   if (!/^(node|bun)(\.exe)?$/.test(runtime)) return { command: process.execPath, args };
   return { command: "pi", args };
+}
+
+export function getAppendSystemPromptPaths(agentName: string, systemPrompt: string, promptPath: string, globalPromptPath = join(homedir(), ".pi", "agent", "APPEND_SYSTEM.md")): string[] {
+  return [agentName === "task-worker" && existsSync(globalPromptPath) ? globalPromptPath : "", systemPrompt.trim() ? promptPath : ""].filter(Boolean);
 }
 
 export function parseJsonEvent(line: string): any | null {
@@ -264,7 +268,7 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
   if (spec.agent.thinking) args.push("--thinking", spec.agent.thinking);
   if (spec.agent.tools?.length) args.push("--tools", spec.agent.tools.join(","));
   for (const directory of skillDirectories) args.push("--skill", directory);
-  if (spec.agent.systemPrompt.trim()) args.push("--append-system-prompt", promptPath);
+  for (const path of getAppendSystemPromptPaths(spec.agent.name, spec.agent.systemPrompt, promptPath)) args.push("--append-system-prompt", path);
   const patchedTask = spec.initialPatchPath
     ? spec.stage === "review"
       ? `${spec.task}\n\nCANDIDATE ATTESTATION: The bound candidate patch has been applied to this isolated worktree. Review this worktree, not the parent checkout.`

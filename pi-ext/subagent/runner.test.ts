@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { assertManagedAcceptance, buildPiInvocation, classifyRunnerTransientFault, finalAssistantText, parseJsonEvent, prepareSubagentWorktree, removeSubagentWorktree, RUNNER_TRANSIENT_RETRIES, startSubagent, startSubagentResilient } from "./runner.ts";
+import { assertManagedAcceptance, buildPiInvocation, classifyRunnerTransientFault, finalAssistantText, getAppendSystemPromptPaths, parseJsonEvent, prepareSubagentWorktree, removeSubagentWorktree, RUNNER_TRANSIENT_RETRIES, startSubagent, startSubagentResilient } from "./runner.ts";
 import { AgentRunTracker } from "./tracker.ts";
 
 process.env.PI_TASK_HERDR_PANEL = "0";
@@ -115,6 +115,15 @@ test("startSubagent publishes finalizing before terminal completion", async () =
 
 test("buildPiInvocation runs the installed pi command outside a node script", () => {
   assert.deepEqual(buildPiInvocation(["--mode", "json"], "/$bunfs/root/pi"), { command: "pi", args: ["--mode", "json"] });
+});
+
+test("task-worker appends global APPEND_SYSTEM.md before its role prompt", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-worker-append-system-"));
+  const globalPrompt = join(cwd, "APPEND_SYSTEM.md");
+  const rolePrompt = join(cwd, "task-worker-system-prompt.md");
+  writeFileSync(globalPrompt, "global rules");
+  assert.deepEqual(getAppendSystemPromptPaths("task-worker", "role rules", rolePrompt, globalPrompt), [globalPrompt, rolePrompt]);
+  assert.deepEqual(getAppendSystemPromptPaths("task-reviewer", "review rules", rolePrompt, globalPrompt), [rolePrompt]);
 });
 
 test("startSubagent forwards the agent thinking level to pi", async () => {
