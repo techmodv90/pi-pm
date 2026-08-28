@@ -44,11 +44,14 @@ function rriDraftRoot(cwd: string): string {
   return project.root_path;
 }
 
-// RRI-T execution ordering: a graded scenario must reference a persisted
-// rri_t_scenarios artifact identity verbatim, so fabricated or unpersisted
-// scenarios can never reach aggregate verification.
+// RRI-T scenario identity constraint: the id-based identity
+// (dimension|stress_axis|requirement_id|id) — shared with the canonical Go
+// validator and the authoring merge — never the persona, so two persisted
+// scenarios may share persona, dimension, stress axis, and requirement while
+// remaining distinct by id, and one persisted scenario can be deferred at most
+// once.
 function rriTScenarioIdentity(scenario: any): string {
-  return `${scenario.persona}|${scenario.dimension}|${scenario.stress_axis}|${scenario.requirement_id}`;
+  return `${scenario.dimension}|${scenario.stress_axis}|${scenario.requirement_id}|${scenario.id}`;
 }
 
 // RRI-T save-before-execution (OB-5): persist the validated persona authoring
@@ -101,7 +104,7 @@ function compileRriTSubmission(data: any, gradedJson: string): string {
     if (String(grade.procedure || "").trim() !== String(match.procedure || "").trim()) throw new Error(`graded scenario ${key} must reuse the persisted procedure verbatim`);
     if (!String(grade.evidence || "").trim()) throw new Error(`graded scenario ${key} requires executed evidence`);
     if (!["PASS", "ACCEPTABLE", "PAINFUL", "FAIL"].includes(String(grade.result || ""))) throw new Error(`graded scenario ${key} result must be PASS, ACCEPTABLE, PAINFUL, or FAIL`);
-    scenarios.push({ persona: match.persona, dimension: match.dimension, stress_axis: match.stress_axis, requirement_id: match.requirement_id, procedure: match.procedure, evidence: String(grade.evidence).trim(), result: String(grade.result).trim() });
+    scenarios.push({ id: match.id, persona: match.persona, dimension: match.dimension, stress_axis: match.stress_axis, requirement_id: match.requirement_id, procedure: match.procedure, evidence: String(grade.evidence).trim(), result: String(grade.result).trim() });
   }
   const notApplicable: any[] = [];
   for (const grade of graded.not_applicable || []) {

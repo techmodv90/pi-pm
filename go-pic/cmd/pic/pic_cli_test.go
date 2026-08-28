@@ -2680,3 +2680,73 @@ INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revi
 		t.Fatalf("legacy retained artifacts=%d checkpoints=%d", artifacts, checkpointsCount)
 	}
 }
+
+// TestRriTScenarioIdentityContract is the end-to-end guard for the RRI-T
+// id-based scenario identity contract: graded scenarios deduplicate on
+// (dimension|stress_axis|requirement_id|id) exactly like the TypeScript grading
+// compiler, so two persisted scenarios that share persona, dimension, stress
+// axis, and requirement but differ in id are distinct outcomes — while a
+// duplicate deferred disposition (the same persisted scenario deferred twice via
+// not_applicable) is rejected and the PASS/ACCEPTABLE/PAINFUL/FAIL result
+// mapping stays unchanged.
+func TestRriTScenarioIdentityContract(t *testing.T) {
+	t.Setenv("PI_TASK_AGENT_NAME", "")
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Identity Epic"))
+	id := epic["id"].(string)
+	child := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Done child", "--parent", id))
+	runPic(t, bin, root, home, "work-item", "status", child["id"].(string), "done")
+	// RRI-T scenarios are requirement-bound: REQ-001 is an approved aggregate requirement.
+	runSQLite(t, filepath.Join(root, ".pi", "tasks.db"), `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria,priority,status) VALUES('req-identity','`+id+`','REQ-001','Identity requirement','Given sc-1 and sc-2 When graded Then both count','tier1','pending')`)
+
+	// Persist two scenarios sharing persona, dimension, stress axis, and
+	// requirement but differing in id; the artifact is owner-visible and retained.
+	scenarios := `{"methodology":"rri-t","personas":["QA / Tester"],"scenarios":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","remediation_hint":"assert inline error"},
+		{"id":"SC-2","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the malformed payload","remediation_hint":"assert rejection"}]}`
+	saved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenarios))
+	if saved["stage"] != "rri_t_scenarios" {
+		t.Fatalf("scenario artifact = %#v", saved)
+	}
+
+	// Both distinct id-based outcomes are accepted by aggregate verification.
+	graded := `{"scenarios":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"go test ./... passed","result":"PASS"},
+		{"id":"SC-2","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the malformed payload","evidence":"go test ./... passed","result":"PASS"}]}`
+	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "identity outcomes verified", "--actor-role", "contractor", "--rri-t-json", graded))
+	if report["status"] != "passed" {
+		t.Fatalf("distinct id-based outcomes rejected: %#v", report)
+	}
+
+	// A repeated graded identity is still rejected as a duplicate.
+	duplicate := `{"scenarios":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"ran","result":"PASS"},
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"ran","result":"PASS"}]}`
+	if out := runPicError(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "duplicate", "--actor-role", "contractor", "--rri-t-json", duplicate); !strings.Contains(out, "duplicate RRI-T scenario") {
+		t.Fatalf("duplicate graded identity err = %s", out)
+	}
+
+	// A duplicate deferred disposition (the same persisted scenario deferred twice
+	// via not_applicable) is rejected, so one scenario can be deferred at most once.
+	deferred := `{"scenarios":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"go test ./... passed","result":"PASS"},
+		{"id":"SC-2","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the malformed payload","evidence":"go test ./... passed","result":"PASS"}],"not_applicable":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","reason":"cannot run against the integrated repo"},
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","reason":"cannot run against the integrated repo"}]}`
+	if out := runPicError(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "deferred duplicate", "--actor-role", "contractor", "--rri-t-json", deferred); !strings.Contains(out, "duplicate RRI-T scenario") {
+		t.Fatalf("duplicate deferred disposition err = %s", out)
+	}
+
+	// The result mapping is unchanged: a PAINFUL result still blocks aggregate
+	// passage until remediation or explicit owner deferral, and a FAIL result is
+	// still rejected outright.
+	painful := `{"scenarios":[{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"observed friction","result":"PAINFUL"}]}`
+	if out := runPicError(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "painful", "--actor-role", "contractor", "--rri-t-json", painful); !strings.Contains(out, "remediation or owner deferral") {
+		t.Fatalf("PAINFUL passage err = %s", out)
+	}
+	failed := `{"scenarios":[{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"broken","result":"FAIL"}]}`
+	if out := runPicError(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "failed", "--actor-role", "contractor", "--rri-t-json", failed); !strings.Contains(out, "remediation or owner deferral") {
+		t.Fatalf("FAIL passage err = %s", out)
+	}
+}

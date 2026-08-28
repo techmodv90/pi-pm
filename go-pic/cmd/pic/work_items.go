@@ -2008,9 +2008,16 @@ func aggregateDeliveryWorkflowStatus(db *sql.DB, id string) (map[string]any, boo
 	return state, true, nil
 }
 
+// RRI-T scenario identity constraint: the canonical dedupe key is the id-based
+// identity (dimension|stress_axis|requirement_id|id) shared with the TypeScript
+// grading compiler — never the authoring persona — so two persisted scenarios may
+// share persona, dimension, stress axis, and requirement while staying distinct
+// by id. Deferred dispositions (the compiled not_applicable records) deduplicate
+// on the same identity, so one persisted scenario can be deferred at most once.
 func validateRriTVerification(db *sql.DB, workItemID, aggregateStatus, content string) error {
 	var report struct {
 		Scenarios []struct {
+			ID            string `json:"id"`
 			Persona       string `json:"persona"`
 			Dimension     string `json:"dimension"`
 			StressAxis    string `json:"stress_axis"`
@@ -2019,6 +2026,14 @@ func validateRriTVerification(db *sql.DB, workItemID, aggregateStatus, content s
 			Evidence      string `json:"evidence"`
 			Result        string `json:"result"`
 		} `json:"scenarios"`
+		NotApplicable []struct {
+			ID            string `json:"id"`
+			Persona       string `json:"persona"`
+			Dimension     string `json:"dimension"`
+			StressAxis    string `json:"stress_axis"`
+			RequirementID string `json:"requirement_id"`
+			Reason        string `json:"reason"`
+		} `json:"not_applicable"`
 	}
 	if err := json.Unmarshal([]byte(content), &report); err != nil {
 		return fmt.Errorf("invalid RRI-T evidence JSON: %w", err)
@@ -2044,10 +2059,10 @@ func validateRriTVerification(db *sql.DB, workItemID, aggregateStatus, content s
 	}
 	seen := map[string]bool{}
 	for _, scenario := range report.Scenarios {
-		if scenario.Persona == "" || !validDimensions[scenario.Dimension] || !validStressAxes[scenario.StressAxis] || !approved[scenario.RequirementID] || scenario.Procedure == "" || scenario.Evidence == "" || !validResults[scenario.Result] {
+		if scenario.ID == "" || scenario.Persona == "" || !validDimensions[scenario.Dimension] || !validStressAxes[scenario.StressAxis] || !approved[scenario.RequirementID] || scenario.Procedure == "" || scenario.Evidence == "" || !validResults[scenario.Result] {
 			return fmt.Errorf("invalid RRI-T scenario for requirement %s", scenario.RequirementID)
 		}
-		key := scenario.Persona + "|" + scenario.Dimension + "|" + scenario.StressAxis + "|" + scenario.RequirementID
+		key := scenario.Dimension + "|" + scenario.StressAxis + "|" + scenario.RequirementID + "|" + scenario.ID
 		if seen[key] {
 			return fmt.Errorf("duplicate RRI-T scenario %s", key)
 		}
@@ -2055,6 +2070,23 @@ func validateRriTVerification(db *sql.DB, workItemID, aggregateStatus, content s
 		if aggregateStatus == "passed" && scenario.Result != "PASS" {
 			return fmt.Errorf("RRI-T %s result requires remediation or owner deferral before aggregate passage", scenario.Result)
 		}
+	}
+	for _, deferred := range report.NotApplicable {
+		if deferred.ID == "" {
+			// Authored N/A topics carry no scenario identity; only the concrete reason is required.
+			if strings.TrimSpace(deferred.Reason) == "" {
+				return fmt.Errorf("RRI-T not_applicable disposition requires a concrete reason")
+			}
+			continue
+		}
+		if deferred.Persona == "" || !validDimensions[deferred.Dimension] || !validStressAxes[deferred.StressAxis] || !approved[deferred.RequirementID] || strings.TrimSpace(deferred.Reason) == "" {
+			return fmt.Errorf("invalid RRI-T not_applicable disposition for requirement %s", deferred.RequirementID)
+		}
+		key := deferred.Dimension + "|" + deferred.StressAxis + "|" + deferred.RequirementID + "|" + deferred.ID
+		if seen[key] {
+			return fmt.Errorf("duplicate RRI-T scenario %s", key)
+		}
+		seen[key] = true
 	}
 	return nil
 }

@@ -178,6 +178,23 @@ test("tool persists the scenario artifact before execution and never re-authors 
   assert.doesNotMatch(verifyCase, /withInheritedParentWorkflowArtifacts/);
 });
 
+test("RRI-T grading compiler dedupes on the id-based identity and rejects duplicate deferred dispositions", () => {
+  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  const compile = tool.slice(tool.indexOf("function rriTScenarioIdentity"), tool.indexOf("export function registerTaskManagerTool"));
+  // The identity contract is id-based (dimension|stress_axis|requirement_id|id) —
+  // never the persona — so scenarios sharing persona, dimension, stress axis, and
+  // requirement stay distinct by id, and the compiled outcome carries the
+  // persisted scenario id for the canonical Go validator.
+  assert.match(compile, /\$\{scenario\.dimension\}\|\$\{scenario\.stress_axis\}\|\$\{scenario\.requirement_id\}\|\$\{scenario\.id\}/);
+  assert.doesNotMatch(compile, /\$\{scenario\.persona\}\|\$\{scenario\.dimension\}/);
+  assert.match(compile, /scenarios\.push\(\{ id: match\.id,/);
+  // One persisted scenario receives exactly one outcome: the shared outcome set
+  // rejects a duplicate deferred disposition (the same scenario deferred twice via
+  // not_applicable) as well as a scenario graded and deferred at once.
+  assert.match(compile, /outcomes\.has\(key\)/);
+  assert.match(compile, /received more than one outcome/);
+});
+
 test("graded submission requires persisted identities, executed evidence, and not_applicable reasons", () => {
   const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   const compile = tool.slice(tool.indexOf("function compileRriTSubmission"), tool.indexOf("export function registerTaskManagerTool"));
