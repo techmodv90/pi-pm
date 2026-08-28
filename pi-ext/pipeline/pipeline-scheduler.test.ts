@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
 
@@ -435,6 +435,74 @@ test("RRI-T persona results accept the six-field authoring contract and ignore l
   assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "Submit the empty form →"), "QA / Tester"), /invalid scenario/);
   assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "->"), "QA / Tester"), /invalid scenario/);
   assert.throws(() => parseRriTPersonaResult(valid.replace("<remediation_hint>Assert the error text on the form</remediation_hint>", ""), "QA / Tester"), /invalid scenario/);
+  // unknown dimensions or stress axes and a fully missing procedure are rejected
+  assert.throws(() => parseRriTPersonaResult(valid.replace(">D3<", ">D8<"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace(">ERROR<", ">NOPE<"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("<procedure>Submit the empty form → inline error is shown</procedure>", ""), "QA / Tester"), /invalid scenario/);
+  // malformed XML fails closed instead of being leniently parsed
+  assert.throws(() => parseRriTPersonaResult(valid.replace("</scenario></scenarios>", "</scenarios>"), "QA / Tester"), /invalid XML/);
+  assert.throws(() => parseRriTPersonaResult("no document at all", "QA / Tester"), /one rri_t_persona document/);
+});
+
+test("RRI-T merge keeps one deterministic scenario per identity and preserves author persona metadata", () => {
+  const authoring = (persona: string, id: string) => ({
+    persona,
+    scenarios: [{
+      id, dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-1",
+      procedure: "submit the empty form → inline error is shown", remediation_hint: "Assert the inline error",
+      evidence: "go test ./...", result: "PASS",
+    }],
+    not_applicable: [],
+    open_blockers: [],
+  });
+  const merged = mergeRriTAuthoringResults([
+    authoring("QA / Tester", "RRI-T-1"),
+    authoring("Developer", "RRI-T-1"), // duplicate identity from a second persona
+    { ...authoring("End User", "RRI-T-2"), not_applicable: [{ topic: "UI", reason: "none" }], open_blockers: ["blocker-1"] },
+  ], ["QA / Tester", "Developer", "End User"] as const);
+  // duplicate identity collapses to one deterministic scenario keeping the first author
+  assert.equal(merged.scenarios.length, 2);
+  assert.equal(merged.scenarios[0].persona, "QA / Tester");
+  assert.equal(merged.scenarios[1].persona, "End User");
+  // scenario-only output: grading fields never reach the merged list
+  assert.equal(merged.scenarios[0].result, undefined);
+  assert.equal(merged.scenarios[0].evidence, undefined);
+  assert.deepEqual(merged.personas, ["QA / Tester", "Developer", "End User"]);
+  assert.deepEqual(merged.not_applicable, [{ topic: "UI", reason: "none", persona: "End User" }]);
+  assert.deepEqual(merged.open_blockers, ["blocker-1"]);
+  // distinct identities never collapse, and a same-persona repeat of an identity also deduplicates
+  assert.equal(mergeRriTAuthoringResults([authoring("QA / Tester", "RRI-T-1"), authoring("Developer", "RRI-T-2")], ["QA / Tester", "Developer"] as const).scenarios.length, 2);
+  assert.equal(mergeRriTAuthoringResults([{ ...authoring("QA / Tester", "RRI-T-1"), scenarios: [...authoring("QA / Tester", "RRI-T-1").scenarios, ...authoring("QA / Tester", "RRI-T-1").scenarios] }], ["QA / Tester"] as const).scenarios.length, 1);
+});
+
+test("RRI-T authoring output is a scenario list without grading records or counts", () => {
+  const merged = mergeRriTAuthoringResults([{ persona: "QA / Tester", scenarios: [
+    { id: "s1", dimension: "D1", stress_axis: "TIME", requirement_id: "REQ-A", procedure: "open the page → renders", remediation_hint: "hint", result: "FAIL", evidence: "x" },
+  ], not_applicable: [], open_blockers: [] }], ["QA / Tester"] as const);
+  assert.equal(merged.scenarios.length, 1);
+  const serialized = JSON.stringify(merged);
+  assert.equal(serialized.includes("result"), false);
+  assert.equal(serialized.includes("evidence"), false);
+  assert.equal(serialized.includes("summary"), false);
+});
+
+test("RRI-T authoring fanout runs read-only personas on the bounded resilient runner without executing or grading", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const rriTBody = source.slice(source.indexOf("async runRriT"), source.indexOf("private async persistAgentResult"));
+  assert.match(rriTBody, /const handle = startSubagentResilient\(\{/);
+  assert.doesNotMatch(rriTBody, /isolation: "worktree"/);
+  assert.match(rriTBody, /attempt < 2/);
+  assert.match(rriTBody, /Previous output was invalid: \$\{lastError\}[\s\S]+Correct it on this retry/);
+  assert.match(rriTBody, /do not execute any procedure, collect evidence, or grade results/);
+  assert.match(rriTBody, /mergeRriTAuthoringResults/);
+  assert.doesNotMatch(rriTBody, /summary: counts/);
+  // the launch itself must never bypass the persona read-only tool contract
+  const persona = readFileSync(new URL("../agents/rri-t-persona.md", import.meta.url), "utf8");
+  assert.match(persona, /^tools: read, grep, find, ls$/m);
+  assert.doesNotMatch(persona, /tools:[^\n]*bash/);
+  assert.match(persona, /no worktree isolation/);
+  const runner = readFileSync(new URL("../subagent/runner.ts", import.meta.url), "utf8");
+  assert.match(runner, /READ_ONLY_AGENTS = new Set\(\[[^\]]*"rri-t-persona"/);
 });
 
 

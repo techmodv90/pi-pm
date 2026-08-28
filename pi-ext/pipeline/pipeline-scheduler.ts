@@ -30,6 +30,9 @@ const DEFAULT_GENERATED_FILES = ["test-results/**", "playwright-report/**", "cov
 // persisted Plan profile, never by this list (see resolvePlanProfile).
 const planningStages: PipelineStage[] = ["rri", "vision", "blueprint", "contracts", "task_graph"];
 const RRI_T_PERSONAS = ["End User", "Business Analyst", "QA / Tester", "Developer", "Operator"] as const;
+// RRI-T authoring fields: the only fields a persona scenario may carry. Grading
+// records (evidence/result/remediation) belong to the later contractor phase.
+const RRI_T_AUTHORING_FIELDS = ["id", "dimension", "stress_axis", "requirement_id", "procedure", "remediation_hint"] as const;
 const RRI_T_DIMENSIONS = new Set(["D1", "D2", "D3", "D4", "D5", "D6", "D7"]);
 const RRI_T_STRESS_AXES = new Set(["TIME", "DATA", "ERROR", "COLLABORATION", "EMERGENCY", "SCALE", "COMPLIANCE", "EVOLUTION"]);
 
@@ -56,6 +59,10 @@ function hasConcreteProcedure(procedure: string): boolean {
 
 export function parseRriTPersonaResult(output: string, expectedPersona: string): any {
   const xml = normalizeRriTXml(output);
+  // RRI-T authoring boundary: reject malformed XML before any per-scenario work so
+  // a broken document fails closed instead of being leniently parsed.
+  const validation = XMLValidator.validate(xml);
+  if (validation !== true) throw new Error(`RRI-T persona ${expectedPersona} returned invalid XML: ${validation.err?.msg || "malformed document"}`);
   const parsed = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_", trimValues: true }).parse(xml)?.rri_t_persona;
   if (!parsed || parsed["@_persona"] !== expectedPersona) throw new Error(`RRI-T output has unexpected persona; expected ${expectedPersona}`);
   const scenarios = Array.isArray(parsed.scenarios?.scenario) ? parsed.scenarios.scenario : parsed.scenarios?.scenario ? [parsed.scenarios.scenario] : [];
@@ -899,6 +906,29 @@ export function parseRriPersonaResult(output: string, expectedPersona: string): 
   return value;
 }
 
+// RRI-T authoring merge (OB-3): the duplicate scenario identity is the
+// requirement-bound authoring key (dimension|stress_axis|requirement_id|id) —
+// never the authoring persona — so the same scenario authored by several personas
+// collapses to one deterministic row that preserves the first author's persona
+// metadata. Only the six authoring fields survive; grading records are stripped.
+export function mergeRriTAuthoringResults(results: Array<{ persona: string; scenarios: any[]; not_applicable: any[]; open_blockers: any[] }>, personas: readonly string[]): {
+  methodology: "rri-t"; personas: string[]; scenarios: any[]; not_applicable: any[]; open_blockers: any[];
+} {
+  const seen = new Set<string>();
+  const scenarios: any[] = [];
+  for (const result of results) {
+    for (const scenario of result.scenarios || []) {
+      const key = `${scenario.dimension}|${scenario.stress_axis}|${scenario.requirement_id}|${scenario.id}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      scenarios.push({ ...Object.fromEntries(RRI_T_AUTHORING_FIELDS.map((field) => [field, scenario[field]])), persona: result.persona });
+    }
+  }
+  const notApplicable = results.flatMap((result) => (result.not_applicable || []).map((topic: any) => ({ ...topic, persona: result.persona })));
+  const openBlockers = results.flatMap((result) => (result.open_blockers || []));
+  return { methodology: "rri-t", personas: [...personas], scenarios, not_applicable: notApplicable, open_blockers: openBlockers };
+}
+
 export function parseRriSynthesisResult(output: string): any {
   const trimmed = output.trim();
   if (!trimmed.startsWith("<rri_synthesis") || !trimmed.endsWith("</rri_synthesis>")) throw new Error("RRI synthesis must return one XML document");
@@ -1331,12 +1361,17 @@ export class PipelineScheduler {
     const uniquePersonas = [...new Set(personas)].filter((persona): persona is (typeof RRI_T_PERSONAS)[number] => RRI_T_PERSONAS.includes(persona as (typeof RRI_T_PERSONAS)[number]));
     const personaAgent = discoverAgents(this.cwd, "project").find((candidate) => candidate.name === "rri-t-persona");
     if (!personaAgent) throw new Error("Task-system agent definition not found: rri-t-persona");
+    // RRI-T authoring-only fanout: personas run with only the repository reading
+    // tools declared by the rri-t-persona definition (read, grep, find, ls), no
+    // worktree isolation, and exactly two validation attempts that carry the named
+    // parser error into the retry; personas never execute procedures or self-grade,
+    // so a persona run ends only in validated scenarios or a bounded failure.
     const results = await Promise.all(uniquePersonas.map(async (persona) => {
       let lastError = "";
       for (let attempt = 0; attempt < 2; attempt++) {
-        const handle = startSubagent({
+        const handle = startSubagentResilient({
           agent: personaAgent,
-          task: `# RRI-T aggregate evidence\nWork Item: ${item.id || "unknown"}\nAssigned perspective: ${persona}\n\nRepository context:\n${scope}\n\nSelect only risk-relevant scenarios for this perspective. Return exactly one <rri_t_persona> XML document.${lastError ? ` Previous output was invalid: ${lastError}. Correct it on this retry.` : ""}`,
+          task: `# RRI-T aggregate scenario authoring\nWork Item: ${item.id || "unknown"}\nAssigned perspective: ${persona}\n\nRepository context:\n${scope}\n\nSelect only risk-relevant scenarios for this perspective and author them; do not execute any procedure, collect evidence, or grade results. Return exactly one <rri_t_persona> XML document.${lastError ? ` Previous output was invalid: ${lastError}. Correct it on this retry.` : ""}`,
           cwd: this.cwd,
           stage: "aggregate_verification",
           taskId: item.id,
@@ -1352,16 +1387,7 @@ export class PipelineScheduler {
       }
       throw new Error(`RRI-T persona ${persona} failed validation: ${lastError}`);
     }));
-    const seen = new Set<string>();
-    const scenarios = results.flatMap((result) => result.scenarios.map((scenario: any) => ({ ...scenario, persona: result.persona }))).filter((scenario: any) => {
-      const key = `${scenario.persona}|${scenario.dimension}|${scenario.stress_axis}|${scenario.requirement_id}|${scenario.id}`;
-      if (seen.has(key)) return false;
-      seen.add(key);
-      return true;
-    });
-    const notApplicable = results.flatMap((result) => result.not_applicable.map((topic: any) => ({ ...topic, persona: result.persona })));
-    const counts = scenarios.reduce((summary: Record<string, number>, scenario: any) => { const result = scenario.result; if (result) summary[result.toLowerCase()] = (summary[result.toLowerCase()] || 0) + 1; return summary; }, {});
-    return JSON.stringify({ methodology: "rri-t", personas: uniquePersonas, scenarios, not_applicable: notApplicable, open_blockers: results.flatMap((result) => result.open_blockers), summary: counts });
+    return JSON.stringify(mergeRriTAuthoringResults(results, uniquePersonas));
   }
 
   private async persistAgentResult(result: SubagentResult): Promise<void> {
