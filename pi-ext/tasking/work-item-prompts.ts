@@ -94,6 +94,36 @@ export interface WorkItemArtifact {
   summary?: string;
 }
 
+export interface RriTScenarioContext {
+  artifact: any;
+  content: any;
+}
+
+// RRI-T execution ordering: the contractor loads scenarios from the persisted
+// rri_t_scenarios artifact revision — never from an in-memory persona result —
+// so resumed verification reuses saved scenarios without re-running persona
+// subagents and grading can only reference persisted scenario identities.
+// RRI-T artifact ownership: a scenario artifact belongs to the Work Item that
+// persisted it, so a feature aggregate must never grade a parent aggregate's
+// higher-revision scenarios. Whenever rows carry work_item_id (pic show always
+// does), rows owned by another Work Item are excluded; only legacy/mocked rows
+// without ownership metadata fall back to revision order.
+export function latestRriTScenarios(data: any): RriTScenarioContext | undefined {
+  const workItemId = data?.work_item?.id;
+  const artifact = (Array.isArray(data?.artifacts) ? data.artifacts : [])
+    .filter((entry: any) => entry.stage === "rri_t_scenarios")
+    .filter((entry: any) => !entry.work_item_id || !workItemId || String(entry.work_item_id) === String(workItemId))
+    .sort((a: any, b: any) => Number(b.revision || 0) - Number(a.revision || 0))[0];
+  if (!artifact) return undefined;
+  try {
+    const content = JSON.parse(String(artifact.content ?? "{}"));
+    if (!content || typeof content !== "object" || !Array.isArray(content.scenarios)) return undefined;
+    return { artifact, content };
+  } catch {
+    return undefined;
+  }
+}
+
 export const CANONICAL_SCAN_REPORT_XML_FORMAT = `<scan_report>
   <tech_stack><language>...</language><framework>...</framework><styling>...</styling><database>...</database><auth>...</auth><state>...</state><other>...</other></tech_stack>
   <existing_modules><module><name>...</name><description>...</description></module></existing_modules>
@@ -140,16 +170,34 @@ export function buildTaskVerifyPrompt(data: any): string {
 export function buildAggregateVerifyPrompt(data: any): string {
   const item = data.work_item || {};
   const descendants = (data.children || []).map((child: any) => `- ${child.id}: ${child.title} (${child.status})`).join("\n");
+  const scenarios = latestRriTScenarios(data);
+  const artifactLine = scenarios?.artifact ? `Loaded from artifact ${scenarios.artifact.id} (revision ${scenarios.artifact.revision || 1}, content hash ${scenarios.artifact.content_hash || "unknown"}) — never from in-memory persona output.` : "";
+  const scenarioLines = scenarios
+    ? scenarios.content.scenarios.map((scenario: any, index: number) => `- [${index + 1}] ${scenario.persona} · ${scenario.dimension}/${scenario.stress_axis} (${scenario.requirement_id}, ${scenario.id || "unnamed"}): ${scenario.procedure}${scenario.remediation_hint ? ` — remediation hint: ${scenario.remediation_hint}` : ""}`).join("\n")
+    : "_No persisted rri_t_scenarios artifact was found; aggregate verification is blocked until the authored scenarios are saved before execution._";
   return [
     `# AGGREGATE VERIFICATION: ${item.title || item.id || "Work Item"}`,
     `Work Item: ${item.id || "unknown"}`,
     "",
     "All required executable descendants are complete. Execute the final aggregate verification now in the current repository.",
     "Inspect the integrated diff and every descendant Completion Report and contractor Verification Report. Run the repository-level checks required by the approved contract and verify each aggregate requirement end to end.",
-    "Apply RRI-T to the integrated delivery: select applicable End User, Business Analyst, QA / Tester, Developer, and Operator perspectives from the changed scope, run only risk-relevant dimension x stress-axis scenarios, and record N/A reasons for omitted areas. Every scenario must name an approved REQ-ID and executable evidence. Preserve PASS, ACCEPTABLE, PAINFUL, and FAIL results in the evidence summary; ACCEPTABLE requires an owner tradeoff, PAINFUL requires remediation or owner deferral, and FAIL blocks verification.",
+    "",
+    "## Persisted RRI-T Scenarios",
+    artifactLine,
+    scenarioLines,
+    "",
+    "Execute only scenarios retained from this persisted list. Do not run, amend, or re-author persona output, and do not re-run persona subagents.",
+    "",
+    "## Owner Scenario Gate (soft)",
+    "Present this scenario list to the owner and ask whether any scenario should be trimmed or deferred before execution. Honor explicit owner trim or defer instructions; when no owner response is given, proceed with the retained scenarios without stalling.",
+    "",
+    "## Execute and Grade in This Session (contractor only)",
+    "Apply RRI-T to the integrated delivery using the persisted scenario list. Run each retained scenario's procedure against the integrated repository with concrete commands in this main session and record the executed command and observed output as evidence. You are the main contractor: no subagent executes procedures or produces grades, do not delegate this step, and never grade a scenario you did not execute.",
+    "Each retained scenario receives exactly one outcome: PASS, ACCEPTABLE, PAINFUL, and FAIL grade the executed procedure with evidence, or not_applicable with a concrete reason when the procedure cannot execute against the integrated repository (recorded instead of failing verification). Every graded scenario must name an approved REQ-ID and executable evidence. ACCEPTABLE requires an owner tradeoff, PAINFUL requires remediation or explicit owner deferral before acceptance, and FAIL blocks aggregate verification.",
     descendants ? `## Descendants\n${descendants}` : "",
     "",
-    "Then call `verify_aggregate_work_item` with this Work Item ID, `verification_status` passed, failed, partial, or blocked, a concise evidence summary containing the RRI-T scenarios, and `actor_role=contractor`.",
+    "## Submit",
+    "Then call `verify_aggregate_work_item` with this Work Item ID, `verification_status` passed, failed, partial, or blocked, a `summary` evidence summary, the graded scenario JSON as `rri_t_evidence_json` ({\"scenarios\":[{\"persona\":\"QA / Tester\",\"dimension\":\"D3\",\"stress_axis\":\"ERROR\",\"requirement_id\":\"REQ-1\",\"procedure\":\"<verbatim from artifact>\",\"evidence\":\"<command run and observed output>\",\"result\":\"PASS\"}],\"not_applicable\":[{\"persona\":\"QA / Tester\",\"dimension\":\"D3\",\"stress_axis\":\"ERROR\",\"requirement_id\":\"REQ-1\",\"reason\":\"<why it cannot run>\"}]}), and `actor_role=contractor`.",
     "Do not call owner acceptance. A passed aggregate verification creates the single owner decision gate; a failed or partial result must identify targeted corrections and retain the RRI-T evidence.",
   ].filter(Boolean).join("\n");
 }
@@ -170,7 +218,7 @@ export function buildWorkItemContinuePrompt(status: { work_item_id: string; next
       ? "Launch the executable Work Item with `work_on_work_item`; its TIP is generated and frozen transactionally before the first worker claim."
       : `Launch only authorized dependency-ready executable descendants. Do not launch this ${item.type || "aggregate"} Work Item as a worker.`,
     contractor_verification: "Verify the integrated completion evidence and publish the verdict with `verify_work_item` using `actor_role=contractor`; a passed executable child closes automatically, while a passed aggregate advances to aggregate verification/owner acceptance.",
-    aggregate_verification: "Run the aggregate's final verification over all completed descendants and publish it with `verify_aggregate_work_item` using `actor_role=contractor`.",
+    aggregate_verification: "Load the persisted rri_t_scenarios artifact, apply the soft owner trim/defer gate, execute and grade each retained scenario in this session with concrete evidence (contractor only), and publish the graded results with `verify_aggregate_work_item` using `actor_role=contractor`.",
     owner_acceptance: ["epic", "feature"].includes(item.type || "")
       ? "Persist the one final aggregate decision with `accept_aggregate_work_item` using `actor_role=owner`."
       : "Executable children do not require owner acceptance; inspect the parent aggregate workflow.",

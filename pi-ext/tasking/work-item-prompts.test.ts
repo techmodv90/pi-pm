@@ -12,6 +12,7 @@ import {
   buildWorkItemReviewerHandoff,
   buildWorkItemScanPrompt,
   formatWorkItemChecklist,
+  latestRriTScenarios,
   normalizePlanningHandoffAttributes,
   parsePlanningHandoffAttributes,
 } from "./work-item-prompts.ts";
@@ -83,6 +84,110 @@ test("aggregate verification handoff precedes the single owner decision", () => 
   assert.match(prompt, /wi-child/);
   assert.match(prompt, /verify_aggregate_work_item/);
   assert.match(prompt, /Do not call owner acceptance/);
+});
+
+test("aggregate verification handoff loads persisted scenarios before contractor grading", () => {
+  const artifact = JSON.stringify({
+    methodology: "rri-t",
+    personas: ["QA / Tester"],
+    scenarios: [{ id: "RRI-T-1", persona: "QA / Tester", dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-1", procedure: "submit the empty form → inline error is shown", remediation_hint: "Assert the error text" }],
+    not_applicable: [],
+    open_blockers: [],
+  });
+  const prompt = buildAggregateVerifyPrompt({
+    work_item: { id: "wi-epic", title: "Release" },
+    children: [{ id: "wi-child", title: "Child", status: "done" }],
+    artifacts: [{ id: "wia-1", work_item_id: "wi-epic", stage: "rri_t_scenarios", revision: 1, content_hash: "hash-1", content: artifact }],
+  });
+  // persisted artifact, not in-memory persona output
+  assert.match(prompt, /Persisted RRI-T Scenarios/);
+  assert.match(prompt, /Loaded from artifact wia-1 \(revision 1, content hash hash-1\) — never from in-memory persona output/);
+  assert.match(prompt, /RRI-T-1/);
+  assert.match(prompt, /Do not\s+re-run persona subagents/i);
+  // soft owner gate: explicit trim/defer honored, no response proceeds without stalling
+  assert.match(prompt, /Owner Scenario Gate \(soft\)/);
+  assert.match(prompt, /trim or defer/i);
+  assert.match(prompt, /without stalling/);
+  // contractor-only execution and grading with not_applicable reasons
+  assert.match(prompt, /contractor only/);
+  assert.match(prompt, /no subagent executes procedures or produces grades/);
+  assert.match(prompt, /not_applicable with a concrete reason/);
+  assert.match(prompt, /instead of failing verification/);
+  assert.match(prompt, /FAIL blocks aggregate verification/);
+  // submission paths to the canonical aggregate verification action
+  assert.match(prompt, /verify_aggregate_work_item/);
+  assert.match(prompt, /rri_t_evidence_json/);
+  assert.match(prompt, /actor_role=contractor/);
+});
+
+test("aggregate verification blocks when no scenario artifact was persisted", () => {
+  const prompt = buildAggregateVerifyPrompt({ work_item: { id: "wi-epic", title: "Release" }, children: [] });
+  assert.match(prompt, /No persisted rri_t_scenarios artifact was found/);
+  assert.match(prompt, /blocked until the authored scenarios are saved before execution/);
+  assert.match(prompt, /verify_aggregate_work_item/);
+});
+
+test("aggregate scenario selection stays on the aggregate's own artifact, never a parent's higher revision", () => {
+  const parentArtifact = JSON.stringify({
+    methodology: "rri-t",
+    personas: ["QA / Tester"],
+    scenarios: [{ id: "PARENT-REV3", persona: "QA / Tester", dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-P", procedure: "parent scenario must not leak", remediation_hint: "" }],
+    not_applicable: [],
+    open_blockers: [],
+  });
+  const ownArtifact = JSON.stringify({
+    methodology: "rri-t",
+    personas: ["QA / Tester"],
+    scenarios: [{ id: "FEATURE-REV1", persona: "QA / Tester", dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-1", procedure: "submit the empty form → inline error is shown", remediation_hint: "Assert the error text" }],
+    not_applicable: [],
+    open_blockers: [],
+  });
+  // Merged-data shape produced by withInheritedParentWorkflowArtifacts: the
+  // parent's higher-revision scenarios appear next to the aggregate's own rows.
+  const merged = {
+    work_item: { id: "wi-feature", title: "Feature" },
+    inherited_parent_work_item: { id: "wi-epic", title: "Epic" },
+    children: [{ id: "wi-child", title: "Child", status: "done" }],
+    artifacts: [
+      { id: "wia-own", work_item_id: "wi-feature", stage: "rri_t_scenarios", revision: 1, content_hash: "hash-own", content: ownArtifact },
+      { id: "wia-parent", work_item_id: "wi-epic", stage: "rri_t_scenarios", revision: 3, content_hash: "hash-parent", content: parentArtifact },
+    ],
+  };
+  const selected = latestRriTScenarios(merged);
+  assert.equal(selected?.artifact.id, "wia-own");
+  assert.equal(selected?.artifact.revision, 1);
+  const prompt = buildAggregateVerifyPrompt(merged);
+  assert.match(prompt, /Loaded from artifact wia-own \(revision 1/);
+  assert.match(prompt, /FEATURE-REV1/);
+  assert.doesNotMatch(prompt, /PARENT-REV3/);
+});
+
+test("tool persists the scenario artifact before execution and never re-authors at grading submission", () => {
+  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  // save-before-execution: persona authoring output is persisted as the rri_t_scenarios artifact
+  assert.match(tool, /artifact-save[\s\S]{0,80}rri_t_scenarios/);
+  assert.match(tool, /await scheduler\.runRriT\(data\)/);
+  // the verify action compiles graded evidence from the persisted artifact via the canonical --rri-t-json path
+  const verifyCase = tool.slice(tool.indexOf('case "verify_aggregate_work_item"'), tool.indexOf('case "accept_aggregate_work_item"'));
+  assert.doesNotMatch(verifyCase, /runRriT/);
+  assert.match(verifyCase, /compileRriTSubmission/);
+  assert.match(verifyCase, /--rri-t-json/);
+  // grading happens before submission, so a missing persisted artifact blocks instead of executing an unpersisted list
+  assert.ok(verifyCase.indexOf("compileRriTSubmission") < verifyCase.indexOf('"aggregate-verify"'));
+  // the aggregate's own persisted scenarios are graded, never parent-inherited rows
+  assert.doesNotMatch(verifyCase, /withInheritedParentWorkflowArtifacts/);
+});
+
+test("graded submission requires persisted identities, executed evidence, and not_applicable reasons", () => {
+  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  const compile = tool.slice(tool.indexOf("function compileRriTSubmission"), tool.indexOf("export function registerTaskManagerTool"));
+  assert.match(compile, /persisted rri_t_scenarios artifact is missing/);
+  assert.match(compile, /not in the persisted rri_t_scenarios artifact/);
+  assert.match(compile, /requires executed evidence/);
+  assert.match(compile, /result must be PASS, ACCEPTABLE, PAINFUL, or FAIL/);
+  assert.match(compile, /not_applicable scenario .* requires a concrete reason/);
+  assert.match(compile, /received more than one outcome/);
+  assert.match(compile, /must reuse the persisted procedure verbatim/);
 });
 
 test("Work Item prompts use only canonical lifecycle actions", () => {
