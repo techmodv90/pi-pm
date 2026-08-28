@@ -13,7 +13,7 @@ test("discoverAgents loads packaged task-system agents", () => {
   const scout = agents.find((agent) => agent.name === "task-scout");
   assert.deepEqual(scout?.skills, ["codanna-explore", "codanna-review"]);
   assert.equal(scout?.tools?.includes("research"), false);
-  assert.deepEqual(agents.find((agent) => agent.name === "task-worker")?.skills, ["test-first", "verification-gate", "testing-anti-patterns", "ponytail"]);
+  assert.deepEqual(agents.find((agent) => agent.name === "task-worker")?.skills, ["test-first", "verification-gate", "testing-anti-patterns", "ponytail", "logging-best-practices", "shadcn-svelte"]);
 
   assert.deepEqual(agents.find((agent) => agent.name === "task-planner")?.skills, ["write-plan", "shape-spec", "codebase-design"]);
   assert.deepEqual(agents.find((agent) => agent.name === "task-reviewer")?.skills, ["defense-in-depth"]);

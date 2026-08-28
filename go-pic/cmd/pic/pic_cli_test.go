@@ -48,7 +48,7 @@ func runPic(t *testing.T, bin string, cwd string, home string, args ...string) a
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(clearedPiEnv(), "HOME="+home)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("pic %v failed: %v\n%s", args, err, out)
@@ -64,7 +64,7 @@ func runPicError(t *testing.T, bin string, cwd string, home string, args ...stri
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(clearedPiEnv(), "HOME="+home)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("pic %v unexpectedly succeeded: %s", args, out)
@@ -100,7 +100,7 @@ func runMarkdown(t *testing.T, bin string, cwd string, home string, args ...stri
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(clearedPiEnv(), "HOME="+home)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("pic %v failed: %v\n%s", args, err, out)
