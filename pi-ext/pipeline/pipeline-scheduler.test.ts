@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { planScanRetryWave } from "./stage-prompts.ts";
 import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
@@ -1548,4 +1549,24 @@ test("canonical TIP XML renders the contract interfaces provided by the task gra
 test("closing a leaf notifies the owner with dependency-ready next work", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   assert.match(source, /"work-item", "status", taskId, "done"[\s\S]{0,900}readyLeafIds\(/);
+});
+
+test("scan fanout retries only failed sections once with the exact parser error", () => {
+  const valid = `<scout_evidence section="architecture" confidence="high"><finding>Uses SQLite</finding><verification>go test ./...</verification><risks></risks><sources><source path="cmd/pic/main.go">DB open</source></sources></scout_evidence>`;
+  const invalid = "prose without xml";
+  const wave = planScanRetryWave(
+    [
+      { exitCode: 0, runId: "run-1" },
+      { exitCode: 1, runId: "run-2", errorMessage: "spawn failed" },
+    ] as any,
+    [valid, invalid],
+  );
+  assert.equal(wave.length, 2);
+  assert.deepEqual(wave.map((entry) => entry.index), [0, 1]);
+  assert.match(wave[0]!.error, /missing <scope>/);
+  assert.equal(wave[1]!.error, "spawn failed");
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  assert.match(prompts, /SCAN_FANOUT_RETRY_LIMIT = 1/);
+  assert.match(prompts, /planScanRetryWave\(/);
+  assert.match(prompts, /Previous output was invalid/);
 });

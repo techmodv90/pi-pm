@@ -73,17 +73,55 @@ export function normalizeScoutEvidenceXml(output: string): string {
   return trimmed;
 }
 
+export const SCAN_FANOUT_RETRY_LIMIT = 1;
+
+// Bounded repair constraint: a Scout section whose output fails validation or
+// whose process failed is retried exactly once with the concrete validation
+// error carried into the retry task; a section that fails again escalates as a
+// failed fanout result instead of looping.
+export function planScanRetryWave(results: Array<Partial<SubagentResult>>, outputs: string[]): Array<{ index: number; error: string }> {
+  const retry: Array<{ index: number; error: string }> = [];
+  results.forEach((entry, index) => {
+    if (entry.exitCode !== 0) {
+      retry.push({ index, error: entry.errorMessage || entry.stderr || "scout process failed" });
+      return;
+    }
+    try {
+      validateScoutEvidenceXml(outputs[index] ?? "", FULL_SCAN_SECTIONS[index]![0]);
+    } catch (error) {
+      retry.push({ index, error: error instanceof Error ? error.message : String(error) });
+    }
+  });
+  return retry;
+}
+
+function scoutSectionTask(spec: any, section: string, assignment: string, lastError: string): string {
+  return `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nThe root must be <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low">. Return exactly that one XML document. Use exactly one concise finding, at most one gap, and one evidence container with one or two non-empty <source path="relative/file"> citations. Keep the complete document under 2,500 characters, including </scout_evidence>. Do not use Markdown or compose the canonical Scan Report.${lastError ? ` Previous output was invalid: ${lastError}. Correct exactly that defect on this retry.` : ""}`;
+}
+
 export function startFullScanFanout(spec: any, agent: any): SubagentHandle {
   const id = randomUUID();
-  const handles = FULL_SCAN_SECTIONS.map(([section, assignment]) => startSubagent({
+  const startSection = (section: string, assignment: string, lastError: string) => startSubagent({
     ...spec,
     runId: undefined,
     agent,
-    task: `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nThe root must be <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low">. Return exactly that one XML document. Use exactly one concise finding, at most one gap, and one evidence container with one or two non-empty <source path="relative/file"> citations. Keep the complete document under 2,500 characters, including </scout_evidence>. Do not use Markdown or compose the canonical Scan Report.`,
-  }));
-  const result = Promise.all(handles.map((handle) => handle.result)).then((results): SubagentResult => {
-    const failed = results.filter((entry) => entry.exitCode !== 0);
+    task: scoutSectionTask(spec, section, assignment, lastError),
+  });
+  let handles: Array<{ handle: SubagentHandle }> = [];
+  const result = (async (): Promise<SubagentResult> => {
+    handles = FULL_SCAN_SECTIONS.map(([section, assignment]) => ({ handle: startSection(section, assignment, "") }));
+    const results = await Promise.all(handles.map((entry) => entry.handle.result));
     const outputs = results.map((entry) => finalAssistantText(entry.messages) || entry.errorMessage || entry.stderr || "");
+    for (let attempt = 0; attempt < SCAN_FANOUT_RETRY_LIMIT; attempt++) {
+      const wave = planScanRetryWave(results, outputs);
+      if (!wave.length) break;
+      const retried = await Promise.all(wave.map((entry) => startSection(FULL_SCAN_SECTIONS[entry.index]![0], FULL_SCAN_SECTIONS[entry.index]![1], entry.error).result));
+      for (const [offset, entry] of wave.entries()) {
+        results[entry.index] = retried[offset]!;
+        outputs[entry.index] = finalAssistantText(retried[offset]!.messages) || retried[offset]!.errorMessage || retried[offset]!.stderr || "";
+      }
+    }
+    const failed = results.filter((entry) => entry.exitCode !== 0);
     try {
       outputs.forEach((output, index) => validateScoutEvidenceXml(output, FULL_SCAN_SECTIONS[index]![0]));
     } catch (error: any) {
@@ -108,8 +146,8 @@ export function startFullScanFanout(spec: any, agent: any): SubagentHandle {
       stderr: failed.map((entry) => entry.errorMessage || entry.stderr).filter(Boolean).join("\n"),
       usage: results.reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
     };
-  });
-  return { id, result, stop: () => handles.forEach((handle) => handle.stop()) };
+  })();
+  return { id, result, stop: () => handles.forEach((entry) => entry.handle.stop()) };
 }
 
 export function stageAgent(stage: PipelineStage): string {
