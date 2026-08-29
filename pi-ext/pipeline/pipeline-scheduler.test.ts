@@ -1699,6 +1699,7 @@ test("primer context blocks dispatch when a predecessor checkpoint or artifact i
         { stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: "h-rri-2", decision_type: "rejected" },
       ],
       artifacts: [
+        { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
         { id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-rri-1", content: "<rri v1/>" },
         { id: "wia-rri", stage: "rri", revision: 2, content_hash: "h-rri-2", content: "<rri v2/>" },
       ],
