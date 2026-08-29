@@ -2612,8 +2612,16 @@ func TestWorkflowStatusNextActionsAndCheckpointDecide(t *testing.T) {
 		t.Fatalf("initial status = %#v", status)
 	}
 	actions, _ := status["next_actions"].([]any)
-	if len(actions) == 0 || !strings.Contains(fmt.Sprint(actions[0]), "save_work_item_artifact") || !strings.Contains(fmt.Sprint(actions[0]), "scan") {
-		t.Fatalf("scan next_actions = %#v", actions)
+	if len(actions) == 0 {
+		t.Fatal("scan next_actions missing")
+	}
+	first := asObject(t, actions[0])
+	if first["id"] != "save_scan_artifact" || first["kind"] != "tool" || first["action"] != "save_work_item_artifact" || first["actor"] != "contractor" || !strings.Contains(fmt.Sprint(first["args"]), "scan") {
+		t.Fatalf("scan first action = %#v", first)
+	}
+	approval := asObject(t, actions[1])
+	if approval["id"] != "approve_scan_artifact" || approval["actor"] != "owner" {
+		t.Fatalf("scan approval action = %#v", approval)
 	}
 
 	artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan content"))
@@ -2639,7 +2647,7 @@ func TestWorkflowStatusNextActionsAndCheckpointDecide(t *testing.T) {
 		t.Fatalf("post-decide status = %#v", status)
 	}
 	actions, _ = status["next_actions"].([]any)
-	if len(actions) == 0 || !strings.Contains(fmt.Sprint(actions[0]), "blueprint") {
+	if len(actions) == 0 || asObject(t, actions[0])["action"] != "save_blueprint_draft" || asObject(t, actions[len(actions)-1])["actor"] != "owner" {
 		t.Fatalf("blueprint next_actions = %#v", actions)
 	}
 

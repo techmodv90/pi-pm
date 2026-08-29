@@ -9,80 +9,97 @@ import (
 )
 
 // Transition oracle constraint: workflow-status reports these hints as
-// next_actions, and gate rejections cite the same oracle so every blocked
-// transition names its valid next steps from one authority.
+// structured next_actions, and gate rejections cite the same oracle so every
+// blocked transition names its valid next steps from one authority. Actions
+// carry stable IDs and argument templates so extension consumers can dispatch
+// them without parsing display text.
 
-// nextActionHints returns the exact tool/CLI actions valid at a workflow stage.
-// The done stage yields no hints on purpose: there is nothing left to run.
-func nextActionHints(stage string) []string {
+// NextAction is one structured, dispatchable transition step for a stage.
+type NextAction struct {
+	ID     string `json:"id"`
+	Kind   string `json:"kind"`           // "tool" or "cli"
+	Action string `json:"action"`         // task_manager action name or CLI command
+	Args   string `json:"args,omitempty"`  // argument template with placeholders
+	Label  string `json:"label"`           // human-readable description
+	Actor  string `json:"actor,omitempty"` // "owner" or "contractor" when role-bound
+}
+
+func toolAction(id, action, args, label, actor string) NextAction {
+	return NextAction{ID: id, Kind: "tool", Action: action, Args: args, Label: label, Actor: actor}
+}
+
+// nextActionHints returns the exact actions valid at a workflow stage. The done
+// stage yields no hints on purpose: there is nothing left to run.
+func nextActionHints(stage string) []NextAction {
 	switch stage {
 	case "scan":
-		return []string{
-			"save_work_item_artifact (stage=scan, structured XML)",
-			"approve_work_item_artifact <id> scan current accepted (actor_role=owner)",
+		return []NextAction{
+			toolAction("save_scan_artifact", "save_work_item_artifact", "<id> scan <xml>", "Save the canonical Scan Report as structured XML", "contractor"),
+			toolAction("approve_scan_artifact", "approve_work_item_artifact", "<id> scan current accepted", "Accept the current Scan revision", "owner"),
 		}
 	case "rri":
-		return []string{
-			"save_rri_interview (requirements, decisions, report)",
-			"approve_work_item_artifact <id> rri current approved (actor_role=owner)",
+		return []NextAction{
+			toolAction("save_rri_interview", "save_rri_interview", "<id>", "Publish the RRI interview once", "contractor"),
+			toolAction("approve_rri_artifact", "approve_work_item_artifact", "<id> rri current approved", "Approve the current RRI revision", "owner"),
 		}
 	case "vision":
-		return []string{
-			"save_work_item_artifact (stage=vision JSON)",
-			"approve_work_item_artifact <id> vision current approved (actor_role=owner)",
+		return []NextAction{
+			toolAction("save_vision_artifact", "save_work_item_artifact", "<id> vision <json>", "Save the Vision artifact", "contractor"),
+			toolAction("approve_vision_artifact", "approve_work_item_artifact", "<id> vision current approved", "Approve the current Vision revision", "owner"),
 		}
 	case "blueprint":
-		return []string{
-			"save_blueprint_draft (blueprint JSON)",
-			"review_blueprint_checkpoint (all five checks, actor_role=contractor)",
-			"approve_blueprint_draft (actor_role=owner)",
+		return []NextAction{
+			toolAction("save_blueprint_draft", "save_blueprint_draft", "<id> <json>", "Save the Blueprint draft", "contractor"),
+			toolAction("review_blueprint_checkpoint", "review_blueprint_checkpoint", "<id> <draft-id>", "Run the five Blueprint checkpoint checks", "contractor"),
+			toolAction("approve_blueprint_draft", "approve_blueprint_draft", "<id> <draft-id>", "Approve the reviewed Blueprint draft", "owner"),
 		}
 	case "contracts":
-		return []string{
-			"preview_artifact (stage=contracts) and present rendered Markdown to the owner",
-			"save_work_item_artifact (stage=contracts JSON)",
-			"approve_work_item_artifact <id> contracts current approved (actor_role=owner)",
+		return []NextAction{
+			toolAction("preview_contract", "preview_artifact", "<id> contracts <json>", "Preview the Contract and present rendered Markdown", "contractor"),
+			toolAction("save_contracts_artifact", "save_work_item_artifact", "<id> contracts <json>", "Save the Contract artifact after owner CONFIRM", "contractor"),
+			toolAction("approve_contracts_artifact", "approve_work_item_artifact", "<id> contracts current approved", "Approve the current Contract revision", "owner"),
 		}
 	case "task_graph":
-		return []string{
-			"save_work_item_artifact (stage=task_graph JSON)",
-			"validate_work_item_graph <id>",
-			"approve_work_item_artifact <id> task_graph current approved (actor_role=owner)",
+		return []NextAction{
+			toolAction("save_task_graph_artifact", "save_work_item_artifact", "<id> task_graph <json>", "Save the task graph", "contractor"),
+			toolAction("validate_task_graph", "validate_work_item_graph", "<id>", "Validate the task graph", "contractor"),
+			toolAction("approve_task_graph_artifact", "approve_work_item_artifact", "<id> task_graph current approved", "Approve the current task-graph revision", "owner"),
 		}
 	case "materialize":
-		return []string{
-			"materialize_work_item (tool) / pic work-item materialize <id>",
+		return []NextAction{
+			toolAction("materialize_graph", "materialize_work_item", "<id>", "Materialize the approved task graph", "contractor"),
 		}
 	case "authorize":
-		return []string{
-			"authorize_work_item_implementation (tool) / pic work-item authorize <id> owner (actor_role=owner)",
+		return []NextAction{
+			toolAction("authorize_implementation", "authorize_work_item_implementation", "<id>", "Authorize implementation of the approved graph", "owner"),
 		}
 	case "implement":
-		return []string{
-			"work_on_work_item for each dependency-ready executable leaf",
+		return []NextAction{
+			toolAction("work_ready_leaves", "work_on_work_item", "<leaf-id>", "Launch a dependency-ready executable leaf", "contractor"),
 		}
 	case "contractor_verification":
-		return []string{
-			"verify_work_item (actor_role=contractor)",
+		return []NextAction{
+			toolAction("verify_work_item", "verify_work_item", "<id> <completion-report-id>", "Verify the integrated completion evidence", "contractor"),
 		}
 	case "aggregate_verification":
-		return []string{
-			"verify_aggregate_work_item (actor_role=contractor)",
+		return []NextAction{
+			toolAction("verify_aggregate", "verify_aggregate_work_item", "<id>", "Run aggregate verification and grade RRI-T scenarios", "contractor"),
 		}
 	case "owner_acceptance":
-		return []string{
-			"accept_aggregate_work_item (actor_role=owner)",
+		return []NextAction{
+			toolAction("accept_aggregate", "accept_aggregate_work_item", "<id>", "Record the final aggregate owner decision", "owner"),
 		}
 	case "merge_pending":
-		return []string{
-			"merge_aggregate_work_item",
+		return []NextAction{
+			toolAction("merge_aggregate", "merge_aggregate_work_item", "<id>", "Retry the bound delivery merge", "contractor"),
 		}
 	default:
 		return nil
 	}
 }
 
-// withNextActions attaches the stage's oracle hints to a workflow-status map.
+// withNextActions attaches the stage's structured oracle actions to a
+// workflow-status map.
 func withNextActions(status map[string]any) map[string]any {
 	if next, ok := status["next_stage"].(string); ok {
 		if hints := nextActionHints(next); len(hints) > 0 {
@@ -92,14 +109,18 @@ func withNextActions(status map[string]any) map[string]any {
 	return status
 }
 
-// nextActionHint returns the first hint for a stage, formatted for rejection
-// messages, or an empty string when the stage has no hint.
+// nextActionHint renders the first action for a stage as gate-rejection text.
 func nextActionHint(stage string) string {
 	hints := nextActionHints(stage)
 	if len(hints) == 0 {
 		return ""
 	}
-	return fmt.Sprintf("Next: %s", hints[0])
+	first := hints[0]
+	hint := fmt.Sprintf("%s %s", first.Action, first.Args)
+	if first.Actor != "" {
+		hint += fmt.Sprintf(" (actor_role=%s)", first.Actor)
+	}
+	return fmt.Sprintf("Next: %s", hint)
 }
 
 // workItemCheckpointDecide records several owner stage decisions in one
