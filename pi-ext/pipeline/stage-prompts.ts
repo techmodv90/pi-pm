@@ -196,9 +196,9 @@ export function predecessorCheckpointFor(data: any, stage: string, profileStages
   // Same validity constraint as planPrimerContext: only approved/accepted
   // checkpoints bind the lineage line, so a rejected checkpoint can never be
   // presented as the approved predecessor.
-  const approved = (Array.isArray(data?.checkpoints) ? data.checkpoints : []).filter((checkpoint: any) => checkpoint.stage === prior && (checkpoint.decision_type === "approved" || checkpoint.decision_type === "accepted"));
+  const approved = (Array.isArray(data?.checkpoints) ? data.checkpoints : []).filter((checkpoint: any) => checkpoint.stage === prior && (checkpoint.decision_type === "approved" || checkpoint.decision_type === "accepted")); // eslint-disable-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   return approved
-    .sort((a: any, b: any) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0)
+    .sort((a: any, b: any) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0) // eslint-disable-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
       || String(b.created_at || "").localeCompare(String(a.created_at || "")))[0];
 }
 
