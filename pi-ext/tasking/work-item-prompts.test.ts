@@ -312,7 +312,7 @@ test("progress ledger heads a relaunch with attempt identity and trimmed prior e
 
 test("scheduler stage prompts dispatch the primer and the ledger at the right stages", () => {
   const source = readFileSync(new URL("../pipeline/stage-prompts.ts", import.meta.url), "utf8");
-  assert.match(source, /isPlanningStage\(stage\)\)[\s\S]{0,400}buildStagePrimer/);
+  assert.match(source, /isPlanningStage\(stage\)\)[\s\S]{0,700}buildStagePrimer/);
   assert.match(source, /buildWorkProgressLedger\(/);
 });
 

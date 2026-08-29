@@ -45,3 +45,14 @@ test("parsePicShow fails closed naming the malformed field", () => {
   assert.throws(() => parsePicShow({ work_item: workItem, checkpoints: 7 }), /checkpoints must be an array/);
   assert.throws(() => parsePicShow({ work_item: workItem, ready: "yes" }), /ready must be a boolean/);
 });
+
+test("parsePicShow rejects malformed collection entries naming the index", () => {
+	const workItem = { id: "wi-1", type: "task", title: "Leaf" };
+	assert.throws(() => parsePicShow({ work_item: workItem, artifacts: [null] }), /pic show artifacts\[0\] must be an object/);
+	assert.throws(() => parsePicShow({ work_item: workItem, dependencies: ["bad"] }), /pic show dependencies\[0\] must be an object/);
+	assert.throws(() => parsePicShow({ work_item: workItem, checkpoints: [7] }), /pic show checkpoints\[0\] must be an object/);
+	assert.throws(() => parsePicShow({ work_item: workItem, children: [[]] }), /pic show children\[0\] must be an object/);
+	// Objects with arbitrary shapes still pass; element validation is structural.
+	const parsed = parsePicShow({ work_item: workItem, artifacts: [{ stage: "scan" }] });
+	assert.deepEqual(parsed.artifacts, [{ stage: "scan" }]);
+});

@@ -176,10 +176,15 @@ function requireObject(value: unknown, what: string): Record<string, unknown> {
   return value as Record<string, unknown>;
 }
 
-function optionalCollection(value: unknown, key: CollectionKey): unknown[] {
+function optionalCollection(value: unknown, key: CollectionKey): Record<string, unknown>[] {
   if (value === undefined) return [];
   if (!Array.isArray(value)) throw new Error(`pic show ${key} must be an array`);
-  return value;
+  return value.map((entry, index) => {
+    // Fail closed on element shapes: a null or scalar entry would surface as an
+    // opaque undefined-field failure deep in scheduler logic instead of here.
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error(`pic show ${key}[${index}] must be an object`);
+    return entry as Record<string, unknown>;
+  });
 }
 
 function requiredString(item: Record<string, unknown>, field: string, what: string): string {

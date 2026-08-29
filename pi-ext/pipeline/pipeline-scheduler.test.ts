@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { planScanRetryWave } from "./stage-prompts.ts";
+import { planPrimerContext, planScanRetryWave } from "./stage-prompts.ts";
 import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
@@ -1569,4 +1569,57 @@ test("scan fanout retries only failed sections once with the exact parser error"
   assert.match(prompts, /SCAN_FANOUT_RETRY_LIMIT = 1/);
   assert.match(prompts, /planScanRetryWave\(/);
   assert.match(prompts, /Previous output was invalid/);
+});
+
+test("primer context blocks dispatch when a predecessor checkpoint or artifact is missing", () => {
+  const stages = ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"];
+  const workItem = { id: "wi-1", type: "epic", title: "Aggregate" };
+  // rri approved but its bound artifact row is absent: vision dispatch must fail
+  // closed naming rri instead of continuing with reduced context.
+  const missingArtifact = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [{ stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan" }],
+      artifacts: [{ id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" }],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(missingArtifact.missing, ["rri"]);
+
+  // All predecessors present: digests bind checkpoint revision and artifact.
+  const complete = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: "h-rri" },
+      ],
+      artifacts: [
+        { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
+        { id: "wia-rri", stage: "rri", revision: 2, content_hash: "h-rri", content: "<rri/>" },
+      ],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(complete.missing, []);
+  assert.deepEqual(complete.digests.map((digest) => digest.stage), ["scan", "rri"]);
+  assert.equal(complete.digests[1]!.artifact_revision, 2);
+
+  // A predecessor with no checkpoint at all is also missing.
+  const noCheckpoint = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [{ stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-rri" }],
+      artifacts: [{ id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-rri", content: "<rri/>" }],
+    },
+    stages,
+    "contracts",
+  );
+  assert.deepEqual(noCheckpoint.missing, ["scan", "vision", "blueprint"]);
+
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  assert.match(prompts, /missing\.length[\s\S]{0,200}throw new Error/);
+  assert.match(prompts, /planning stage \$\{stage\} is missing approved/);
 });

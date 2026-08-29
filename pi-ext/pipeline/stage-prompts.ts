@@ -198,12 +198,16 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
     if (isPlanningStage(stage)) {
       const profile = resolvePlanProfile(doc);
       const checkpoint = predecessorCheckpointFor(doc, stage, profile.stages);
+      const primerContext = planPrimerContext(doc, profile.stages, stage);
+      if (primerContext.missing.length) {
+        throw new Error(`Work Item ${taskId} planning stage ${stage} is missing approved context for: ${primerContext.missing.join(", ")}. Re-save and re-approve the listed stages before dispatching this one.`);
+      }
       const primer = buildStagePrimer({
         work_item_id: taskId,
         stage,
         profile,
         predecessor_checkpoint: checkpoint ? { stage: String(checkpoint.stage), artifact_id: String(checkpoint.artifact_id || ""), artifact_revision: Number(checkpoint.artifact_revision || 1), content_hash: String(checkpoint.content_hash || "") } : undefined,
-        approved_digests: approvedPrimerDigests(doc),
+        approved_digests: primerContext.digests,
       });
       const handoff = stage === "blueprint" || stage === "task_graph" ? planningHandoff(stage, doc, taskId) + "\n" : "";
       return `${primer}\n${handoff}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, doc.work_item)}`;
@@ -240,23 +244,35 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
   return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildWorkerCorrectionContext(data) + buildEscalationResolutionContext(data, parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)));
 }
 
-// Approved-primer digest constraint: digests come only from checkpoint-bound
-// artifact revisions (stage + artifact_id + revision), never from the latest
-// unapproved artifact, so the primer can never leak unapproved design content.
-function approvedPrimerDigests(doc: PicShowDocument): StagePrimerDigest[] {
-  return (doc.checkpoints || [])
-    .filter((checkpoint) => Boolean(checkpoint.stage) && Boolean(checkpoint.artifact_id))
-    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
-    .map((checkpoint): StagePrimerDigest | undefined => {
-      const artifact = (doc.artifacts || []).find((entry) => entry.id === checkpoint.artifact_id && String(entry.revision) === String(checkpoint.artifact_revision));
-      if (!artifact) return undefined;
-      return {
-        stage: String(checkpoint.stage),
-        artifact_id: String(artifact.id),
-        artifact_revision: Number(artifact.revision || 1),
-        content_hash: String(artifact.content_hash || ""),
-        content: String(artifact.content || ""),
-      };
-    })
-    .filter((entry): entry is StagePrimerDigest => Boolean(entry));
+export function planPrimerContext(doc: PicShowDocument, profileStages: string[], stage: string): { digests: StagePrimerDigest[]; missing: string[] } {
+  const stageIndex = profileStages.indexOf(stage);
+  const predecessors = stageIndex > 0 ? profileStages.slice(0, stageIndex) : [];
+  const checkpoints = (doc.checkpoints || []).filter((checkpoint) => Boolean(checkpoint.stage) && Boolean(checkpoint.artifact_id));
+  const digests: StagePrimerDigest[] = [];
+  const missing: string[] = [];
+  for (const prior of predecessors) {
+    const checkpoint = checkpoints
+      .filter((entry) => entry.stage === prior)
+      .sort((a, b) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0))[0];
+    if (!checkpoint) {
+      missing.push(prior);
+      continue;
+    }
+    // A checkpoint whose bound artifact revision is absent is superseded or
+    // corrupted history: treat it as missing rather than dispatching with a
+    // silent gap in approved context.
+    const artifact = (doc.artifacts || []).find((entry) => entry.id === checkpoint.artifact_id && String(entry.revision) === String(checkpoint.artifact_revision));
+    if (!artifact) {
+      missing.push(prior);
+      continue;
+    }
+    digests.push({
+      stage: String(checkpoint.stage),
+      artifact_id: String(artifact.id),
+      artifact_revision: Number(artifact.revision || 1),
+      content_hash: String(artifact.content_hash || ""),
+      content: String(artifact.content || ""),
+    });
+  }
+  return { digests, missing };
 }
