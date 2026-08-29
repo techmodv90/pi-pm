@@ -2586,3 +2586,54 @@ func TestRriTScenarioIdentityContract(t *testing.T) {
 		t.Fatalf("FAIL passage err = %s", out)
 	}
 }
+
+func TestWorkflowStatusNextActionsAndCheckpointDecide(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Oracle Epic"))
+	id := epic["id"].(string)
+
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "scan" {
+		t.Fatalf("initial status = %#v", status)
+	}
+	actions, _ := status["next_actions"].([]any)
+	if len(actions) == 0 || !strings.Contains(fmt.Sprint(actions[0]), "save_work_item_artifact") || !strings.Contains(fmt.Sprint(actions[0]), "scan") {
+		t.Fatalf("scan next_actions = %#v", actions)
+	}
+
+	artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan content"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", "current", "accepted")
+	_ = artifact
+	for _, stage := range []string{"rri", "vision"} {
+		content := stage + " content"
+		if stage == "vision" {
+			content = validVisionArtifact
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, content)
+	}
+	out := asObject(t, runPic(t, bin, root, home, "work-item", "checkpoint-decide", id, "--decisions", "vision:approved,rri:approved"))
+	decisions := out["decisions"].([]any)
+	if len(decisions) != 2 {
+		t.Fatalf("checkpoint-decide = %#v", out)
+	}
+	if fmt.Sprint(asObject(t, decisions[0])["stage"]) != "rri" || fmt.Sprint(asObject(t, decisions[1])["stage"]) != "vision" {
+		t.Fatalf("decisions must process in planning-profile order: %#v", decisions)
+	}
+	status = asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "blueprint" {
+		t.Fatalf("post-decide status = %#v", status)
+	}
+	actions, _ = status["next_actions"].([]any)
+	if len(actions) == 0 || !strings.Contains(fmt.Sprint(actions[0]), "blueprint") {
+		t.Fatalf("blueprint next_actions = %#v", actions)
+	}
+
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", validContractArtifact)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", "current", "approved"); !strings.Contains(out, "Previous stage blueprint is not approved") || !strings.Contains(out, "Next: ") {
+		t.Fatalf("out-of-order approval error = %s", out)
+	}
+	if out := runPicError(t, bin, root, home, "work-item", "checkpoint-decide", id, "--decisions", "contracts:accepted"); !strings.Contains(out, "requires decision approved") {
+		t.Fatalf("bad decision error = %s", out)
+	}
+}

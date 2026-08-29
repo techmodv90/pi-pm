@@ -84,6 +84,8 @@ func cmdWorkItem(args []string) error {
 		return workItemRriFinalize(db, args[1:])
 	case "artifact-approve":
 		return workItemArtifactApprove(db, args[1:])
+	case "checkpoint-decide":
+		return workItemCheckpointDecide(db, args[1:])
 	case "planning-reset":
 		return workItemPlanningReset(db, args[1:])
 	case "planning-amend":
@@ -1742,60 +1744,13 @@ func workItemArtifactApprove(db *sql.DB, args []string) error {
 	if len(args) != 4 || !contains(workItemStages, args[1]) {
 		return errors.New("usage: pic work-item artifact-approve <id> <stage> <artifact-id> <accepted|approved>")
 	}
-	expectedDecision := "approved"
-	if args[1] == "scan" {
-		expectedDecision = "accepted"
-	}
-	if args[3] != expectedDecision {
-		return fmt.Errorf("%s requires decision %s", args[1], expectedDecision)
-	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	artifactID := args[2]
-	if artifactID == "current" {
-		if err = tx.QueryRow(`SELECT id FROM work_item_artifacts WHERE work_item_id=? AND stage=? ORDER BY revision DESC LIMIT 1`, args[0], args[1]).Scan(&artifactID); err != nil {
-			if errors.Is(err, sql.ErrNoRows) {
-				return fmt.Errorf("No current %s artifact", args[1])
-			}
-			return err
-		}
-	}
-	var revision int
-	var contentHash string
-	err = tx.QueryRow(`SELECT revision,content_hash FROM work_item_artifacts WHERE id=? AND work_item_id=? AND stage=? AND revision=(SELECT MAX(revision) FROM work_item_artifacts WHERE work_item_id=? AND stage=?)`, artifactID, args[0], args[1], args[0], args[1]).Scan(&revision, &contentHash)
+	artifactID, revision, contentHash, err := approveWorkItemArtifactTx(tx, args[0], args[1], args[2], args[3])
 	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("Artifact %s is not current", artifactID)
-		}
-		return err
-	}
-	stages, err := planningStagesForWorkItem(tx, args[0])
-	if err != nil {
-		return err
-	}
-	stageIndex := indexOfStage(stages, args[1])
-	if stageIndex < 0 {
-		return fmt.Errorf("stage %s is not part of this Work Item planning profile", args[1])
-	}
-	if stageIndex > 0 {
-		var previous int
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, args[0], stages[stageIndex-1]).Scan(&previous); err != nil || previous != 1 {
-			return fmt.Errorf("Previous stage %s is not approved", stages[stageIndex-1])
-		}
-	}
-	if args[1] == "task_graph" {
-		var graphContent string
-		if err = tx.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=? AND work_item_id=?`, artifactID, args[0]).Scan(&graphContent); err != nil {
-			return err
-		}
-		if _, err = validateTaskGraphArtifact(tx, args[0], graphContent); err != nil {
-			return fmt.Errorf("task graph validation failed: %w", err)
-		}
-	}
-	if _, err = tx.Exec(`INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES(?,?,?,?,?,?,?)`, "wic-"+shortID(), args[0], args[1], artifactID, revision, contentHash, args[3]); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -1803,6 +1758,65 @@ func workItemArtifactApprove(db *sql.DB, args []string) error {
 	}
 	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3]})
 	return nil
+}
+
+// approveWorkItemArtifactTx records one stage checkpoint inside a caller-owned
+// transaction so batched owner decisions (checkpoint-decide) share the exact
+// validation and predecessor rules of single approvals. artifactRef may be
+// "current" to bind the stage's latest artifact revision.
+func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decision string) (string, int, string, error) {
+	expectedDecision := "approved"
+	if stage == "scan" {
+		expectedDecision = "accepted"
+	}
+	if decision != expectedDecision {
+		return "", 0, "", fmt.Errorf("%s requires decision %s", stage, expectedDecision)
+	}
+	artifactID := artifactRef
+	if artifactID == "current" {
+		if err := tx.QueryRow(`SELECT id FROM work_item_artifacts WHERE work_item_id=? AND stage=? ORDER BY revision DESC LIMIT 1`, workItemID, stage).Scan(&artifactID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return "", 0, "", fmt.Errorf("No current %s artifact", stage)
+			}
+			return "", 0, "", err
+		}
+	}
+	var revision int
+	var contentHash string
+	err := tx.QueryRow(`SELECT revision,content_hash FROM work_item_artifacts WHERE id=? AND work_item_id=? AND stage=? AND revision=(SELECT MAX(revision) FROM work_item_artifacts WHERE work_item_id=? AND stage=?)`, artifactID, workItemID, stage, workItemID, stage).Scan(&revision, &contentHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", 0, "", fmt.Errorf("Artifact %s is not current", artifactID)
+		}
+		return "", 0, "", err
+	}
+	stages, err := planningStagesForWorkItem(tx, workItemID)
+	if err != nil {
+		return "", 0, "", err
+	}
+	stageIndex := indexOfStage(stages, stage)
+	if stageIndex < 0 {
+		return "", 0, "", fmt.Errorf("stage %s is not part of this Work Item planning profile", stage)
+	}
+	if stageIndex > 0 {
+		var previous int
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, workItemID, stages[stageIndex-1]).Scan(&previous); err != nil || previous != 1 {
+			return "", 0, "", fmt.Errorf("Previous stage %s is not approved; %s", stages[stageIndex-1], nextActionHint(stages[stageIndex-1]))
+		}
+	}
+	if stage == "task_graph" {
+		var graphContent string
+		if err = tx.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=? AND work_item_id=?`, artifactID, workItemID).Scan(&graphContent); err != nil {
+			return "", 0, "", err
+		}
+		if _, err = validateTaskGraphArtifact(tx, workItemID, graphContent); err != nil {
+			return "", 0, "", fmt.Errorf("task graph validation failed: %w", err)
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES(?,?,?,?,?,?,?)`, "wic-"+shortID(), workItemID, stage, artifactID, revision, contentHash, decision); err != nil {
+		return "", 0, "", err
+	}
+	return artifactID, revision, contentHash, nil
 }
 
 func workItemWorkflowStatus(db *sql.DB, args []string) error {
@@ -1816,7 +1830,7 @@ func workItemWorkflowStatus(db *sql.DB, args []string) error {
 	if status, ok, statusErr := aggregateDeliveryWorkflowStatus(db, args[0]); statusErr != nil {
 		return statusErr
 	} else if ok {
-		writeJSON(os.Stdout, status)
+		writeJSON(os.Stdout, withNextActions(status))
 		return nil
 	}
 	var childCount, authorizationCount int
@@ -1832,7 +1846,7 @@ func workItemWorkflowStatus(db *sql.DB, args []string) error {
 			next = "aggregate_verification"
 		}
 		_ = tx.Rollback()
-		writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "workflow_kind": "aggregate_delivery", "next_stage": next})
+		writeJSON(os.Stdout, withNextActions(map[string]any{"work_item_id": args[0], "workflow_kind": "aggregate_delivery", "next_stage": next}))
 		return nil
 	}
 	if contains([]string{"task", "bug", "chore"}, fmt.Sprint(item["type"])) {
@@ -1875,7 +1889,7 @@ func workItemWorkflowStatus(db *sql.DB, args []string) error {
 			next = "implement"
 		}
 	}
-	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "next_stage": next, "checkpoints": checkpoints})
+	writeJSON(os.Stdout, withNextActions(map[string]any{"work_item_id": args[0], "next_stage": next, "checkpoints": checkpoints}))
 	return nil
 }
 
@@ -1913,7 +1927,7 @@ func workItemStandalonePlanningStatus(db *sql.DB, id string) error {
 			next = "authorize"
 		}
 	}
-	writeJSON(os.Stdout, map[string]any{"work_item_id": id, "workflow_kind": "standalone_plan", "next_stage": next, "checkpoints": checkpoints})
+	writeJSON(os.Stdout, withNextActions(map[string]any{"work_item_id": id, "workflow_kind": "standalone_plan", "next_stage": next, "checkpoints": checkpoints}))
 	return nil
 }
 
@@ -1928,7 +1942,7 @@ func workItemExecutionStatus(db *sql.DB, id string) error {
 	if db.QueryRow(`SELECT a.id,a.revision,c.id,c.decision_type FROM work_item_artifacts a LEFT JOIN workflow_checkpoints c ON c.artifact_id=a.id AND c.artifact_revision=a.revision WHERE a.work_item_id=(SELECT COALESCE(parent_id,id) FROM work_items WHERE id=?) AND a.stage='task_graph' ORDER BY a.revision DESC LIMIT 1`, id).Scan(&artifactID, &revision, &checkpointID, &decision) == nil {
 		graph = map[string]any{"artifact_id": artifactID, "revision": revision, "checkpoint_id": checkpointID, "decision": decision}
 	}
-	writeJSON(os.Stdout, map[string]any{"work_item_id": id, "workflow_kind": "execution", "next_stage": state.NextStage, "pipeline_stage": state.PipelineStage, "active_instruction_pack_id": state.PackID, "candidate_run_id": state.CandidateID, "review_status": state.ReviewStatus, "completion_report_id": state.CompletionID, "verification_status": state.VerificationStatus, "owner_decision": state.OwnerDecision, "current_task_graph": graph})
+	writeJSON(os.Stdout, withNextActions(map[string]any{"work_item_id": id, "workflow_kind": "execution", "next_stage": state.NextStage, "pipeline_stage": state.PipelineStage, "active_instruction_pack_id": state.PackID, "candidate_run_id": state.CandidateID, "review_status": state.ReviewStatus, "completion_report_id": state.CompletionID, "verification_status": state.VerificationStatus, "owner_decision": state.OwnerDecision, "current_task_graph": graph}))
 	return nil
 }
 
