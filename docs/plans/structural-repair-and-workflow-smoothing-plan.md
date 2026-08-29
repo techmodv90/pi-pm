@@ -1,5 +1,32 @@
 # Plan: Structural Repair And Workflow Smoothing
 
+## Implementation Status (2026-08-29)
+
+Landed on `feature/two-phase-rri-t`, every commit verified with the full Go suite, extension suite, typecheck, and scoped lint:
+
+| Task | Status | Commits |
+|---|---|---|
+| Task 1 — hygiene + RRI-T landing + dead parsers | Done | `74316e5`, `5f9a543`, `db53ce0`, `f1b2c6c`, `292f261` |
+| Task 2 — scheduler split into module seams | Done | `a2dab6e` |
+| Task 3 — typed pic show boundary + scoped lint | Done | `9ade0fa` |
+| Task 6 — next-action oracle + checkpoint-decide | Done | `fdd94b9` |
+| Task 8 — stage primer + attempt ledger | Done | `9c13d84` |
+| Task 9 — TIP contract interfaces + close-out + verify prerequisites | Done | `1dcffa0` |
+| Task 7 — planning-reset --dry-run (bounded repair loops remain) | Partial | `1a6a20a` |
+| Task 4 — Go internal package split | Not started | — |
+| Task 5 — versioned schema migrations | Not started | — |
+
+Deliberate re-ordering versus the phase table: the workflow/priming tasks (6, 8, 9) landed before the Go-internal tasks (4, 5) because they carry the user-visible value; Task 7's contained half (dry-run) landed with them. The `internal/tip` prerequisite for Task 4 was not built, so Task 5 may proceed inside `cmd/pic` (schema file) without waiting for the package split.
+
+### Follow-up notes for the remaining tasks
+
+- **Task 7 remainder — bounded stage-artifact repair:** generalize the RRI-T persona retry pattern (validate -> one relaunch carrying the exact parser error -> escalate to owner) in `pi-ext/pipeline/` to the scan/vision/blueprint/contracts/task_graph artifact validation failures. The dispatch path is `startSubagentResilient` in `stage-prompts.ts`; the persona loop in `PipelineScheduler.runRriT` is the reference implementation.
+- **Task 5 — versioned migrations:** `schema_migrations(version, name, applied_at)` plus an ordered migration slice; `isLegacyBootstrapStatement` in `cmd/pic/main.go` is the prefix filter to delete. GAP-055 already made fresh databases canonical-only, so `m002_legacy_epic_task_cutover` only serves existing project databases (see `projects.json` registry). Legacy parity fixtures were removed by GAP-055 and must be rebuilt as fixture databases before touching `initDB`.
+- **Task 4 — Go internal packages:** start with `internal/tip` (`instruction_packs.go` is self-contained except `workItemByID`, `outputOne`, `validateGherkinSteps`, `parseOptions`, `shortID`, `hashJSON`, which need seam parameters or sibling packages). CLI JSON output must stay byte-identical per move.
+
+## Original Plan (unchanged)
+
+
 ## Goal
 
 Reduce structural debt and workflow friction without changing lifecycle authority,
