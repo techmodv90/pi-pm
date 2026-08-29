@@ -857,53 +857,6 @@ function startFullScanFanout(spec: any, agent: any): SubagentHandle {
   return { id, result, stop: () => handles.forEach((handle) => handle.stop()) };
 }
 
-function normalizeRriPersonaXml(output: string): string {
-  const trimmed = output.trim().replace(/^```(?:xml)?\s*([\s\S]*?)\s*```$/, "$1").trim();
-  const start = trimmed.indexOf("<rri_persona");
-  const end = trimmed.lastIndexOf("</rri_persona>");
-  if (start >= 0 && end > start) return trimmed.slice(start, end + "</rri_persona>".length).trim();
-  return trimmed;
-}
-
-export function parseRriPersonaResult(output: string, expectedPersona: string): any {
-  const trimmed = normalizeRriPersonaXml(output);
-  if (!trimmed.startsWith("<rri_persona") || !trimmed.endsWith("</rri_persona>")) throw new Error(`RRI persona ${expectedPersona} must return one XML document`);
-  const start = trimmed.indexOf("<rri_persona");
-  const end = trimmed.lastIndexOf("</rri_persona>");
-  if (start < 0 || end <= start) throw new Error(`RRI persona ${expectedPersona} must return one XML document`);
-  const xml = trimmed.slice(start, end + "</rri_persona>".length);
-  const validation = XMLValidator.validate(xml);
-  if (validation !== true) throw new Error(`RRI persona ${expectedPersona} returned invalid XML: ${validation.err?.msg || "malformed document"}`);
-  for (const tag of ["auto_answered", "candidate_questions", "not_applicable"]) if (!new RegExp(`<${tag}(?:\\s|>)`).test(xml)) throw new Error(`RRI persona ${expectedPersona} missing ${tag}`);
-  const root: any = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" }).parse(xml).rri_persona;
-  const value: any = { persona: root?.["@_persona"] };
-  if (value.persona !== expectedPersona) throw new Error(`RRI persona output expected ${expectedPersona}, got ${value.persona || "none"}`);
-  const list = (container: any, key: string) => { const value = container?.[key]; return value ? (Array.isArray(value) ? value : [value]) : []; };
-  for (const field of ["auto_answered", "candidate_questions", "not_applicable"]) if (!root || root[field] === undefined) throw new Error(`RRI persona ${expectedPersona} missing ${field}`);
-  value.auto_answered = list(root, "auto_answered").flatMap((container: any) => list(container, "answer").map((answer: any) => ({ question: answer.question, answer: answer.answer, source: answer.source, confidence: answer["@_confidence"] })));
-  value.candidate_questions = list(root, "candidate_questions").flatMap((container: any) => list(container, "question").map((question: any) => ({ priority: question["@_priority"], classification: question["@_classification"], mode: question["@_mode"], question: question.question, suggested_answers: list(question, "suggested_answer").map((entry: any) => entry), reason: question.reason, requirement_area: question.requirement_area })));
-  value.not_applicable = list(root, "not_applicable").flatMap((container: any) => list(container, "topic").map((topic: any) => ({ topic: topic.topic, reason: topic.reason })));
-  for (const field of ["auto_answered", "candidate_questions", "not_applicable"]) {
-    if (!Array.isArray(value[field])) throw new Error(`RRI persona ${expectedPersona} missing ${field} array`);
-  }
-  for (const answer of value.auto_answered) {
-    if (!["high", "medium", "low"].includes(answer?.confidence) || !answer.question || !answer.answer || !answer.source) throw new Error(`RRI persona ${expectedPersona} has invalid auto_answered entry`);
-  }
-  for (const question of value.candidate_questions) {
-    const missing = [
-      !["P0", "P1", "P2", "P3"].includes(question?.priority) && "priority attribute",
-      !["SMART-ASKED", "CHALLENGE-PROPOSED"].includes(question?.classification) && "classification attribute",
-      !["CHALLENGE", "GUIDED", "EXPLORE"].includes(question?.mode) && "mode attribute",
-      !question.question && "question element",
-      (!Array.isArray(question.suggested_answers) || question.suggested_answers.length === 0) && "suggested_answer element",
-      !question.reason && "reason element",
-      !question.requirement_area && "requirement_area element",
-    ].filter(Boolean);
-    if (missing.length) throw new Error(`RRI persona ${expectedPersona} candidate question missing or invalid: ${missing.join(", ")}`);
-  }
-  return value;
-}
-
 // RRI-T authoring merge (OB-3): the duplicate scenario identity is the
 // requirement-bound authoring key (dimension|stress_axis|requirement_id|id) —
 // never the authoring persona — so the same scenario authored by several personas
@@ -925,27 +878,6 @@ export function mergeRriTAuthoringResults(results: Array<{ persona: string; scen
   const notApplicable = results.flatMap((result) => (result.not_applicable || []).map((topic: any) => ({ ...topic, persona: result.persona })));
   const openBlockers = results.flatMap((result) => (result.open_blockers || []));
   return { methodology: "rri-t", personas: [...personas], scenarios, not_applicable: notApplicable, open_blockers: openBlockers };
-}
-
-export function parseRriSynthesisResult(output: string): any {
-  const trimmed = output.trim();
-  if (!trimmed.startsWith("<rri_synthesis") || !trimmed.endsWith("</rri_synthesis>")) throw new Error("RRI synthesis must return one XML document");
-  const start = trimmed.indexOf("<rri_synthesis");
-  const end = trimmed.lastIndexOf("</rri_synthesis>");
-  if (start < 0 || end <= start) throw new Error("RRI synthesis must return one XML document");
-  const xml = trimmed.slice(start, end + "</rri_synthesis>".length);
-  if (XMLValidator.validate(xml) !== true) throw new Error("RRI synthesis returned invalid XML");
-  for (const tag of ["remaining_queue", "auto_answered", "not_applicable", "open_blockers"]) if (!new RegExp(`<${tag}(?:\\s|>)`).test(xml)) throw new Error(`RRI synthesis missing ${tag}`);
-  const root: any = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_" }).parse(xml).rri_synthesis;
-  const list = (key: string) => { const value = root?.[key]; return value ? (Array.isArray(value) ? value : [value]) : []; };
-  for (const field of ["remaining_queue", "auto_answered", "not_applicable", "open_blockers"]) if (!root || root[field] === undefined) throw new Error(`RRI synthesis missing ${field}`);
-  const value: any = { remaining_queue: list("remaining_queue"), auto_answered: list("auto_answered"), not_applicable: list("not_applicable"), open_blockers: list("open_blockers"), next_question: root?.next_question || null, final_report: root?.final_report || null };
-  for (const field of ["remaining_queue", "auto_answered", "not_applicable", "open_blockers"]) {
-    if (!Array.isArray(value[field])) throw new Error(`RRI synthesis missing ${field} array`);
-  }
-  if (!(value.next_question === null || (value.next_question && typeof value.next_question === "object"))) throw new Error("RRI synthesis has invalid next_question");
-  if (!(value.final_report === null || (value.final_report && typeof value.final_report === "object"))) throw new Error("RRI synthesis has invalid final_report");
-  return value;
 }
 
 function outputFor(run: PipelineRun): string {

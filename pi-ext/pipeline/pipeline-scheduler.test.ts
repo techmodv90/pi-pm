@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
 
@@ -410,17 +410,6 @@ test("planner completion publishes a draft handoff without canonical Blueprint p
   assert.match(source, /do not call save_work_item_artifact/);
 });
 
-test("legacy RRI persona parser remains strict for compatibility", () => {
-  const valid = `<rri_persona persona="QA / Tester"><auto_answered><answer confidence="high"><question>Tests?</question><answer>Go and Node</answer><source>AGENTS.md</source></answer></auto_answered><candidate_questions><question priority="P1" classification="SMART-ASKED" mode="GUIDED"><question>Why this matters: failures block delivery. Which recovery outcome is required?</question><suggested_answer>Retry</suggested_answer><suggested_answer>Stop</suggested_answer><reason>Recovery policy is unspecified</reason><requirement_area>reliability</requirement_area></question></candidate_questions><not_applicable></not_applicable></rri_persona>`;
-  assert.equal(parseRriPersonaResult(valid, "QA / Tester").persona, "QA / Tester");
-  assert.throws(() => parseRriPersonaResult(valid, "Developer"), /expected Developer/);
-  assert.throws(() => parseRriPersonaResult('<rri_persona persona="QA / Tester"></rri_persona>', "QA / Tester"), /auto_answered/);
-  assert.equal(parseRriPersonaResult("```xml\n" + valid + "\n```", "QA / Tester").persona, "QA / Tester");
-  assert.equal(parseRriPersonaResult("Here is the result:\n" + valid, "QA / Tester").persona, "QA / Tester");
-  assert.throws(() => parseRriPersonaResult(valid.replace("Tests?", "Tests & CI?"), "QA / Tester"), /invalid XML/);
-  assert.throws(() => parseRriPersonaResult(valid.replace("<reason>Recovery policy is unspecified</reason>", ""), "QA / Tester"), /candidate question missing or invalid: reason element/);
-});
-
 test("RRI-T persona results accept the six-field authoring contract and ignore legacy grading fields", () => {
   const valid = `<rri_t_persona persona="QA / Tester"><scenarios><scenario><id>RRI-T-1</id><dimension>D3</dimension><stress_axis>ERROR</stress_axis><requirement_id>REQ-1</requirement_id><procedure>Submit the empty form → inline error is shown</procedure><remediation_hint>Assert the error text on the form</remediation_hint></scenario></scenarios><not_applicable></not_applicable><open_blockers></open_blockers></rri_t_persona>`;
   const parsed = parseRriTPersonaResult(valid, "QA / Tester");
@@ -504,14 +493,6 @@ test("RRI-T authoring fanout runs read-only personas on the bounded resilient ru
   assert.match(persona, /no worktree isolation/);
   const runner = readFileSync(new URL("../subagent/runner.ts", import.meta.url), "utf8");
   assert.match(runner, /READ_ONLY_AGENTS = new Set\(\[[^\]]*"rri-t-persona"/);
-});
-
-
-test("RRI synthesis handoff is strict XML", () => {
-  const valid = "<rri_synthesis><remaining_queue></remaining_queue><auto_answered></auto_answered><not_applicable></not_applicable><open_blockers></open_blockers><final_report></final_report></rri_synthesis>";
-  assert.deepEqual(parseRriSynthesisResult(valid), { remaining_queue: [], auto_answered: [], not_applicable: [], open_blockers: [], next_question: null, final_report: null });
-  assert.throws(() => parseRriSynthesisResult("Prepared interview"), /one XML document/);
-  assert.throws(() => parseRriSynthesisResult("<rri_synthesis><next_question></next_question></rri_synthesis>"), /remaining_queue/);
 });
 
 test("RRI dispatch stays in contractor session and does not spawn persona agents", () => {
