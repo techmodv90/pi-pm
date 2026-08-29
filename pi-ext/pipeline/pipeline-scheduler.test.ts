@@ -105,8 +105,8 @@ test("planning handoff contains lineage metadata, not artifact history", () => {
 test("planning handoff resolves the approved predecessor checkpoint from the profile order", () => {
   const data = {
     checkpoints: [
-      { stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, created_at: "2026-01-01" },
-      { stage: "rri", artifact_id: "cp-rri", artifact_revision: 1, created_at: "2026-01-02" },
+      { stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, created_at: "2026-01-01", decision_type: "accepted" },
+      { stage: "rri", artifact_id: "cp-rri", artifact_revision: 1, created_at: "2026-01-02", decision_type: "approved" },
     ],
   };
   assert.equal(predecessorCheckpointFor(data, "vision", ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"])?.artifact_id, "cp-rri");
@@ -1675,7 +1675,10 @@ test("primer context blocks dispatch when a predecessor checkpoint or artifact i
         { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
         { stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-stale", decision_type: "approved" },
       ],
-      artifacts: [{ id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-current", content: "<rri/>" }],
+      artifacts: [
+        { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
+        { id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-current", content: "<rri/>" },
+      ],
     },
     stages,
     "vision",
