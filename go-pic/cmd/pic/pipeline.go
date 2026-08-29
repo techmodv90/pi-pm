@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
@@ -55,7 +56,7 @@ func prepareInstructionPackForFirstClaim(tx *sql.Tx, taskID string) error {
 	var existing string
 	err = tx.QueryRow(`SELECT id FROM work_item_instruction_packs WHERE work_item_id=? AND checkpoint_id=? AND status='inactive' ORDER BY version DESC LIMIT 1`, taskID, checkpointID).Scan(&existing)
 	if err == nil {
-		return activateWorkItemInstructionPack(tx, existing)
+		return tip.ActivateInstructionPack(tx, existing)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return err
@@ -64,11 +65,11 @@ func prepareInstructionPackForFirstClaim(tx *sql.Tx, taskID string) error {
 	if err = tx.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.id=?`, checkpointID).Scan(&content); err != nil {
 		return err
 	}
-	plan, err := parseTaskPlanJSON("```task-plan-json\n" + content + "\n```")
+	plan, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + content + "\n```")
 	if err != nil {
 		return err
 	}
-	var node *taskPlanDocumentNode
+	var node *tip.TaskPlanDocumentNode
 	for index := range plan.Nodes {
 		if plan.Nodes[index].Key == nodeKey {
 			node = &plan.Nodes[index]
@@ -82,7 +83,7 @@ func prepareInstructionPackForFirstClaim(tx *sql.Tx, taskID string) error {
 	if err != nil {
 		return err
 	}
-	packContent, contentHash, err := materializedInstructionPack(*node, plan.Version, requirements)
+	packContent, contentHash, err := tip.MaterializedInstructionPack(*node, plan.Version, requirements)
 	if err != nil {
 		return err
 	}
@@ -94,7 +95,7 @@ func prepareInstructionPackForFirstClaim(tx *sql.Tx, taskID string) error {
 	if _, err = tx.Exec(`INSERT INTO work_item_instruction_packs(id,work_item_id,checkpoint_id,version,status,content_json,content_hash) VALUES(?,?,?,?,'inactive',?,?)`, packID, taskID, checkpointID, version, string(packContent), contentHash); err != nil {
 		return err
 	}
-	return activateWorkItemInstructionPack(tx, packID)
+	return tip.ActivateInstructionPack(tx, packID)
 }
 
 func workflowPipelineClaim(db *sql.DB, args []string) error {

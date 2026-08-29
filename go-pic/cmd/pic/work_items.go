@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -1247,7 +1248,7 @@ func validateContractReport(content string) error {
 			Minutes int `json:"estimated_minutes"`
 		} `json:"task_graph_summary"`
 		NotIncluded []string             `json:"not_included"`
-		Obligations []contractObligation `json:"obligations"`
+		Obligations []tip.ContractObligation `json:"obligations"`
 	}
 	if err := json.Unmarshal([]byte(content), &report); err != nil || report.ProjectName == "" || len(report.Deliverables) == 0 || len(report.TechStack) == 0 || len(report.NotIncluded) == 0 || report.Summary.Tips < 1 || report.Summary.Minutes < 1 {
 		return errors.New("Contract artifact must contain valid project, deliverables, stack, task graph summary, and exclusions")
@@ -2427,28 +2428,28 @@ func workItemGraphValidate(db *sql.DB, args []string) error {
 	return nil
 }
 
-func validateTaskGraphArtifact(db databaseQueryer, workItemID, content string) (taskPlanDocument, error) {
-	plan, err := parseTaskPlanJSON("```task-plan-json\n" + content + "\n```")
+func validateTaskGraphArtifact(db databaseQueryer, workItemID, content string) (tip.TaskPlanDocument, error) {
+	plan, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + content + "\n```")
 	if err != nil {
-		return taskPlanDocument{}, err
+		return tip.TaskPlanDocument{}, err
 	}
 	if _, err = validateTaskGraphRequirementCoverage(db, workItemID, plan); err != nil {
-		return taskPlanDocument{}, err
+		return tip.TaskPlanDocument{}, err
 	}
 	if err := validateTaskGraphObligations(db, workItemID, plan); err != nil {
-		return taskPlanDocument{}, err
+		return tip.TaskPlanDocument{}, err
 	}
 	var kind, parentID string
 	if err = db.QueryRow(`SELECT type,COALESCE(parent_id,'') FROM work_items WHERE id=?`, workItemID).Scan(&kind, &parentID); err != nil {
-		return taskPlanDocument{}, err
+		return tip.TaskPlanDocument{}, err
 	}
 	if contains([]string{"task", "bug", "chore"}, kind) && parentID == "" && (len(plan.Nodes) != 1 || plan.Nodes[0].Type != kind || plan.Nodes[0].ParentKey != "" || len(plan.Nodes[0].DependsOn) != 0) {
-		return taskPlanDocument{}, errors.New("standalone task graph requires exactly one matching executable node without parent or dependencies")
+		return tip.TaskPlanDocument{}, errors.New("standalone task graph requires exactly one matching executable node without parent or dependencies")
 	}
 	return plan, nil
 }
 
-func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan taskPlanDocument) error {
+func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan tip.TaskPlanDocument) error {
 	var contractContent string
 	if err := db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='contracts' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&contractContent); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -2456,7 +2457,7 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ta
 		}
 		return fmt.Errorf("approved Contract is required before Task Graph obligation validation: %w", err)
 	}
-	var contract contractDocument
+	var contract tip.ContractDocument
 	bindingFieldsPresent := false
 	for _, node := range plan.Nodes {
 		if node.Type != "feature" && node.Type != "gate" && (node.Provides != nil || node.Consumes != nil || node.EvidenceFor != nil || node.ObligationKeys != nil) {
@@ -2476,7 +2477,7 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ta
 	if !bindingFieldsPresent {
 		return errors.New("Task Graph nodes must bind Contract obligations with provides, consumes, evidence_for, and obligation_keys")
 	}
-	obligations := map[string]contractObligation{}
+	obligations := map[string]tip.ContractObligation{}
 	for _, obligation := range contract.Obligations {
 		if obligation.ID == "" || obligations[obligation.ID].ID != "" {
 			return fmt.Errorf("Contract obligation %s is duplicated", obligation.ID)
@@ -2541,19 +2542,19 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ta
 	return nil
 }
 
-func validateTaskGraphRequirementCoverage(db databaseQueryer, workItemID string, plan taskPlanDocument) (map[string]requirementSnapshot, error) {
+func validateTaskGraphRequirementCoverage(db databaseQueryer, workItemID string, plan tip.TaskPlanDocument) (map[string]tip.RequirementSnapshot, error) {
 	// Materialized children inherit requirement coverage from their root parent.
 	requirements, err := queryMaps(db, `SELECT id,requirement_key,title,description,acceptance_criteria FROM requirements WHERE (epic_id=? OR task_id=? OR task_id IN (SELECT root_work_item_id FROM work_item_materializations WHERE work_item_id=?)) AND status!='deferred'`, workItemID, workItemID, workItemID)
 	if err != nil {
 		return nil, err
 	}
-	known, covered := map[string]requirementSnapshot{}, map[string]bool{}
+	known, covered := map[string]tip.RequirementSnapshot{}, map[string]bool{}
 	for _, requirement := range requirements {
 		key := fmt.Sprint(requirement["requirement_key"])
 		if err := validateGherkinSteps(fmt.Sprint(requirement["acceptance_criteria"])); err != nil {
 			return nil, fmt.Errorf("%s acceptance criteria %w", key, err)
 		}
-		snapshot := requirementSnapshot{RequirementID: fmt.Sprint(requirement["id"]), RequirementKey: key, Title: fmt.Sprint(requirement["title"]), Description: fmt.Sprint(requirement["description"]), AcceptanceCriteria: fmt.Sprint(requirement["acceptance_criteria"])}
+		snapshot := tip.RequirementSnapshot{RequirementID: fmt.Sprint(requirement["id"]), RequirementKey: key, Title: fmt.Sprint(requirement["title"]), Description: fmt.Sprint(requirement["description"]), AcceptanceCriteria: fmt.Sprint(requirement["acceptance_criteria"])}
 		snapshot.SourceHash = hashJSON(map[string]any{"id": snapshot.RequirementID, "key": snapshot.RequirementKey, "title": snapshot.Title, "description": snapshot.Description, "acceptance_criteria": snapshot.AcceptanceCriteria})
 		known[strings.ToUpper(key)] = snapshot
 	}
@@ -2582,21 +2583,6 @@ func validateTaskGraphRequirementCoverage(db databaseQueryer, workItemID string,
 	return known, nil
 }
 
-func materializedInstructionPack(node taskPlanDocumentNode, schemaVersion int, requirements map[string]requirementSnapshot) ([]byte, string, error) {
-	content := instructionPackContent{Goal: node.Goal, Module: node.Module, EstimatedEffort: node.EstimatedEffort, Files: node.Files, Patterns: node.Patterns, BusinessRules: node.BusinessRules, ValidationRules: node.ValidationRules, ErrorHandling: node.ErrorHandling, StateTransitions: node.StateTransitions, ContractObligations: node.ContractObligations, Constraints: node.Constraints, Verification: node.Verification, SchemaVersion: schemaVersion, SkillFamilies: node.SkillFamilies, ObligationKeys: node.ObligationKeys, Provides: node.Provides, Consumes: node.Consumes, EvidenceFor: node.EvidenceFor}
-	snapshots := make([]requirementSnapshot, 0, len(node.RequirementKeys))
-	for _, key := range node.RequirementKeys {
-		snapshots = append(snapshots, requirements[strings.ToUpper(key)])
-	}
-	sort.Slice(snapshots, func(i, j int) bool { return snapshots[i].RequirementKey < snapshots[j].RequirementKey })
-	canonical := map[string]any{"content": content, "requirements": snapshots}
-	data, err := json.Marshal(canonical)
-	if err != nil {
-		return nil, "", err
-	}
-	return data, hashJSON(canonical), nil
-}
-
 func workItemMaterialize(db *sql.DB, args []string) error {
 	if len(args) != 1 {
 		return errors.New("usage: pic work-item materialize <id>")
@@ -2613,7 +2599,7 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 		}
 		return err
 	}
-	plan, err := parseTaskPlanJSON("```task-plan-json\n" + content + "\n```")
+	plan, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + content + "\n```")
 	if err != nil {
 		return err
 	}
@@ -2724,7 +2710,7 @@ func workItemAuthorize(db *sql.DB, args []string) error {
 		}
 		return err
 	}
-	plan, err := parseTaskPlanJSON("```task-plan-json\n" + content + "\n```")
+	plan, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + content + "\n```")
 	if err != nil {
 		return err
 	}

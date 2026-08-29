@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"bytes"
 	"database/sql"
 	"encoding/json"
@@ -1149,7 +1150,7 @@ func TestAggregateDeliveryLifecycle(t *testing.T) {
 
 func TestTaskPlanRejectsDependencyCycle(t *testing.T) {
 	plan := `{"version":1,"execution_policy":"parallel_allowed","nodes":[{"key":"T01","name":"One","goal":"One","requirement_keys":["REQ-001"],"depends_on":["T02"],"priority":"P1","module":"x","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"true","required":true}]},{"key":"T02","name":"Two","goal":"Two","requirement_keys":["REQ-001"],"depends_on":["T01"],"priority":"P1","module":"x","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"true","required":true}]}]}`
-	_, err := parseTaskPlanJSON("```task-plan-json\n" + plan + "\n```")
+	_, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + plan + "\n```")
 	if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
 		t.Fatalf("cycle error = %v", err)
 	}
@@ -1157,10 +1158,10 @@ func TestTaskPlanRejectsDependencyCycle(t *testing.T) {
 
 func TestTaskPlanV2RequiresExplicitSkillFamilies(t *testing.T) {
 	base := `{"version":2,"execution_policy":"strict_sequential","nodes":[{"key":"T01","name":"One","goal":"One","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"x",%s"files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"true","required":true}]}]}`
-	if _, err := parseTaskPlanJSON("```task-plan-json\n" + strings.Replace(base, "%s", "", 1) + "\n```"); err == nil || !strings.Contains(err.Error(), "requires skillFamilies") {
+	if _, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + strings.Replace(base, "%s", "", 1) + "\n```"); err == nil || !strings.Contains(err.Error(), "requires skillFamilies") {
 		t.Fatalf("missing skillFamilies error = %v", err)
 	}
-	plan, err := parseTaskPlanJSON("```task-plan-json\n" + strings.Replace(base, "%s", `"skillFamilies":[],`, 1) + "\n```")
+	plan, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + strings.Replace(base, "%s", `"skillFamilies":[],`, 1) + "\n```")
 	if err != nil || plan.Nodes[0].SkillFamilies == nil || len(*plan.Nodes[0].SkillFamilies) != 0 {
 		t.Fatalf("explicit empty skillFamilies plan=%#v err=%v", plan, err)
 	}
@@ -1217,23 +1218,23 @@ func createLegacyVerificationFixture(t *testing.T, bin, root, home, taskID strin
 }
 
 func TestValidateInstructionPackVerificationContract(t *testing.T) {
-	base := instructionPackContent{
+	base := tip.InstructionPackContent{
 		Goal: "Change source", Files: []string{"src/main.ts"}, BusinessRules: []any{"rule"}, ValidationRules: []any{"rule"},
 		ErrorHandling: []any{"rule"}, StateTransitions: []any{"rule"}, ContractObligations: []any{"rule"}, SchemaVersion: 2,
 		Constraints:  map[string]any{"generated_files": []any{"test-results/**"}},
 		Verification: []any{map[string]any{"command": "npm test", "required": true, "expected_writes": []any{"test-results/**"}}},
 	}
-	if err := validateInstructionPackContent(base); err != nil {
+	if err := tip.ValidateInstructionPackContent(base); err != nil {
 		t.Fatalf("valid verification contract rejected: %v", err)
 	}
 	failedGate := base
 	failedGate.Verification = []any{map[string]any{"required": true}}
-	if err := validateInstructionPackContent(failedGate); err == nil || !strings.Contains(err.Error(), "verification command") {
+	if err := tip.ValidateInstructionPackContent(failedGate); err == nil || !strings.Contains(err.Error(), "verification command") {
 		t.Fatalf("verification without command accepted: %v", err)
 	}
 	missingSetup := base
 	missingSetup.Verification = []any{map[string]any{"command": "npm test", "required": true, "requires": []any{"dev-server"}}}
-	if err := validateInstructionPackContent(missingSetup); err == nil || !strings.Contains(err.Error(), "setup_commands") {
+	if err := tip.ValidateInstructionPackContent(missingSetup); err == nil || !strings.Contains(err.Error(), "setup_commands") {
 		t.Fatalf("service prerequisite without setup accepted: %v", err)
 	}
 }
@@ -2639,7 +2640,7 @@ func TestWorkflowStatusNextActionsAndCheckpointDecide(t *testing.T) {
 }
 
 func TestInstructionPackRendersContractInterfaces(t *testing.T) {
-	node := taskPlanDocumentNode{
+	node := tip.TaskPlanDocumentNode{
 		Key: "T01", Type: "task", Name: "Persist", RequirementKeys: []string{"REQ-001"},
 		Provides: []string{"OBL-001"}, Consumes: []string{"OBL-002"}, EvidenceFor: []string{"OBL-001"}, ObligationKeys: []string{"OBL-001"},
 		Files: []string{"a.go"},
@@ -2647,24 +2648,24 @@ func TestInstructionPackRendersContractInterfaces(t *testing.T) {
 		Verification: []any{map[string]any{"command": "go test ./..."}},
 		BusinessRules: []any{"rule"}, ValidationRules: []any{"v"}, ErrorHandling: []any{"e"}, StateTransitions: []any{"s"}, ContractObligations: []any{"o"},
 	}
-	packBytes, _, err := materializedInstructionPack(node, 3, map[string]requirementSnapshot{"REQ-001": {RequirementKey: "REQ-001", Title: "R", AcceptanceCriteria: "Given\nWhen\nThen"}})
+	packBytes, _, err := tip.MaterializedInstructionPack(node, 3, map[string]tip.RequirementSnapshot{"REQ-001": {RequirementKey: "REQ-001", Title: "R", AcceptanceCriteria: "Given\nWhen\nThen"}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	pack := map[string]any{"id": "wip-x", "version": 1, "status": "active", "content_hash": "sha256:x", "content_json": string(packBytes), "work_item_id": "wi-1", "work_item_title": "T", "work_item_type": "task", "priority": "medium"}
-	if err := expandCanonicalInstructionPack(pack); err != nil {
+	if err := tip.ExpandCanonicalInstructionPack(pack); err != nil {
 		t.Fatal(err)
 	}
-	rendered := renderInstructionPack(pack)
+	rendered := tip.RenderInstructionPack(pack)
 	if !strings.Contains(rendered, "## CONTRACT INTERFACES") || !strings.Contains(rendered, "OBL-001") || !strings.Contains(rendered, "consumes: OBL-002") {
 		t.Fatalf("contract interfaces missing from TIP render: %s", rendered)
 	}
 
 	legacy := map[string]any{"id": "wip-y", "version": 1, "status": "active", "content_hash": "sha256:y", "content_json": `{"content":{"goal":"g","files":["f.go"],"business_rules":["b"],"validation_rules":["v"],"error_handling":["e"],"state_transitions":["s"],"contract_obligations":["o"],"constraints":{"k":"v"},"verification":[{"command":"c"}],"schemaVersion":2},"requirements":[]}`, "work_item_id": "wi-1", "work_item_title": "T", "work_item_type": "task", "priority": "medium"}
-	if err := expandCanonicalInstructionPack(legacy); err != nil {
+	if err := tip.ExpandCanonicalInstructionPack(legacy); err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(renderInstructionPack(legacy), "## CONTRACT INTERFACES") {
+	if strings.Contains(tip.RenderInstructionPack(legacy), "## CONTRACT INTERFACES") {
 		t.Fatalf("legacy pack must not render an empty contract interfaces section")
 	}
 }
