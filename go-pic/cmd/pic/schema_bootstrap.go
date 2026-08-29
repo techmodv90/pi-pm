@@ -147,62 +147,49 @@ var legacySchemaStatements = []string{
 }
 
 
-// schemaMigration is one ordered, idempotent schema step. initDB is a
-// reconciler: by default every step re-runs on every open (guarded DDL and
-// backfills), which is what lets the CLI repair a degraded database. A step may
-// opt into one-shot semantics with once=true; schema_migrations records the
-// first successful application of every step for auditing and for those
-// one-shot migrations.
+// schemaDB is the handle a migration step runs against: the open database for
+// self-managed steps, or one transaction for atomic steps.
+type schemaDB interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
+// schemaMigration is one ordered schema step. Every step is one-shot: it is
+// skipped once its version is recorded, so an already-migrated database
+// performs no DDL or data mutation on later opens. Transactional steps (tx)
+// apply and record their version inside one transaction, so a crash leaves
+// either the whole step applied and recorded or nothing. Self-managed steps
+// (tx=false) use their own transactions or connection pragmas (table rebuilds);
+// each of their operations is individually atomic and idempotent, and the
+// version is only recorded after the step completes, so an interrupted step
+// re-runs in full on the next open.
 type schemaMigration struct {
 	version    int
 	name       string
 	legacyOnly bool
-	once       bool
-	apply      func(db *sql.DB) error
+	tx         bool
+	apply      func(db schemaDB) error
 }
 
 func schemaMigrationSteps() []schemaMigration {
 	return []schemaMigration{
-		{version: 1, name: "pre_reconcile_schema", apply: func(db *sql.DB) error {
-			if err := removeLegacyTIPSchema(db); err != nil {
-				return fmt.Errorf("remove legacy TIP schema: %w", err)
-			}
-			if err := migrateEpicWorkflowSchema(db); err != nil {
-				return fmt.Errorf("migrate legacy workflow schema: %w", err)
-			}
-			if tableExists(db, "work_item_materializations") {
-				var tableSQL string
-				if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='work_item_materializations'`).Scan(&tableSQL); err != nil {
-					return err
-				}
-				if strings.Contains(tableSQL, "work_item_id TEXT NOT NULL UNIQUE") {
-					if _, err := db.Exec(`PRAGMA foreign_keys=OFF;
-						CREATE TABLE work_item_materializations_v2 (root_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), node_key TEXT NOT NULL, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(root_work_item_id,checkpoint_id,node_key));
-						INSERT INTO work_item_materializations_v2 SELECT * FROM work_item_materializations;
-						DROP TABLE work_item_materializations;
-						ALTER TABLE work_item_materializations_v2 RENAME TO work_item_materializations;
-						PRAGMA foreign_keys=ON`); err != nil {
-						return fmt.Errorf("migrate work item materializations: %w", err)
-					}
-				}
-			}
-			return nil
+		{version: 1, name: "pre_reconcile_schema", apply: func(db schemaDB) error {
+			return reconcileLegacySchema(db.(*sql.DB))
 		}},
-		{version: 2, name: "artifact_stage_widening", apply: func(db *sql.DB) error {
-			return migrateArtifactStageSchema(db)
+		{version: 2, name: "artifact_stage_widening", apply: func(db schemaDB) error {
+			return migrateArtifactStageSchema(db.(*sql.DB))
 		}},
-		{version: 3, name: "canonical_baseline", apply: func(db *sql.DB) error {
-			migrated := false
-			return applySchemaStatements(db, canonicalSchemaStatements, &migrated)
+		{version: 3, name: "pipeline_columns_reconcile", apply: func(db schemaDB) error {
+			return applyPipelineColumnMigrations(db.(*sql.DB))
 		}},
-		{version: 4, name: "legacy_schema_bootstrap", legacyOnly: true, apply: func(db *sql.DB) error {
-			migrated := false
-			return applySchemaStatements(db, legacySchemaStatements, &migrated)
+		{version: 4, name: "canonical_baseline", tx: true, apply: func(db schemaDB) error {
+			return applySchemaStatements(db, canonicalSchemaStatements)
 		}},
-		{version: 5, name: "canonical_backfills", apply: func(db *sql.DB) error {
-			return applyCanonicalBackfills(db)
+		{version: 5, name: "legacy_schema_bootstrap", legacyOnly: true, tx: true, apply: func(db schemaDB) error {
+			return applySchemaStatements(db, legacySchemaStatements)
 		}},
-		{version: 6, name: "legacy_pack_backfills", legacyOnly: true, apply: func(db *sql.DB) error {
+		{version: 6, name: "canonical_backfills", tx: true, apply: applyCanonicalBackfills},
+		{version: 7, name: "legacy_pack_backfills", legacyOnly: true, tx: true, apply: func(db schemaDB) error {
 			if err := migrateLegacyWorkItemInstructionPacks(db); err != nil {
 				return err
 			}
@@ -211,10 +198,35 @@ func schemaMigrationSteps() []schemaMigration {
 	}
 }
 
-// applySchemaMigrations records and applies the ordered schema steps. Legacy
-// steps are skipped (and not recorded) on databases that never carried the
-// retired Epic/Task tables, so a fresh database re-evaluates only that cheap
-// detection on later opens.
+func reconcileLegacySchema(db *sql.DB) error {
+	if err := removeLegacyTIPSchema(db); err != nil {
+		return fmt.Errorf("remove legacy TIP schema: %w", err)
+	}
+	if err := migrateEpicWorkflowSchema(db); err != nil {
+		return fmt.Errorf("migrate legacy workflow schema: %w", err)
+	}
+	if tableExists(db, "work_item_materializations") {
+		var tableSQL string
+		if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='work_item_materializations'`).Scan(&tableSQL); err != nil {
+			return err
+		}
+		if strings.Contains(tableSQL, "work_item_id TEXT NOT NULL UNIQUE") {
+			if _, err := db.Exec(`PRAGMA foreign_keys=OFF;
+				CREATE TABLE work_item_materializations_v2 (root_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), node_key TEXT NOT NULL, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(root_work_item_id,checkpoint_id,node_key));
+				INSERT INTO work_item_materializations_v2 SELECT * FROM work_item_materializations;
+				DROP TABLE work_item_materializations;
+				ALTER TABLE work_item_materializations_v2 RENAME TO work_item_materializations;
+				PRAGMA foreign_keys=ON`); err != nil {
+				return fmt.Errorf("migrate work item materializations: %w", err)
+			}
+		}
+	}
+	return nil
+}
+
+// applySchemaMigrations applies the ordered schema steps once per database.
+// Legacy steps are skipped (and never recorded) on databases that never carried
+// the retired Epic/Task tables.
 func applySchemaMigrations(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')))`); err != nil {
 		return err
@@ -242,30 +254,41 @@ func applySchemaMigrations(db *sql.DB) error {
 		if migration.legacyOnly && !legacySchema {
 			continue
 		}
-		if migration.once && applied[migration.version] {
+		if applied[migration.version] {
 			continue
 		}
-		if err := migration.apply(db); err != nil {
+		if err := applySchemaMigration(db, migration); err != nil {
 			return fmt.Errorf("schema migration %03d_%s: %w", migration.version, migration.name, err)
-		}
-		if _, err := db.Exec(`INSERT OR IGNORE INTO schema_migrations(version, name) VALUES(?, ?)`, migration.version, migration.name); err != nil {
-			return err
 		}
 	}
 	return nil
 }
 
-// applySchemaStatements executes one classified statement batch. The first
-// CREATE INDEX triggers the column-addition reconciliation exactly as the old
-// interleaved loop did, once per database across both batches.
-func applySchemaStatements(db *sql.DB, statements []string, migrated *bool) error {
-	for _, stmt := range statements {
-		if !*migrated && strings.HasPrefix(strings.TrimSpace(stmt), "CREATE INDEX") {
-			if err := applyPipelineColumnMigrations(db); err != nil {
-				return err
-			}
-			*migrated = true
+func applySchemaMigration(db *sql.DB, migration schemaMigration) error {
+	if !migration.tx {
+		if err := migration.apply(db); err != nil {
+			return err
 		}
+		_, err := db.Exec(`INSERT OR IGNORE INTO schema_migrations(version, name) VALUES(?, ?)`, migration.version, migration.name)
+		return err
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := migration.apply(tx); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version, name) VALUES(?, ?)`, migration.version, migration.name); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// applySchemaStatements executes one classified statement batch in order.
+func applySchemaStatements(db schemaDB, statements []string) error {
+	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("initialize schema statement %q: %w", stmt, err)
 		}
@@ -367,7 +390,7 @@ func applyPipelineColumnMigrations(db *sql.DB) error {
 // applyCanonicalBackfills reconciles canonical evidence that may have completed
 // after a Work Item row was last written. The UPDATEs are convergent (guarded
 // by WHERE clauses), so they re-run on every open exactly as before.
-func applyCanonicalBackfills(db *sql.DB) error {
+func applyCanonicalBackfills(db schemaDB) error {
 	if _, err := db.Exec(`UPDATE work_items SET review_status='passed' WHERE status='done' AND type IN ('task','bug','chore') AND EXISTS (
 		SELECT 1 FROM work_item_owner_decisions decision
 		JOIN work_item_completion_reports completion ON completion.id=decision.completion_report_id AND completion.work_item_id=decision.work_item_id AND completion.status='done'
@@ -401,7 +424,7 @@ func applyCanonicalBackfills(db *sql.DB) error {
 
 // applyLegacyPackBackfills recomputes legacy pack revision kinds and supersedes
 // legacy verification reports after migration. Both are convergent.
-func applyLegacyPackBackfills(db *sql.DB) error {
+func applyLegacyPackBackfills(db schemaDB) error {
 	if _, err := db.Exec(`UPDATE task_instruction_packs AS current SET revision_kind=CASE
 	WHEN NOT EXISTS(SELECT 1 FROM task_instruction_packs previous WHERE previous.task_id=current.task_id AND previous.version<current.version) THEN 'initial'
 	WHEN COALESCE(current.effective_contract_snapshot_hash,'')!=COALESCE((SELECT previous.effective_contract_snapshot_hash FROM task_instruction_packs previous WHERE previous.task_id=current.task_id AND previous.version<current.version ORDER BY previous.version DESC LIMIT 1),'') THEN 'contract'

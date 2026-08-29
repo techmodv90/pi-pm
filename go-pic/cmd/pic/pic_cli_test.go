@@ -1308,12 +1308,16 @@ func TestVerificationAfterAllPipelineActivityAnchorsCompletionReport(t *testing.
 		dbPath := filepath.Join(root, ".pi", "tasks.db")
 		activateTestWorkItemTIP(t, dbPath, id)
 		suffix := strings.TrimPrefix(id, "wi-")
+		// The seeded rows are migration-time legacy evidence, so the version
+		// records are cleared and the next open performs the migration
+		// reconciliation exactly as it would on a pre-migration database.
 		runSQLite(t, dbPath, `
 			INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,integrated_patch_path,integrated_patch_hash,artifact_saved_at,integrated_at,result_json,created_at,completed_at,advanced_at) VALUES('pr-verified','`+id+`','worker',1,'completed','lease-verified',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','verified.patch','verified-hash','2026-01-01 00:00:01','2026-01-01 00:00:02','{}','2026-01-01 00:00:01','2026-01-01 00:00:02','2026-01-01 00:00:02');
 			INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,candidate_run_id,candidate_patch_hash,result_json,created_at,completed_at,advanced_at) VALUES('pr-verified-review','`+id+`','review',1,'completed','lease-review',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','pr-verified','verified-hash','{"review_status":"passed","candidate_run_id":"pr-verified","candidate_patch_hash":"verified-hash","notes":"passed","findings":[]}','2026-01-01 00:00:03','2026-01-01 00:00:03','2026-01-01 00:00:03');
 			INSERT INTO work_item_completion_reports(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,status,created_at) VALUES('wicr-verified','`+id+`','pr-verified','wip-`+suffix+`',1,'pack-`+suffix+`','done','2026-01-01 00:00:04');
 			INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,integrated_patch_hash,artifact_saved_at,created_at,completed_at) VALUES('pr-noop-before','`+id+`','worker',2,'completed','lease-noop',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','empty-hash','2026-01-01 00:00:05','2026-01-01 00:00:05','2026-01-01 00:00:05');
-			INSERT INTO work_item_verification_reports(id,work_item_id,completion_report_id,status,summary,verified_by_role,created_at) VALUES('wivr-verified','`+id+`','wicr-verified','passed','verified after retry','contractor','2026-01-01 00:00:06');`)
+			INSERT INTO work_item_verification_reports(id,work_item_id,completion_report_id,status,summary,verified_by_role,created_at) VALUES('wivr-verified','`+id+`','wicr-verified','passed','verified after retry','contractor','2026-01-01 00:00:06');
+			DELETE FROM schema_migrations;`)
 		return bin, root, home, id
 	}
 
@@ -1876,12 +1880,16 @@ func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 	}
 	if _, err = db.Exec(`INSERT INTO pipeline_runs SELECT * FROM pipeline_runs_legacy_seed;
 		DROP TABLE pipeline_runs_legacy_seed;
-		PRAGMA legacy_alter_table=OFF`); err != nil {
+		PRAGMA legacy_alter_table=OFF;
+		DELETE FROM schema_migrations`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
 	db.Close()
 
+	// The degraded schema simulates a database from an older binary, which also
+	// predates schema_migrations version records; clearing them makes the next
+	// open re-run the migrations exactly as an upgrade would.
 	if err := initDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
@@ -1927,12 +1935,15 @@ func TestInitDBRepairsStalePipelineForeignKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = db.Exec(`INSERT INTO pipeline_runs SELECT * FROM pipeline_runs__workflow_migration;
-		DROP TABLE pipeline_runs__workflow_migration`); err != nil {
+		DROP TABLE pipeline_runs__workflow_migration;
+		DELETE FROM schema_migrations`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
 	db.Close()
 
+	// Older-binary database simulation: clear version records so the next open
+	// re-runs the migrations and repairs the stale foreign key.
 	if err := initDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
@@ -2440,10 +2451,12 @@ INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_h
   ('wia-legacy-rri','%s','rri',1,'<rri/>','h-legacy-rri');
 INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
   ('wic-legacy-scan','%s','scan','wia-legacy-scan',1,'h-legacy-scan','accepted'),
-  ('wic-legacy-rri','%s','rri','wia-legacy-rri',1,'h-legacy-rri','approved');`, id, id, id, id))
+  ('wic-legacy-rri','%s','rri','wia-legacy-rri',1,'h-legacy-rri','approved');
+DELETE FROM schema_migrations;`, id, id, id, id))
 
-	// The first pic command opens the DB and initDB migrates the old CHECK
-	// constraints; the rri_t_scenarios save must now succeed.
+	// The rebuilt tables simulate an older-binary database, so the version
+	// records are cleared and the next pic command re-runs the widening
+	// migration; the rri_t_scenarios save must now succeed.
 	scenariosA := `{"methodology":"rri-t","personas":["End User"],"scenarios":[{"id":"SC-1","persona":"End User","dimension":"D1","stress_axis":"TIME","requirement_id":"REQ-001","procedure":"Run the helper flow","evidence":"go test ./...","result":"PASS"}]}`
 	saved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosA))
 	if saved["stage"] != "rri_t_scenarios" || saved["revision"] != float64(1) {
