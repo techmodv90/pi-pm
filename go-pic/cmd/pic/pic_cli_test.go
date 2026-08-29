@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"bytes"
 	"database/sql"
@@ -2921,5 +2922,92 @@ func TestPartialLegacyStateMigrates(t *testing.T) {
 	var epicRows int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id='e-part' AND type='epic'`).Scan(&epicRows); err != nil || epicRows != 1 {
 		t.Fatalf("epics-only migration rows=%d err=%v", epicRows, err)
+	}
+}
+
+func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE epics(id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')));
+		CREATE TABLE tasks(id TEXT PRIMARY KEY, epic_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', priority TEXT DEFAULT 'medium', created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO epics(id,title) VALUES('e-inject','Inject Epic');
+		INSERT INTO tasks(id,epic_id,title) VALUES('t-inject','e-inject','Inject Task')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// A transactional step that performs REAL migration operations (the
+	// pre-reconcile rebuild and legacy import) and then fails: the version must
+	// stay unrecorded and every operation must roll back, including DDL.
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The runner creates the version table before applying any step.
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')))`); err != nil {
+		t.Fatal(err)
+	}
+	poison := schemaMigration{version: 99, name: "poison_reconcile", apply: func(db schemaDB) error {
+		if err := reconcileLegacySchema(db); err != nil {
+			return err
+		}
+		return errors.New("injected failure after reconcile operations")
+	}}
+	if err := applySchemaMigration(db, poison); err == nil || !strings.Contains(err.Error(), "injected failure") {
+		t.Fatalf("poison step error = %v", err)
+	}
+	var recorded int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=99`).Scan(&recorded); err != nil || recorded != 0 {
+		t.Fatalf("failed step recorded version: count=%d err=%v", recorded, err)
+	}
+	var workItemsTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='work_items'`).Scan(&workItemsTable); err != nil || workItemsTable != 0 {
+		t.Fatalf("reconcile DDL rolled back: work_items tables=%d err=%v", workItemsTable, err)
+	}
+	var epicRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM epics WHERE id='e-inject'`).Scan(&epicRows); err != nil || epicRows != 1 {
+		t.Fatalf("legacy epic row disturbed: rows=%d err=%v", epicRows, err)
+	}
+	db.Close()
+
+	// A DDL-producing step that fails midway: the created table must roll back.
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ddlPoison := schemaMigration{version: 98, name: "poison_ddl", apply: func(db schemaDB) error {
+		if _, err := db.Exec(`CREATE TABLE zz_poison (id TEXT)`); err != nil {
+			return err
+		}
+		return errors.New("injected DDL failure")
+	}}
+	if err := applySchemaMigration(db, ddlPoison); err == nil || !strings.Contains(err.Error(), "injected DDL failure") {
+		t.Fatalf("ddl poison error = %v", err)
+	}
+	var poisonTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='zz_poison'`).Scan(&poisonTable); err != nil || poisonTable != 0 {
+		t.Fatalf("DDL did not roll back: zz_poison tables=%d", poisonTable)
+	}
+	db.Close()
+
+	// Retry after the failures: the real migration completes and migrates rows.
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var migratedRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id IN ('e-inject','t-inject')`).Scan(&migratedRows); err != nil || migratedRows != 2 {
+		t.Fatalf("retry after failures migrated rows=%d err=%v", migratedRows, err)
+	}
+	var versions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil || versions == 0 {
+		t.Fatalf("retry recorded no versions: count=%d err=%v", versions, err)
 	}
 }

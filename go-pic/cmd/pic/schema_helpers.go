@@ -1,16 +1,15 @@
 package main
 
 import (
-	"database/sql"
 	"strings"
 )
 
-func tableExists(db *sql.DB, name string) bool {
+func tableExists(db schemaDB, name string) bool {
 	var found string
 	return db.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&found) == nil
 }
 
-func tableColumns(db *sql.DB, name string) ([]string, error) {
+func tableColumns(db schemaDB, name string) ([]string, error) {
 	rows, err := db.Query(`PRAGMA table_info("` + strings.ReplaceAll(name, `"`, `""`) + `")`)
 	if err != nil {
 		return nil, err

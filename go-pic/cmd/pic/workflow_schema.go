@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 
 	"fmt"
@@ -73,18 +72,10 @@ func hasColumn(db workflowStore, table, column string) bool {
 	return ok
 }
 
-func migrateEpicWorkflowSchema(db *sql.DB) error {
+func migrateEpicWorkflowSchema(db schemaDB) error {
 	if !tableExists(db, "tasks") && !tableExists(db, "epics") {
 		return nil
 	}
-	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`PRAGMA legacy_alter_table=ON`); err != nil {
-		return err
-	}
-	defer db.Exec(`PRAGMA legacy_alter_table=OFF`)
-
 	// Partial legacy states are supported: a database may carry either table
 	// alone, so every tasks-specific probe is guarded by table existence.
 	if tableExists(db, "tasks") {
@@ -129,7 +120,7 @@ func migrateEpicWorkflowSchema(db *sql.DB) error {
 // dropped here first because the old objects would otherwise travel with the
 // renamed legacy table and be dropped with it, or shadow the IF NOT EXISTS
 // recreation).
-func migrateArtifactStageSchema(db *sql.DB) error {
+func migrateArtifactStageSchema(db schemaDB) error {
 	for table, createSQL := range map[string]string{
 		"work_item_artifacts":  workItemArtifactsTableSQL,
 		"workflow_checkpoints": workflowCheckpointsTableSQL,
@@ -160,26 +151,21 @@ func migrateArtifactStageSchema(db *sql.DB) error {
 
 // hasLegacySubjectForeignKey reports whether table still carries a REFERENCES
 // tasks(id) or epics(id) constraint from the pre-Work-Item schema.
-func hasLegacySubjectForeignKey(db *sql.DB, table string) bool {
+func hasLegacySubjectForeignKey(db schemaDB, table string) bool {
 	var target string
 	err := db.QueryRow(`SELECT "table" FROM pragma_foreign_key_list(?) WHERE "table" IN ('tasks','epics') LIMIT 1`, table).Scan(&target)
 	return err == nil
 }
 
-func migrateLegacyWorkItems(db *sql.DB) error {
+func migrateLegacyWorkItems(db schemaDB) error {
 	if !tableExists(db, "tasks") && !tableExists(db, "epics") {
 		return nil
 	}
 	if _, err := db.Exec(workItemsTableSQL); err != nil {
 		return err
 	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
 	if tableExists(db, "epics") {
-		if _, err = tx.Exec(`INSERT OR IGNORE INTO work_items(id,type,title,description,status,priority,created_at)
+		if _, err := db.Exec(`INSERT OR IGNORE INTO work_items(id,type,title,description,status,priority,created_at)
 			SELECT id,'epic',title,description,status,'medium',created_at FROM epics`); err != nil {
 			return err
 		}
@@ -187,21 +173,26 @@ func migrateLegacyWorkItems(db *sql.DB) error {
 	if tableExists(db, "tasks") {
 		// A task whose epic was not imported (partial state or dangling
 		// reference) migrates with a null parent instead of failing the FK.
-		if _, err = tx.Exec(`INSERT OR IGNORE INTO work_items(id,type,parent_id,title,description,status,priority,created_at)
+		if _, err := db.Exec(`INSERT OR IGNORE INTO work_items(id,type,parent_id,title,description,status,priority,created_at)
 			SELECT id,'task',CASE WHEN EXISTS(SELECT 1 FROM work_items parent WHERE parent.id=tasks.epic_id) THEN tasks.epic_id ELSE NULL END,title,description,status,priority,created_at FROM tasks`); err != nil {
 			return err
 		}
 	}
-	return tx.Commit()
+	return nil
 }
 
-func ownerColumnNotNull(db *sql.DB, table, column string) bool {
+func ownerColumnNotNull(db schemaDB, table, column string) bool {
 	var notNull int
 	_ = db.QueryRow(`SELECT "notnull" FROM pragma_table_info(?) WHERE name=?`, table, column).Scan(&notNull)
 	return notNull != 0
 }
 
-func rebuildSchemaTable(db *sql.DB, table, createSQL string) error {
+// rebuildSchemaTable rebuilds one table in place inside the caller's
+// transaction: it renames the legacy table, creates the new shape, copies the
+// shared columns, and verifies the row count before dropping the old table.
+// The migration runner holds foreign_keys=OFF and legacy_alter_table=ON on the
+// connection for the whole step, so no per-call pragma juggling is needed.
+func rebuildSchemaTable(db schemaDB, table, createSQL string) error {
 	old := table + "__workflow_migration"
 	if tableExists(db, old) {
 		return fmt.Errorf("incomplete workflow migration: %s already exists", old)
@@ -214,43 +205,13 @@ func rebuildSchemaTable(db *sql.DB, table, createSQL string) error {
 	if err = db.QueryRow(`SELECT COUNT(*) FROM "` + strings.ReplaceAll(table, `"`, `""`) + `"`).Scan(&beforeCount); err != nil {
 		return err
 	}
-	conn, err := db.Conn(context.Background())
-	if err != nil {
+	if _, err = db.Exec(`ALTER TABLE "` + table + `" RENAME TO "` + old + `"`); err != nil {
 		return err
 	}
-	defer conn.Close()
-	var foreignKeys, legacyAlterTable int
-	if err = conn.QueryRowContext(context.Background(), `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+	if _, err = db.Exec(createSQL); err != nil {
 		return err
 	}
-	if err = conn.QueryRowContext(context.Background(), `PRAGMA legacy_alter_table`).Scan(&legacyAlterTable); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(context.Background(), `PRAGMA foreign_keys=OFF`); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(context.Background(), `PRAGMA legacy_alter_table=ON`); err != nil {
-		return err
-	}
-	restored := false
-	defer func() {
-		if !restored {
-			_, _ = conn.ExecContext(context.Background(), pragmaEnabled("legacy_alter_table", legacyAlterTable))
-			_, _ = conn.ExecContext(context.Background(), pragmaEnabled("foreign_keys", foreignKeys))
-		}
-	}()
-	tx, err := conn.BeginTx(context.Background(), nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err = tx.Exec(`ALTER TABLE "` + table + `" RENAME TO "` + old + `"`); err != nil {
-		return err
-	}
-	if _, err = tx.Exec(createSQL); err != nil {
-		return err
-	}
-	newColumns, err := tableColumnsInTx(tx, table)
+	newColumns, err := tableColumns(db, table)
 	if err != nil {
 		return err
 	}
@@ -266,30 +227,20 @@ func rebuildSchemaTable(db *sql.DB, table, createSQL string) error {
 	}
 	if len(shared) > 0 {
 		columns := strings.Join(shared, ",")
-		if _, err = tx.Exec(`INSERT INTO "` + table + `" (` + columns + `) SELECT ` + columns + ` FROM "` + old + `"`); err != nil {
+		if _, err = db.Exec(`INSERT INTO "` + table + `" (` + columns + `) SELECT ` + columns + ` FROM "` + old + `"`); err != nil {
 			return err
 		}
 	}
 	var afterCount int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM "` + strings.ReplaceAll(table, `"`, `""`) + `"`).Scan(&afterCount); err != nil {
+	if err = db.QueryRow(`SELECT COUNT(*) FROM "` + strings.ReplaceAll(table, `"`, `""`) + `"`).Scan(&afterCount); err != nil {
 		return err
 	}
 	if afterCount != beforeCount {
 		return fmt.Errorf("workflow migration %s copied %d/%d rows", table, afterCount, beforeCount)
 	}
-	if _, err = tx.Exec(`DROP TABLE "` + old + `"`); err != nil {
+	if _, err = db.Exec(`DROP TABLE "` + old + `"`); err != nil {
 		return err
 	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(context.Background(), pragmaEnabled("legacy_alter_table", legacyAlterTable)); err != nil {
-		return err
-	}
-	if _, err = conn.ExecContext(context.Background(), pragmaEnabled("foreign_keys", foreignKeys)); err != nil {
-		return err
-	}
-	restored = true
 	return nil
 }
 

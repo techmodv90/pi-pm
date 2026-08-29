@@ -147,49 +147,40 @@ var legacySchemaStatements = []string{
 }
 
 
-// schemaDB is the handle a migration step runs against: the open database for
-// self-managed steps, or one transaction for atomic steps.
+// schemaDB is the handle a migration step runs against. Every step now runs on
+// one transaction, so both *sql.DB (ad-hoc use outside the runner) and *sql.Tx
+// satisfy it.
 type schemaDB interface {
 	Exec(query string, args ...any) (sql.Result, error)
+	Query(query string, args ...any) (*sql.Rows, error)
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-// schemaMigration is one ordered schema step. Every step is one-shot: it is
-// skipped once its version is recorded, so an already-migrated database
-// performs no DDL or data mutation on later opens. Transactional steps (tx)
-// apply and record their version inside one transaction, so a crash leaves
-// either the whole step applied and recorded or nothing. Self-managed steps
-// (tx=false) use their own transactions or connection pragmas (table rebuilds);
-// each of their operations is individually atomic and idempotent, and the
-// version is only recorded after the step completes, so an interrupted step
-// re-runs in full on the next open.
+// schemaMigration is one ordered schema step. Every step is one-shot and
+// transactional: it is skipped once its version is recorded, so an
+// already-migrated database performs no DDL or data mutation on later opens,
+// and the step's operations plus its version record commit or roll back
+// together — a crash leaves the step fully applied or not at all.
 type schemaMigration struct {
 	version    int
 	name       string
 	legacyOnly bool
-	tx         bool
 	apply      func(db schemaDB) error
 }
 
 func schemaMigrationSteps() []schemaMigration {
 	return []schemaMigration{
-		{version: 1, name: "pre_reconcile_schema", apply: func(db schemaDB) error {
-			return reconcileLegacySchema(db.(*sql.DB))
-		}},
-		{version: 2, name: "artifact_stage_widening", apply: func(db schemaDB) error {
-			return migrateArtifactStageSchema(db.(*sql.DB))
-		}},
-		{version: 3, name: "pipeline_columns_reconcile", apply: func(db schemaDB) error {
-			return applyPipelineColumnMigrations(db.(*sql.DB))
-		}},
-		{version: 4, name: "canonical_baseline", tx: true, apply: func(db schemaDB) error {
+		{version: 1, name: "pre_reconcile_schema", apply: reconcileLegacySchema},
+		{version: 2, name: "artifact_stage_widening", apply: migrateArtifactStageSchema},
+		{version: 3, name: "pipeline_columns_reconcile", apply: applyPipelineColumnMigrations},
+		{version: 4, name: "canonical_baseline", apply: func(db schemaDB) error {
 			return applySchemaStatements(db, canonicalSchemaStatements)
 		}},
-		{version: 5, name: "legacy_schema_bootstrap", legacyOnly: true, tx: true, apply: func(db schemaDB) error {
+		{version: 5, name: "legacy_schema_bootstrap", legacyOnly: true, apply: func(db schemaDB) error {
 			return applySchemaStatements(db, legacySchemaStatements)
 		}},
-		{version: 6, name: "canonical_backfills", tx: true, apply: applyCanonicalBackfills},
-		{version: 7, name: "legacy_pack_backfills", legacyOnly: true, tx: true, apply: func(db schemaDB) error {
+		{version: 6, name: "canonical_backfills", apply: applyCanonicalBackfills},
+		{version: 7, name: "legacy_pack_backfills", legacyOnly: true, apply: func(db schemaDB) error {
 			if err := migrateLegacyWorkItemInstructionPacks(db); err != nil {
 				return err
 			}
@@ -198,7 +189,7 @@ func schemaMigrationSteps() []schemaMigration {
 	}
 }
 
-func reconcileLegacySchema(db *sql.DB) error {
+func reconcileLegacySchema(db schemaDB) error {
 	if err := removeLegacyTIPSchema(db); err != nil {
 		return fmt.Errorf("remove legacy TIP schema: %w", err)
 	}
@@ -264,14 +255,31 @@ func applySchemaMigrations(db *sql.DB) error {
 	return nil
 }
 
+// applySchemaMigration runs one step and records its version inside a single
+// transaction. foreign_keys and legacy_alter_table are connection-scoped and
+// cannot change inside a transaction, so the runner disables them before BEGIN
+// (table rebuilds rely on both) and restores the previous values afterwards.
 func applySchemaMigration(db *sql.DB, migration schemaMigration) error {
-	if !migration.tx {
-		if err := migration.apply(db); err != nil {
-			return err
-		}
-		_, err := db.Exec(`INSERT OR IGNORE INTO schema_migrations(version, name) VALUES(?, ?)`, migration.version, migration.name)
+	var foreignKeys, legacyAlterTable int
+	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
 		return err
 	}
+	if err := db.QueryRow(`PRAGMA legacy_alter_table`).Scan(&legacyAlterTable); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`PRAGMA legacy_alter_table=ON`); err != nil {
+		return err
+	}
+	restored := false
+	defer func() {
+		if !restored {
+			_, _ = db.Exec(pragmaEnabled("legacy_alter_table", legacyAlterTable))
+			_, _ = db.Exec(pragmaEnabled("foreign_keys", foreignKeys))
+		}
+	}()
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -283,7 +291,17 @@ func applySchemaMigration(db *sql.DB, migration schemaMigration) error {
 	if _, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version, name) VALUES(?, ?)`, migration.version, migration.name); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if _, err := db.Exec(pragmaEnabled("legacy_alter_table", legacyAlterTable)); err != nil {
+		return err
+	}
+	if _, err := db.Exec(pragmaEnabled("foreign_keys", foreignKeys)); err != nil {
+		return err
+	}
+	restored = true
+	return nil
 }
 
 // applySchemaStatements executes one classified statement batch in order.
@@ -298,7 +316,7 @@ func applySchemaStatements(db schemaDB, statements []string) error {
 
 // applyPipelineColumnMigrations adds columns that predate a table's current
 // definition and rebuilds tables whose shape or foreign keys drifted.
-func applyPipelineColumnMigrations(db *sql.DB) error {
+func applyPipelineColumnMigrations(db schemaDB) error {
 	for _, migration := range []struct{ table, column, definition string }{
 		{"epics", "workflow_mode", "TEXT DEFAULT 'full'"},
 		{"epics", "design_status", "TEXT DEFAULT ''"},

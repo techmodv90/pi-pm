@@ -337,14 +337,10 @@ func openSQLite(path string) (*sql.DB, error) {
 	return sql.Open("sqlite", dsn.String())
 }
 
-func removeLegacyTIPSchema(db *sql.DB) error {
+func removeLegacyTIPSchema(db schemaDB) error {
 	if !tableExists(db, "tips") && !hasColumn(db, "completion_reports", "tip_id") && !hasColumn(db, "verification_items", "tip_id") && !hasColumn(db, "escalations", "tip_id") {
 		return nil
 	}
-	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		return err
-	}
-	defer db.Exec(`PRAGMA foreign_keys=ON`)
 	for _, table := range []string{"tip_dependencies", "tip_requirement_links"} {
 		if tableExists(db, table) {
 			if _, err := db.Exec(`DROP TABLE "` + table + `"`); err != nil {
