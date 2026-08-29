@@ -315,3 +315,19 @@ test("scheduler stage prompts dispatch the primer and the ledger at the right st
   assert.match(source, /isPlanningStage\(stage\)\)[\s\S]{0,400}buildStagePrimer/);
   assert.match(source, /buildWorkProgressLedger\(/);
 });
+
+test("contractor verification prompt separates environment prerequisites from required commands", () => {
+  const prompt = buildTaskVerifyPrompt({
+    work_item: { id: "wi-9", title: "Prereq check" },
+    instruction_packs: [{ id: "wip-9", status: "active", content_json: JSON.stringify({ verification: [
+      { command: "pytest", required: true, setup_commands: ["docker compose up -d"], expected: "all pass" },
+    ] }) }],
+    completion_reports: [{ id: "wicr-9", instruction_pack_id: "wip-9", status: "done" }],
+  });
+  assert.match(prompt, /PREREQUISITES/);
+  assert.match(prompt, /docker compose up -d/);
+  assert.match(prompt, /environment_blocked/i);
+  assert.match(prompt, /do not modify infrastructure/i);
+  assert.match(prompt, /Required Commands/);
+  assert.match(prompt, /pytest/);
+});

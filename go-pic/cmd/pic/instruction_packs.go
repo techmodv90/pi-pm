@@ -31,6 +31,9 @@ type instructionPackContent struct {
 	SchemaVersion       int              `json:"schemaVersion"`
 	SkillFamilies       *[]string        `json:"skillFamilies"`
 	ObligationKeys      []string         `json:"obligation_keys"`
+	Provides            []string         `json:"provides"`
+	Consumes            []string         `json:"consumes"`
+	EvidenceFor         []string         `json:"evidence_for"`
 }
 
 type taskPlanDocument struct {
@@ -338,6 +341,10 @@ func expandCanonicalInstructionPack(pack map[string]any) error {
 	pack["module"] = envelope.Content.Module
 	pack["estimated_effort_minutes"] = envelope.Content.EstimatedEffort
 	pack["skill_families_json"] = encode(skillFamilies(envelope.Content.SkillFamilies))
+	pack["provides_json"] = encode(envelope.Content.Provides)
+	pack["consumes_json"] = encode(envelope.Content.Consumes)
+	pack["evidence_for_json"] = encode(envelope.Content.EvidenceFor)
+	pack["obligation_keys_json"] = encode(envelope.Content.ObligationKeys)
 	return nil
 }
 
@@ -447,6 +454,11 @@ func renderInstructionPack(pack map[string]any) string {
 	decode("verification_json", &verification)
 	decode("requirement_snapshots_json", &snapshots)
 	decode("skill_families_json", &families)
+	var provides, consumes, evidenceFor, obligationKeys []string
+	decode("provides_json", &provides)
+	decode("consumes_json", &consumes)
+	decode("evidence_for_json", &evidenceFor)
+	decode("obligation_keys_json", &obligationKeys)
 	var b strings.Builder
 	fmt.Fprintf(&b, "# TASK INSTRUCTION PACK: %v\n\n## HANDOFF VALIDATION\n- Pack: %v\n- Pack version: %v\n- Pack status: %v\n- Pack content hash: %v\n- Result: READY\n\n", pack["display_key"], pack["id"], pack["version"], pack["status"], pack["content_hash"])
 	fmt.Fprintf(&b, "## HEADER\n- TIP-ID: %v\n- Pack ID: %v\n- Pack version: %v\n- Content schema version: %v\n- Effective contract snapshot: %s\n- Effective contract hash: %s\n- Work Item: %v\n- Work Item name: %v\n- Work Item type: %v\n- Requirements: %s\n- Module: %v\n- Skill families: %s\n- Depends on: derived from Work Item relations\n- Priority: %v\n\n", pack["display_key"], pack["id"], pack["version"], pack["content_schema_version"], displayOrNone(pack["effective_contract_snapshot_id"]), displayOrNone(pack["effective_contract_snapshot_hash"]), pack["work_item_id"], pack["work_item_title"], pack["work_item_type"], snapshotKeys(snapshots), pack["module"], strings.Join(families, ", "), pack["priority"])
@@ -462,6 +474,9 @@ func renderInstructionPack(pack map[string]any) string {
 		fmt.Fprintf(&b, "  - `%v:%v` — %v\n", pattern["file"], pattern["symbol"], pattern["reason"])
 	}
 	fmt.Fprintf(&b, "\n## TASK\n%v\n\n## SPECIFICATIONS\n\n### Business Rules\n%s\n### Validation\n%s\n### Error Handling\n%s\n### State Transitions\n%s\n### Contract Obligations\n%s\n", pack["goal"], renderItems(businessRules), renderItems(validation), renderItems(errorHandling), renderItems(transitions), renderItems(obligations))
+	if len(provides)+len(consumes)+len(evidenceFor)+len(obligationKeys) > 0 {
+		fmt.Fprintf(&b, "\n## CONTRACT INTERFACES\n- provides: %s\n- consumes: %s\n- evidence for: %s\n- obligation keys: %s\n", strings.Join(provides, ", "), strings.Join(consumes, ", "), strings.Join(evidenceFor, ", "), strings.Join(obligationKeys, ", "))
+	}
 	b.WriteString("## ACCEPTANCE CRITERIA\n")
 	for _, snapshot := range snapshots {
 		fmt.Fprintf(&b, "\n### %s — %s\n%s\n", snapshot.RequirementKey, snapshot.Title, snapshot.AcceptanceCriteria)

@@ -147,8 +147,10 @@ export function buildTaskVerifyPrompt(data: any): string {
     ...(check.setup_commands || []).map((command: string) => ({ command, setup: true })),
     { command: check.command, required: check.required !== false, expected: check.expected },
   ]).filter((check: any) => check.command);
-  const commands = checks.length
-    ? checks.map((check: any, index: number) => `${index + 1}. \`${check.command}\`${check.setup ? " (setup)" : ""}${check.expected ? ` -> ${check.expected}` : ""}`).join("\n")
+  const setupCommands = checks.filter((check: any) => check.setup);
+  const requiredCommands = checks.filter((check: any) => !check.setup);
+  const commandLines = requiredCommands.length
+    ? requiredCommands.map((check: any, index: number) => `${index + 1}. \`${check.command}\`${check.expected ? ` -> ${check.expected}` : ""}`).join("\n")
     : "No persisted commands were found; inspect the active TIP and run its stated verification requirements.";
   return [
     `# CONTRACTOR VERIFICATION: ${item.title || item.id || "Work Item"}`,
@@ -158,8 +160,14 @@ export function buildTaskVerifyPrompt(data: any): string {
     "The reviewed implementation is integrated. Execute this verification now in the current repository.",
     "You are the main contractor: do not delegate this step, do not merely describe it, and do not modify the task-system extension.",
     "",
+    ...(setupCommands.length ? [
+      "## PREREQUISITES (run before the required commands)",
+      ...setupCommands.map((check: any) => `- \`${check.command}\``),
+      "If a prerequisite fails to start, report the verification as blocked (environment_blocked) with the concrete failure output; do not modify infrastructure, install global tooling, or weaken the verification to make it pass.",
+      "",
+    ] : []),
     "## Required Commands",
-    commands,
+    commandLines,
     "",
     "Run every required command, inspect the integrated diff and relevant behavior, and record concrete pass/fail evidence.",
     "Then call `verify_work_item` with this Work Item ID, the exact Completion Report ID above, `verification_status` of passed, failed, or blocked, a concise evidence summary, and `actor_role=contractor`.",

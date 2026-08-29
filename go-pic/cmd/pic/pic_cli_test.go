@@ -2637,3 +2637,34 @@ func TestWorkflowStatusNextActionsAndCheckpointDecide(t *testing.T) {
 		t.Fatalf("bad decision error = %s", out)
 	}
 }
+
+func TestInstructionPackRendersContractInterfaces(t *testing.T) {
+	node := taskPlanDocumentNode{
+		Key: "T01", Type: "task", Name: "Persist", RequirementKeys: []string{"REQ-001"},
+		Provides: []string{"OBL-001"}, Consumes: []string{"OBL-002"}, EvidenceFor: []string{"OBL-001"}, ObligationKeys: []string{"OBL-001"},
+		Files: []string{"a.go"},
+		Constraints: map[string]any{"scope_roots": []any{"."}},
+		Verification: []any{map[string]any{"command": "go test ./..."}},
+		BusinessRules: []any{"rule"}, ValidationRules: []any{"v"}, ErrorHandling: []any{"e"}, StateTransitions: []any{"s"}, ContractObligations: []any{"o"},
+	}
+	packBytes, _, err := materializedInstructionPack(node, 3, map[string]requirementSnapshot{"REQ-001": {RequirementKey: "REQ-001", Title: "R", AcceptanceCriteria: "Given\nWhen\nThen"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack := map[string]any{"id": "wip-x", "version": 1, "status": "active", "content_hash": "sha256:x", "content_json": string(packBytes), "work_item_id": "wi-1", "work_item_title": "T", "work_item_type": "task", "priority": "medium"}
+	if err := expandCanonicalInstructionPack(pack); err != nil {
+		t.Fatal(err)
+	}
+	rendered := renderInstructionPack(pack)
+	if !strings.Contains(rendered, "## CONTRACT INTERFACES") || !strings.Contains(rendered, "OBL-001") || !strings.Contains(rendered, "consumes: OBL-002") {
+		t.Fatalf("contract interfaces missing from TIP render: %s", rendered)
+	}
+
+	legacy := map[string]any{"id": "wip-y", "version": 1, "status": "active", "content_hash": "sha256:y", "content_json": `{"content":{"goal":"g","files":["f.go"],"business_rules":["b"],"validation_rules":["v"],"error_handling":["e"],"state_transitions":["s"],"contract_obligations":["o"],"constraints":{"k":"v"},"verification":[{"command":"c"}],"schemaVersion":2},"requirements":[]}`, "work_item_id": "wi-1", "work_item_title": "T", "work_item_type": "task", "priority": "medium"}
+	if err := expandCanonicalInstructionPack(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(renderInstructionPack(legacy), "## CONTRACT INTERFACES") {
+		t.Fatalf("legacy pack must not render an empty contract interfaces section")
+	}
+}

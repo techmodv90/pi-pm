@@ -75,6 +75,7 @@ export function renderCanonicalInstructionPackXml(item: any, pack: any): string 
   <context><working_directory>current process CWD is authoritative</working_directory><files>${files}</files><patterns>${patterns}</patterns></context>
   ${xmlValue("task", content.goal || item.description || item.title)}
   <specifications>${xmlCollection("business_rules", "rule", content.business_rules)}${xmlCollection("validation_rules", "rule", content.validation_rules)}${xmlCollection("error_handling", "rule", content.error_handling)}${xmlCollection("state_transitions", "transition", content.state_transitions)}${xmlCollection("contract_obligations", "obligation", content.contract_obligations)}</specifications>
+  ${(content.provides || content.consumes || content.evidence_for) ? `<contract_interfaces>${xmlCollection("provides", "obligation", content.provides)}${xmlCollection("consumes", "obligation", content.consumes)}${xmlCollection("evidence_for", "obligation", content.evidence_for)}</contract_interfaces>` : ""}
   <requirements>${requirementXml}</requirements>
   <constraints>${xmlFields(content.constraints || {})}</constraints>
   ${xmlCollection("verification", "check", content.verification)}

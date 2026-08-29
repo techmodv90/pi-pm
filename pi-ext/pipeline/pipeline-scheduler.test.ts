@@ -1535,3 +1535,17 @@ test("round cap produces a synthesized owner-action block for the next fix", () 
   assert.match(block, /P1 \(important, fix now\):[\s\S]+Wire expectedVersion/);
   assert.match(block, /will not relaunch automatically/);
 });
+
+test("canonical TIP XML renders the contract interfaces provided by the task graph", () => {
+  const item = { id: "wi-1", type: "task", priority: "medium" };
+  const content = { goal: "g", files: ["a.go"], business_rules: ["b"], validation_rules: ["v"], error_handling: ["e"], state_transitions: ["s"], contract_obligations: ["o"], constraints: { scope_roots: ["."] }, verification: [{ command: "go test ./..." }], skillFamilies: [], provides: ["OBL-001"], consumes: ["OBL-002"], evidence_for: ["OBL-001"] };
+  const pack = { content_json: JSON.stringify({ content, requirements: [] }), version: 1, id: "wip-1", status: "active", content_hash: "sha256:x" };
+  const xml = renderCanonicalInstructionPackXml(item as any, pack as any);
+  assert.match(xml, /<contract_interfaces><provides><obligation>OBL-001<\/obligation><\/provides><consumes><obligation>OBL-002<\/obligation><\/consumes>/);
+  assert.match(xml, /<evidence_for><obligation>OBL-001<\/obligation><\/evidence_for><\/contract_interfaces>/);
+});
+
+test("closing a leaf notifies the owner with dependency-ready next work", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /"work-item", "status", taskId, "done"[\s\S]{0,900}readyLeafIds\(/);
+});

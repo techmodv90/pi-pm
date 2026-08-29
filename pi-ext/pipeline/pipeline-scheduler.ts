@@ -922,6 +922,16 @@ export class PipelineScheduler {
     }
     const done = execPic(["work-item", "status", taskId, "done"], this.cwd);
     if (done.error) throw new Error(done.error);
+    // Close-out transition: point the contractor at the next dependency-ready
+    // work so leaf completion flows straight into the next increment.
+    if (parentId && !this.parentHasActiveRuns(parentId)) {
+      const parent = this.showItem(parentId);
+      const readyIds = this.readyLeafIds(parent).filter((id) => id !== taskId);
+      const nextUp = readyIds.length
+        ? `${readyIds.length} dependency-ready leaf(es) will launch next: ${readyIds.slice(0, 5).join(", ")}${readyIds.length > 5 ? ", …" : ""}`
+        : "No dependency-ready leaves remain; check `work-item workflow-status` for the aggregate's verification stage.";
+      this.pi.sendUserMessage(`${taskId} is done. ${nextUp}`, { deliverAs: "followUp" });
+    }
 
     if (!parentId) return;
     if (this.parentHasActiveRuns(parentId)) return;

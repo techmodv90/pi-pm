@@ -2572,7 +2572,7 @@ func validateTaskGraphRequirementCoverage(db databaseQueryer, workItemID string,
 }
 
 func materializedInstructionPack(node taskPlanDocumentNode, schemaVersion int, requirements map[string]requirementSnapshot) ([]byte, string, error) {
-	content := instructionPackContent{Goal: node.Goal, Module: node.Module, EstimatedEffort: node.EstimatedEffort, Files: node.Files, Patterns: node.Patterns, BusinessRules: node.BusinessRules, ValidationRules: node.ValidationRules, ErrorHandling: node.ErrorHandling, StateTransitions: node.StateTransitions, ContractObligations: node.ContractObligations, Constraints: node.Constraints, Verification: node.Verification, SchemaVersion: schemaVersion, SkillFamilies: node.SkillFamilies, ObligationKeys: node.ObligationKeys}
+	content := instructionPackContent{Goal: node.Goal, Module: node.Module, EstimatedEffort: node.EstimatedEffort, Files: node.Files, Patterns: node.Patterns, BusinessRules: node.BusinessRules, ValidationRules: node.ValidationRules, ErrorHandling: node.ErrorHandling, StateTransitions: node.StateTransitions, ContractObligations: node.ContractObligations, Constraints: node.Constraints, Verification: node.Verification, SchemaVersion: schemaVersion, SkillFamilies: node.SkillFamilies, ObligationKeys: node.ObligationKeys, Provides: node.Provides, Consumes: node.Consumes, EvidenceFor: node.EvidenceFor}
 	snapshots := make([]requirementSnapshot, 0, len(node.RequirementKeys))
 	for _, key := range node.RequirementKeys {
 		snapshots = append(snapshots, requirements[strings.ToUpper(key)])
