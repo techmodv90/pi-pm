@@ -146,18 +146,12 @@ func workItemApproveDeviations(db *sql.DB, args []string) error {
 	if err = tx.QueryRow(`SELECT root_work_item_id FROM work_item_materializations WHERE work_item_id=? ORDER BY rowid DESC LIMIT 1`, args[0]).Scan(&contractTaskID); err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	subjectColumn := "task_id"
-	var subjectExists int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM tasks WHERE id=?`, contractTaskID).Scan(&subjectExists); err != nil {
-		return err
+	var contractType string
+	if err = tx.QueryRow(`SELECT type FROM work_items WHERE id=?`, contractTaskID).Scan(&contractType); err != nil {
+		return fmt.Errorf("materialization root %s not found: %w", contractTaskID, err)
 	}
-	if subjectExists == 0 {
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM epics WHERE id=?`, contractTaskID).Scan(&subjectExists); err != nil {
-			return err
-		}
-		if subjectExists == 0 {
-			return fmt.Errorf("materialization root %s is not a legacy task or epic", contractTaskID)
-		}
+	subjectColumn := "task_id"
+	if contractType == "epic" || contractType == "feature" {
 		subjectColumn = "epic_id"
 	}
 	var packContent string
@@ -985,7 +979,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	itemType, title, description := fmt.Sprint(item["type"]), fmt.Sprint(item["title"]), fmt.Sprint(item["description"])
+	itemType := fmt.Sprint(item["type"])
 	subjectColumn := "task_id"
 	if itemType == "epic" || itemType == "feature" {
 		subjectColumn = "epic_id"
@@ -1055,28 +1049,6 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 	}
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&revision); err != nil {
 		return err
-	}
-	if itemType == "epic" || itemType == "feature" {
-		var projectColumn int
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('epics') WHERE name='project_id'`).Scan(&projectColumn); err != nil {
-			return err
-		}
-		if projectColumn == 1 {
-			var projectID string
-			if err = tx.QueryRow(`SELECT id FROM projects ORDER BY datetime(created_at),id LIMIT 1`).Scan(&projectID); err != nil {
-				return fmt.Errorf("RRI legacy Epic projection requires a project: %w", err)
-			}
-			_, err = tx.Exec(`INSERT OR IGNORE INTO epics(id,project_id,title,description,status) VALUES(?,?,?,?,?)`, args[0], projectID, title, description, item["status"])
-		} else {
-			_, err = tx.Exec(`INSERT OR IGNORE INTO epics(id,title,description,status) VALUES(?,?,?,?)`, args[0], title, description, item["status"])
-		}
-		if err != nil {
-			return err
-		}
-	} else {
-		if _, err = tx.Exec(`INSERT OR IGNORE INTO tasks(id,title,description,status,priority) VALUES(?,?,?,?,?)`, args[0], title, description, item["status"], item["priority"]); err != nil {
-			return err
-		}
 	}
 	reportJSON, err := json.Marshal(payload.Report)
 	if err != nil {

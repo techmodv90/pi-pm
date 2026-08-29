@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
+
 	"fmt"
 	"strings"
 )
@@ -151,6 +151,9 @@ func hasLegacySubjectForeignKey(db *sql.DB, table string) bool {
 }
 
 func migrateLegacyWorkItems(db *sql.DB) error {
+	if !tableExists(db, "tasks") && !tableExists(db, "epics") {
+		return nil
+	}
 	if _, err := db.Exec(workItemsTableSQL); err != nil {
 		return err
 	}
@@ -174,34 +177,6 @@ func ownerColumnNotNull(db *sql.DB, table, column string) bool {
 	var notNull int
 	_ = db.QueryRow(`SELECT "notnull" FROM pragma_table_info(?) WHERE name=?`, table, column).Scan(&notNull)
 	return notNull != 0
-}
-
-func workflowSubject(db *sql.DB, id string, opts map[string]string) (kind, column string, err error) {
-	kind = firstNonEmpty(opts["subject-type"], "task")
-	if kind == "task" {
-		if err = requireTask(db, id); err != nil {
-			return "", "", err
-		}
-		return kind, "task_id", nil
-	}
-	if kind == "epic" {
-		if exists, queryErr := rowExists(db, `SELECT 1 FROM epics WHERE id=?`, id); queryErr != nil {
-			return "", "", queryErr
-		} else if !exists {
-			return "", "", fmt.Errorf("Epic %s not found", id)
-		}
-		return kind, "epic_id", nil
-	}
-	return "", "", fmt.Errorf("invalid subject type: %s", kind)
-}
-
-func addWorkflowSubjectEvent(db workflowExecer, kind, id, eventType, role, summary string, payload any) error {
-	data, _ := json.Marshal(payload)
-	if kind == "task" {
-		return addEvent(db, id, eventType, role, summary, payload)
-	}
-	_, err := db.Exec(`INSERT INTO epic_events(id,epic_id,event_type,actor_role,summary,payload_json) VALUES(?,?,?,?,?,?)`, "eev-"+shortID(), id, eventType, role, summary, string(data))
-	return err
 }
 
 func rebuildSchemaTable(db *sql.DB, table, createSQL string) error {

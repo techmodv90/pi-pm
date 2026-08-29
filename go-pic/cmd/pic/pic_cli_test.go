@@ -233,9 +233,9 @@ func TestWorkItemCommandCutover(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	counts := func() string {
-		var value string
-		if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM epics)||':'||(SELECT COUNT(*) FROM tasks)||':'||(SELECT COUNT(*) FROM work_items)`).Scan(&value); err != nil {
+	counts := func() int {
+		var value int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM work_items`).Scan(&value); err != nil {
 			t.Fatal(err)
 		}
 		return value
@@ -253,43 +253,16 @@ func TestWorkItemCommandCutover(t *testing.T) {
 		}
 	}
 	if after := counts(); after != before {
-		t.Fatalf("removed commands mutated storage: before=%s after=%s", before, after)
+		t.Fatalf("removed commands mutated storage: before=%d after=%d", before, after)
 	}
-}
-
-func TestShowPrefersCanonicalHybridWorkItem(t *testing.T) {
-	bin := buildPic(t)
-	root, home := initProject(t, bin)
-	runSQLite(t, filepath.Join(root, ".pi", "tasks.db"), `
-		INSERT INTO tasks(id,title,status,review_status) VALUES('t-hybrid','Legacy','in_progress','pending');
-		INSERT INTO work_items(id,type,title,status,review_status) VALUES('t-hybrid','task','Canonical','done','passed');
-	`)
-
-	shown := asObject(t, runPic(t, bin, root, home, "show", "t-hybrid"))
-	item := asObject(t, shown["work_item"])
-	if item["status"] != "done" || item["review_status"] != "passed" {
-		t.Fatalf("generic show returned stale legacy lifecycle state: %#v", shown)
-	}
-}
-
-func TestShowReportsCanonicalReadinessForHybridWorkItem(t *testing.T) {
-	bin := buildPic(t)
-	root, home := initProject(t, bin)
-	runSQLite(t, filepath.Join(root, ".pi", "tasks.db"), `
-		INSERT INTO tasks(id,title,status) VALUES('t-blocker','Blocker','done'),('t-hybrid','Legacy','open');
-		INSERT INTO work_items(id,type,title,status,review_status) VALUES('t-blocker','task','Blocker','done','passed'),('t-hybrid','task','Canonical','open','pending');
-		INSERT INTO task_dependencies(id,task_id,depends_on_task_id) VALUES('td-hybrid','t-hybrid','t-blocker');
-		INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES('wir-hybrid','t-hybrid','blocks','t-blocker');
-	`)
-
-	shown := asObject(t, runPic(t, bin, root, home, "show", "t-hybrid"))
-	if shown["ready"] != false {
-		t.Fatalf("hybrid Work Item without an active TIP is ready: %#v", shown)
-	}
-	dependencies := shown["dependencies"].([]any)
-	dependency := asObject(t, dependencies[0])
-	if dependency["status"] != "done" || dependency["review_status"] != "passed" {
-		t.Fatalf("generic show returned stale legacy dependency state: %#v", dependency)
+	for _, table := range []string{"epics", "tasks", "epic_events", "task_events", "scan_reports", "rri_sessions", "designs", "completion_reports", "task_instruction_packs", "verification_reports", "escalations"} {
+		var exists int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != 0 {
+			t.Fatalf("fresh database created legacy table %s", table)
+		}
 	}
 }
 
@@ -402,27 +375,6 @@ func TestWorkItemSchemaMigration(t *testing.T) {
 	}
 	if eventPayload != `{"unchanged":true}` || eventCreated != "2026-01-03 00:00:00" || violations != 0 {
 		t.Fatalf("historical artifact payload=%q created=%q violations=%d", eventPayload, eventCreated, violations)
-	}
-}
-
-func TestLegacyInstructionPackBackfillsCanonicalWorkItemPack(t *testing.T) {
-	bin := buildPic(t)
-	root, home := initProject(t, bin)
-	dbPath := filepath.Join(root, ".pi", "tasks.db")
-	runSQLite(t, dbPath, `
-		INSERT INTO epics(id,title) VALUES('e-migrate','Legacy');
-		INSERT INTO tasks(id,epic_id,title) VALUES('t-migrate','e-migrate','Legacy Task');
-		INSERT INTO work_items(id,type,title) VALUES('t-migrate','task','Canonical Task');
-		INSERT INTO task_instruction_packs(id,display_key,task_id,version,status,source_type,source_task_revision,goal,files_json,patterns_json,business_rules_json,validation_rules_json,error_handling_json,state_transitions_json,contract_obligations_json,constraints_json,verification_json,requirement_snapshots_json,content_hash,activated_at)
-		VALUES('pack-migrate','TIP-MIGRATE','t-migrate',1,'active','standalone_task',1,'Ship it','[]','[]','[]','[]','[]','[]','[]','{}','[]','[]','hash-migrate',datetime('now'));
-	`)
-
-	for range 2 {
-		shown := asObject(t, runPic(t, bin, root, home, "show", "t-migrate"))
-		packs := shown["instruction_packs"].([]any)
-		if len(packs) != 1 || asObject(t, packs[0])["id"] != "pack-migrate" || shown["ready"] != true {
-			t.Fatalf("legacy TIP backfill = %#v", shown)
-		}
 	}
 }
 
@@ -993,8 +945,8 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 		t.Fatalf("RRI artifacts=%d err=%v", artifacts, err)
 	}
 	var legacyEpic int
-	if err = db.QueryRow(`SELECT COUNT(*) FROM epics WHERE id=?`, id).Scan(&legacyEpic); err != nil || legacyEpic != 1 {
-		t.Fatalf("legacy Epic projection count=%d err=%v", legacyEpic, err)
+	if err = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='epics'`).Scan(&legacyEpic); err != nil || legacyEpic != 0 {
+		t.Fatalf("legacy Epic table exists=%d err=%v", legacyEpic, err)
 	}
 	var canonicalRevision int
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&canonicalRevision); err != nil || canonicalRevision != 1 {
@@ -1898,108 +1850,6 @@ Then it completes')`)
 	}
 }
 
-func TestLegacyTIPRemoval(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openSQLite(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`
-		CREATE TABLE tips(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),tip_key TEXT NOT NULL,title TEXT NOT NULL);
-		CREATE TABLE tip_dependencies(id TEXT PRIMARY KEY,tip_id TEXT NOT NULL REFERENCES tips(id),depends_on_tip_id TEXT NOT NULL REFERENCES tips(id));
-		CREATE TABLE tip_requirement_links(id TEXT PRIMARY KEY,tip_id TEXT NOT NULL REFERENCES tips(id),requirement_id TEXT NOT NULL REFERENCES requirements(id));
-		ALTER TABLE completion_reports ADD COLUMN tip_id TEXT REFERENCES tips(id);
-		ALTER TABLE verification_items ADD COLUMN tip_id TEXT REFERENCES tips(id);
-		ALTER TABLE escalations ADD COLUMN tip_id TEXT REFERENCES tips(id);
-		INSERT INTO epics(id,title) VALUES('e-legacy-tip','Legacy TIP');
-		INSERT INTO tasks(id,epic_id,title) VALUES('t-legacy-tip','e-legacy-tip','Legacy TIP task');
-		INSERT INTO requirements(id,task_id,requirement_key,title) VALUES('req-legacy-tip','t-legacy-tip','REQ-001','Requirement');
-		INSERT INTO tips(id,task_id,tip_key,title) VALUES('tip-legacy','t-legacy-tip','TIP-001','Legacy pack');
-		INSERT INTO tip_requirement_links(id,tip_id,requirement_id) VALUES('trl-legacy','tip-legacy','req-legacy-tip');
-		INSERT INTO completion_reports(id,task_id,tip_id,status,summary) VALUES('cr-legacy-tip','t-legacy-tip','tip-legacy','done','completion survives');
-		INSERT INTO verification_reports(id,task_id,status,summary) VALUES('vr-legacy-tip','t-legacy-tip','passed','verification survives');
-		INSERT INTO verification_items(id,verification_report_id,requirement_id,tip_id,status,evidence) VALUES('vi-legacy-tip','vr-legacy-tip','req-legacy-tip','tip-legacy','pass','evidence survives');
-		INSERT INTO escalations(id,task_id,tip_id,level,title) VALUES('esc-legacy-tip','t-legacy-tip','tip-legacy',1,'escalation survives');`)
-	if err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
-	db.Close()
-
-	if err := initDB(dbPath); err != nil {
-		t.Fatal(err)
-	}
-	db, err = openSQLite(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	for _, table := range []string{"tips", "tip_dependencies", "tip_requirement_links"} {
-		if tableExists(db, table) {
-			t.Fatalf("legacy table %s still exists", table)
-		}
-	}
-	for _, pair := range [][2]string{{"completion_reports", "tip_id"}, {"verification_items", "tip_id"}, {"escalations", "tip_id"}} {
-		if hasColumn(db, pair[0], pair[1]) {
-			t.Fatalf("legacy column %s.%s still exists", pair[0], pair[1])
-		}
-	}
-	for _, pair := range [][2]string{{"completion_reports", "cr-legacy-tip"}, {"verification_items", "vi-legacy-tip"}, {"escalations", "esc-legacy-tip"}} {
-		if ok, err := rowExists(db, `SELECT 1 FROM `+pair[0]+` WHERE id=?`, pair[1]); err != nil || !ok {
-			t.Fatalf("non-TIP row %s.%s was not preserved: %v", pair[0], pair[1], err)
-		}
-	}
-}
-
-func TestPipelineSchemaMigratesLegacyColumns(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openSQLite(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, stmt := range []string{
-		`DROP INDEX idx_completion_reports_pipeline_run`,
-		`DROP INDEX idx_verification_reports_pipeline_run`,
-		`DROP INDEX idx_pipeline_runs_pending`,
-		`ALTER TABLE completion_reports DROP COLUMN pipeline_run_id`,
-		`ALTER TABLE verification_reports DROP COLUMN pipeline_run_id`,
-		`ALTER TABLE pipeline_runs DROP COLUMN integrated_patch_path`,
-		`ALTER TABLE pipeline_runs DROP COLUMN integrated_patch_hash`,
-		`ALTER TABLE pipeline_runs ADD COLUMN integrated_patch TEXT DEFAULT ''`,
-		`ALTER TABLE pipeline_runs DROP COLUMN integrated_at`,
-		`ALTER TABLE pipeline_runs DROP COLUMN artifact_saved_at`,
-		`ALTER TABLE pipeline_runs DROP COLUMN advanced_at`,
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			db.Close()
-			t.Fatal(err)
-		}
-	}
-	db.Close()
-	if err := initDB(dbPath); err != nil {
-		t.Fatal(err)
-	}
-	db, err = openSQLite(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if hasColumn(db, "pipeline_runs", "integrated_patch") {
-		t.Fatal("obsolete inline integrated_patch column was not removed")
-	}
-	for _, pair := range [][2]string{{"completion_reports", "pipeline_run_id"}, {"verification_reports", "pipeline_run_id"}, {"pipeline_runs", "integrated_patch_path"}, {"pipeline_runs", "integrated_patch_hash"}, {"pipeline_runs", "integrated_at"}, {"pipeline_runs", "artifact_saved_at"}, {"pipeline_runs", "advanced_at"}} {
-		if !hasColumn(db, pair[0], pair[1]) {
-			t.Fatalf("missing migrated column %s.%s", pair[0], pair[1])
-		}
-	}
-}
-
 func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	if err := initDB(dbPath); err != nil {
@@ -2123,20 +1973,6 @@ func approvePlanningTask(t *testing.T, bin, root, home, taskID string) {
 	runPic(t, bin, root, home, "workflow", "vision-status", taskID, "approved", "--vision-id", vision["id"].(string))
 	runPic(t, bin, root, home, "workflow", "design-save", taskID, "--blueprint", "# Blueprint")
 	runPic(t, bin, root, home, "workflow", "design-status", taskID, "approved")
-}
-
-func TestRebuildMigratesLegacySchemaAndPreservesRows(t *testing.T) {
-	bin := buildPic(t)
-	root, home := initProject(t, bin)
-	dbPath := filepath.Join(root, ".pi", "tasks.db")
-	runSQLite(t, dbPath, `PRAGMA foreign_keys=OFF; CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT,root_path TEXT,created_at TEXT); INSERT INTO projects VALUES('p','Legacy','`+root+`','2020-01-01'); ALTER TABLE epics ADD COLUMN project_id TEXT; UPDATE epics SET project_id='p';`)
-	result := asObject(t, runPic(t, bin, root, home, "rebuild"))
-	if result["rebuilt"] != true || result["removed_projects_table"] != true || result["removed_epic_project_id"] != true || result["backup_path"] == "" {
-		t.Fatalf("rebuild = %#v", result)
-	}
-	if _, err := os.Stat(result["backup_path"].(string)); err != nil {
-		t.Fatalf("backup missing: %v", err)
-	}
 }
 
 func TestWebAPISupportsDashboardContract(t *testing.T) {

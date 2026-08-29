@@ -85,8 +85,6 @@ func run(args []string) error {
 		return cmdMarkdown(args[1:])
 	case "web":
 		return cmdWeb(args[1:])
-	case "rebuild":
-		return cmdRebuild()
 	case "list":
 		return cmdList(args[1:])
 	case "show":
@@ -94,7 +92,6 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command: %s", args[0])
 	}
-	return fmt.Errorf("unknown command: %s", args[0])
 }
 
 func cmdInit(args []string) error {
@@ -370,6 +367,42 @@ func removeLegacyTIPSchema(db *sql.DB) error {
 	return nil
 }
 
+func isLegacyBootstrapStatement(stmt string) bool {
+	s := strings.TrimSpace(stmt)
+	for _, prefix := range []string{
+		"CREATE TABLE IF NOT EXISTS epics", "CREATE TABLE IF NOT EXISTS tasks",
+		"CREATE TABLE IF NOT EXISTS scan_reports", "CREATE TABLE IF NOT EXISTS rri_sessions",
+		"CREATE TABLE IF NOT EXISTS designs", "CREATE TABLE IF NOT EXISTS verification_reports",
+		"CREATE TABLE IF NOT EXISTS escalations",
+		"CREATE TABLE IF NOT EXISTS epic_events", "CREATE TABLE IF NOT EXISTS task_events",
+		"CREATE TABLE IF NOT EXISTS completion_reports", "CREATE TABLE IF NOT EXISTS task_materializations",
+		"CREATE TABLE IF NOT EXISTS task_instruction_packs", "CREATE TABLE IF NOT EXISTS instruction_pack_requirement_links",
+		"CREATE TABLE IF NOT EXISTS verification_items", "CREATE TABLE IF NOT EXISTS contract_operations",
+		"CREATE TABLE IF NOT EXISTS contract_operation_targets", "CREATE TABLE IF NOT EXISTS effective_contract_snapshots",
+		"CREATE TABLE IF NOT EXISTS effective_contract_entries", "CREATE TABLE IF NOT EXISTS contract_task_impacts",
+		"CREATE TABLE IF NOT EXISTS task_dependencies",
+		"CREATE TABLE IF NOT EXISTS task_phase_metadata", "CREATE INDEX IF NOT EXISTS idx_tasks_",
+		"CREATE INDEX IF NOT EXISTS idx_epic_events_", "CREATE INDEX IF NOT EXISTS idx_task_events_",
+		"CREATE INDEX IF NOT EXISTS idx_completion_reports_", "CREATE UNIQUE INDEX IF NOT EXISTS idx_completion_reports_", "CREATE INDEX IF NOT EXISTS idx_verification_items_",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_instruction_packs_", "CREATE INDEX IF NOT EXISTS idx_instruction_packs_",
+		"CREATE INDEX IF NOT EXISTS idx_instruction_pack_requirements",
+		"CREATE INDEX IF NOT EXISTS idx_escalations_task", "CREATE INDEX IF NOT EXISTS idx_owner_decisions_task",
+		"CREATE INDEX IF NOT EXISTS idx_scan_reports_", "CREATE INDEX IF NOT EXISTS idx_rri_sessions_",
+		"CREATE INDEX IF NOT EXISTS idx_designs_", "CREATE UNIQUE INDEX IF NOT EXISTS idx_designs_", "CREATE INDEX IF NOT EXISTS idx_verification_reports_",
+		"CREATE UNIQUE INDEX IF NOT EXISTS idx_verification_reports_",
+		"CREATE INDEX IF NOT EXISTS idx_contract_", "CREATE INDEX IF NOT EXISTS idx_task_dependencies_",
+		"CREATE INDEX IF NOT EXISTS idx_task_phase_", "CREATE TRIGGER IF NOT EXISTS trg_instruction_pack_",
+		"CREATE TRIGGER IF NOT EXISTS trg_requirement_content_stales_packs", "CREATE TRIGGER trg_requirement_content_stales_packs",
+		"DROP TRIGGER IF EXISTS trg_instruction_pack_", "DROP TRIGGER IF EXISTS trg_requirement_content_stales_packs",
+		"CREATE TRIGGER IF NOT EXISTS trg_instruction_pack_", "CREATE TRIGGER IF NOT EXISTS trg_work_item_pack_immutable",
+	} {
+		if strings.HasPrefix(s, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func initDB(path string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -535,8 +568,12 @@ func initDB(path string) error {
 		`CREATE TRIGGER trg_requirement_content_stales_packs AFTER UPDATE OF requirement_key,title,description,acceptance_criteria ON requirements BEGIN UPDATE task_instruction_packs SET status='stale',stale_at=datetime('now') WHERE status='active' AND id IN (SELECT instruction_pack_id FROM instruction_pack_requirement_links WHERE requirement_id=NEW.id); UPDATE tasks SET review_status='pending',reviewed_instruction_pack_id='',owner_status='pending' WHERE id IN (SELECT task_id FROM task_instruction_packs WHERE status='stale' AND id IN (SELECT instruction_pack_id FROM instruction_pack_requirement_links WHERE requirement_id=NEW.id)); UPDATE verification_reports SET superseded_at=datetime('now') WHERE task_id IN (SELECT task_id FROM task_instruction_packs WHERE status='stale' AND id IN (SELECT instruction_pack_id FROM instruction_pack_requirement_links WHERE requirement_id=NEW.id)) AND superseded_at=''; UPDATE epics SET owner_status='pending' WHERE id IN (SELECT epic_id FROM tasks WHERE id IN (SELECT task_id FROM task_instruction_packs WHERE status='stale' AND id IN (SELECT instruction_pack_id FROM instruction_pack_requirement_links WHERE requirement_id=NEW.id))); END`,
 		`CREATE TRIGGER IF NOT EXISTS trg_keyed_requirement_content_immutable BEFORE UPDATE OF requirement_key,contract_key,inherit_to_descendants,title,description,acceptance_criteria ON requirements WHEN OLD.contract_key!='' BEGIN SELECT RAISE(ABORT,'keyed requirement content is immutable; create a replacement requirement'); END`,
 	}
+	legacySchema := tableExists(db, "tasks") || tableExists(db, "epics")
 	migratedPipelineColumns := false
 	for _, stmt := range statements {
+		if !legacySchema && isLegacyBootstrapStatement(stmt) {
+			continue
+		}
 		if !migratedPipelineColumns && strings.HasPrefix(strings.TrimSpace(stmt), "CREATE INDEX") {
 			for _, migration := range []struct{ table, column, definition string }{
 				{"epics", "workflow_mode", "TEXT DEFAULT 'full'"},
@@ -596,7 +633,7 @@ func initDB(path string) error {
 				{"pipeline_runs", "profile_version", "INTEGER DEFAULT 0"},
 				{"pipeline_runs", "profile_hash", "TEXT DEFAULT ''"},
 			} {
-				if !hasColumn(db, migration.table, migration.column) {
+				if tableExists(db, migration.table) && !hasColumn(db, migration.table, migration.column) {
 					if _, err := db.Exec(`ALTER TABLE ` + migration.table + ` ADD COLUMN ` + migration.column + ` ` + migration.definition); err != nil && !hasColumn(db, migration.table, migration.column) {
 						return err
 					}
@@ -625,7 +662,7 @@ func initDB(path string) error {
 			migratedPipelineColumns = true
 		}
 		if _, err := db.Exec(stmt); err != nil {
-			return err
+			return fmt.Errorf("initialize schema statement %q: %w", stmt, err)
 		}
 	}
 	if _, err := db.Exec(`UPDATE work_items SET status='done',claimed_at='',claimed_by='',review_status='passed' WHERE type IN ('task','bug','chore') AND EXISTS (
@@ -647,19 +684,23 @@ func initDB(path string) error {
 		SELECT 'wir-migrated-'||id,work_item_id,'gates',gate_work_item_id,created_at FROM work_item_gates`); err != nil {
 		return err
 	}
-	if err := migrateLegacyWorkItemInstructionPacks(db); err != nil {
-		return err
+	if legacySchema {
+		if err := migrateLegacyWorkItemInstructionPacks(db); err != nil {
+			return err
+		}
 	}
-	if _, err := db.Exec(`UPDATE task_instruction_packs AS current SET revision_kind=CASE
+	if legacySchema {
+		if _, err := db.Exec(`UPDATE task_instruction_packs AS current SET revision_kind=CASE
 		WHEN NOT EXISTS(SELECT 1 FROM task_instruction_packs previous WHERE previous.task_id=current.task_id AND previous.version<current.version) THEN 'initial'
 		WHEN COALESCE(current.effective_contract_snapshot_hash,'')!=COALESCE((SELECT previous.effective_contract_snapshot_hash FROM task_instruction_packs previous WHERE previous.task_id=current.task_id AND previous.version<current.version ORDER BY previous.version DESC LIMIT 1),'') THEN 'contract'
 		WHEN current.files_json!=(SELECT previous.files_json FROM task_instruction_packs previous WHERE previous.task_id=current.task_id AND previous.version<current.version ORDER BY previous.version DESC LIMIT 1) OR current.constraints_json!=(SELECT previous.constraints_json FROM task_instruction_packs previous WHERE previous.task_id=current.task_id AND previous.version<current.version ORDER BY previous.version DESC LIMIT 1) THEN 'scope'
 		WHEN current.verification_json!=(SELECT previous.verification_json FROM task_instruction_packs previous WHERE previous.task_id=current.task_id AND previous.version<current.version ORDER BY previous.version DESC LIMIT 1) THEN 'verification'
 		ELSE 'execution' END`); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`UPDATE verification_reports AS old SET superseded_at=COALESCE((SELECT newer.created_at FROM verification_reports newer WHERE ((newer.task_id=old.task_id AND old.task_id IS NOT NULL) OR (newer.epic_id=old.epic_id AND old.epic_id IS NOT NULL)) AND newer.rowid>old.rowid ORDER BY newer.rowid DESC LIMIT 1),''), superseded_by_report_id=COALESCE((SELECT newer.id FROM verification_reports newer WHERE ((newer.task_id=old.task_id AND old.task_id IS NOT NULL) OR (newer.epic_id=old.epic_id AND old.epic_id IS NOT NULL)) AND newer.rowid>old.rowid ORDER BY newer.rowid DESC LIMIT 1),'') WHERE superseded_at='' AND EXISTS(SELECT 1 FROM verification_reports newer WHERE ((newer.task_id=old.task_id AND old.task_id IS NOT NULL) OR (newer.epic_id=old.epic_id AND old.epic_id IS NOT NULL)) AND newer.rowid>old.rowid)`); err != nil {
-		return err
+			return err
+		}
+		if _, err := db.Exec(`UPDATE verification_reports AS old SET superseded_at=COALESCE((SELECT newer.created_at FROM verification_reports newer WHERE ((newer.task_id=old.task_id AND old.task_id IS NOT NULL) OR (newer.epic_id=old.epic_id AND old.epic_id IS NOT NULL)) AND newer.rowid>old.rowid ORDER BY newer.rowid DESC LIMIT 1),''), superseded_by_report_id=COALESCE((SELECT newer.id FROM verification_reports newer WHERE ((newer.task_id=old.task_id AND old.task_id IS NOT NULL) OR (newer.epic_id=old.epic_id AND old.epic_id IS NOT NULL)) AND newer.rowid>old.rowid ORDER BY newer.rowid DESC LIMIT 1),'') WHERE superseded_at='' AND EXISTS(SELECT 1 FROM verification_reports newer WHERE ((newer.task_id=old.task_id AND old.task_id IS NOT NULL) OR (newer.epic_id=old.epic_id AND old.epic_id IS NOT NULL)) AND newer.rowid>old.rowid)`); err != nil {
+			return err
+		}
 	}
 	return nil
 }
