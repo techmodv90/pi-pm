@@ -2731,6 +2731,43 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 	if dry["checkpoints"] != float64(6) {
 		t.Fatalf("dry run checkpoints = %#v", dry)
 	}
+	// The preview must name the exact invalidation targets, not just counts.
+	artifactStages := map[string]bool{}
+	for _, entry := range dry["artifacts"].([]any) {
+		artifact := asObject(t, entry)
+		artifactStages[fmt.Sprint(artifact["stage"])] = true
+		if artifact["content_hash"] == "" || artifact["revision"] == nil {
+			t.Fatalf("dry-run artifact entry missing revision/hash: %#v", artifact)
+		}
+	}
+	for _, stage := range stages {
+		if !artifactStages[stage] {
+			t.Fatalf("dry-run artifacts missing stage %s: %v", stage, artifactStages)
+		}
+	}
+	checkpointStages := map[string]bool{}
+	for _, entry := range dry["checkpoints_list"].([]any) {
+		checkpointStages[fmt.Sprint(asObject(t, entry)["stage"])] = true
+	}
+	if len(checkpointStages) != len(stages) {
+		t.Fatalf("dry-run checkpoint list = %v", checkpointStages)
+	}
+	var tipCount int
+	for _, entry := range dry["instruction_packs"].([]any) {
+		pack := asObject(t, entry)
+		if pack["content_hash"] == "" || pack["version"] == nil {
+			t.Fatalf("dry-run pack entry missing lineage: %#v", pack)
+		}
+		tipCount++
+	}
+	_ = tipCount
+	var dependentID string
+	for _, entry := range dry["dependents"].([]any) {
+		dependentID = fmt.Sprint(asObject(t, entry)["work_item_id"])
+	}
+	if dependentID == "" {
+		t.Fatalf("dry-run dependents empty: %#v", dry["dependents"])
+	}
 	status = asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
 	if status["next_stage"] != "authorize" {
 		t.Fatalf("dry run mutated workflow state: %#v", status)

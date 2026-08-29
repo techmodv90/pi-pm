@@ -1345,9 +1345,85 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 		return err
 	}
 	if dryRun {
-		// Invalidation blast-radius preview: report exactly what a reset would
-		// retire without mutating any persisted state.
-		writeJSON(os.Stdout, map[string]any{"work_item_id": targetID, "dry_run": true, "artifacts": artifacts, "pipeline_runs": runs, "retired_materializations": materialized, "checkpoints": checkpoints, "next_stage_after_reset": "scan"})
+		// Invalidation blast-radius preview: name the exact targets a reset
+		// would retire, using the same lineage the DELETE statements below
+		// operate on, without mutating any persisted state.
+		artifactEntries := []map[string]any{}
+		artifactRows, err := tx.Query(`SELECT stage,id,revision,content_hash FROM work_item_artifacts WHERE work_item_id=? ORDER BY stage,revision`, targetID)
+		if err != nil {
+			return err
+		}
+		for artifactRows.Next() {
+			var stage, artifactID, contentHash string
+			var revision int
+			if err := artifactRows.Scan(&stage, &artifactID, &revision, &contentHash); err != nil {
+				artifactRows.Close()
+				return err
+			}
+			artifactEntries = append(artifactEntries, map[string]any{"stage": stage, "id": artifactID, "revision": revision, "content_hash": contentHash})
+		}
+		if err := artifactRows.Err(); err != nil {
+			artifactRows.Close()
+			return err
+		}
+		artifactRows.Close()
+		checkpointEntries := []map[string]any{}
+		checkpointRows, err := tx.Query(`SELECT id,stage,artifact_id,artifact_revision FROM workflow_checkpoints WHERE work_item_id=? ORDER BY stage`, targetID)
+		if err != nil {
+			return err
+		}
+		for checkpointRows.Next() {
+			var checkpointID, stage, artifactID string
+			var revision int
+			if err := checkpointRows.Scan(&checkpointID, &stage, &artifactID, &revision); err != nil {
+				checkpointRows.Close()
+				return err
+			}
+			checkpointEntries = append(checkpointEntries, map[string]any{"id": checkpointID, "stage": stage, "artifact_id": artifactID, "artifact_revision": revision})
+		}
+		if err := checkpointRows.Err(); err != nil {
+			checkpointRows.Close()
+			return err
+		}
+		checkpointRows.Close()
+		packEntries := []map[string]any{}
+		packRows, err := tx.Query(`SELECT id,version,content_hash,status FROM work_item_instruction_packs WHERE work_item_id=? ORDER BY version`, targetID)
+		if err != nil {
+			return err
+		}
+		for packRows.Next() {
+			var packID, contentHash, status string
+			var version int
+			if err := packRows.Scan(&packID, &version, &contentHash, &status); err != nil {
+				packRows.Close()
+				return err
+			}
+			packEntries = append(packEntries, map[string]any{"id": packID, "version": version, "content_hash": contentHash, "status": status})
+		}
+		if err := packRows.Err(); err != nil {
+			packRows.Close()
+			return err
+		}
+		packRows.Close()
+		dependentEntries := []map[string]any{}
+		dependentRows, err := tx.Query(`SELECT work_item_id,node_key FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id<>? ORDER BY node_key`, targetID, targetID)
+		if err != nil {
+			return err
+		}
+		for dependentRows.Next() {
+			var childID, nodeKey string
+			if err := dependentRows.Scan(&childID, &nodeKey); err != nil {
+				dependentRows.Close()
+				return err
+			}
+			dependentEntries = append(dependentEntries, map[string]any{"work_item_id": childID, "node_key": nodeKey})
+		}
+		if err := dependentRows.Err(); err != nil {
+			dependentRows.Close()
+			return err
+		}
+		dependentRows.Close()
+		writeJSON(os.Stdout, map[string]any{"work_item_id": targetID, "dry_run": true, "artifacts": artifactEntries, "checkpoints_list": checkpointEntries, "instruction_packs": packEntries, "dependents": dependentEntries, "artifacts_count": artifacts, "pipeline_runs": runs, "retired_materializations": materialized, "checkpoints": checkpoints, "next_stage_after_reset": "scan"})
 		return nil
 	}
 	if materialized > 0 {
