@@ -2742,8 +2742,22 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 	runSQLite(t, dbPath, `
 		INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-child','`+childID+`','scan',1,'<scan/>','h-child');
 		INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-child','`+childID+`','scan','wia-child',1,'h-child','accepted');
+		INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at) VALUES('pr-child','`+childID+`','worker',1,'failed','lease-child','2026-01-01');
 		INSERT INTO work_item_completion_reports(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,status) VALUES('wicr-child','`+childID+`','pr-child','wip-child',1,'h-child-pack','done');
-		INSERT INTO work_item_verification_reports(id,work_item_id,checkpoint_id,completion_report_id,status,summary,verified_by_role) VALUES('wivr-child','`+childID+`','','wicr-child','passed','child verified','contractor');`)
+		INSERT INTO work_item_verification_reports(id,work_item_id,checkpoint_id,completion_report_id,status,summary,verified_by_role) VALUES('wivr-child','`+childID+`','','wicr-child','passed','child verified','contractor');
+		INSERT INTO work_item_labels(work_item_id,label) VALUES('`+childID+`','area:core');
+		INSERT INTO work_item_dependencies(id,work_item_id,depends_on_work_item_id) VALUES('wid-child','`+childID+`','`+id+`');
+		INSERT INTO work_item_gates(id,work_item_id,gate_work_item_id) VALUES('wig-child','`+childID+`','`+id+`');
+		INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES('wir-child','`+childID+`','blocks','`+id+`');
+		INSERT INTO implementation_authorizations(id,work_item_id,task_graph_checkpoint_id,authorized_by) VALUES('wimpl-child','`+childID+`','wic-child','owner');
+		INSERT INTO work_item_escalations(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,level,status,report_json) VALUES('wiem-child','`+childID+`','pr-child','wip-child',1,'h-child-pack','L2','open','{}');
+		INSERT INTO work_item_owner_decisions(id,work_item_id,completion_report_id,decision) VALUES('wiod-child','`+childID+`','wicr-child','rejected');
+		INSERT INTO work_item_aggregate_owner_decisions(id,work_item_id,verification_report_id,decision) VALUES('waod-child','`+childID+`','wivr-child','accepted');
+		INSERT INTO work_item_delivery_states(work_item_id,integration_mode) VALUES('`+childID+`','branch');
+		INSERT INTO work_item_events(id,work_item_id,event_type,summary) VALUES('wiev-child','`+childID+`','note','seeded');
+		INSERT INTO work_item_profiles(id,work_item_id,profile_name,profile_version,planning_depth,stages_json,content_hash) VALUES('wiprof-child','`+childID+`','qa',99,'full','[]','h-child-profile');
+		INSERT INTO work_items(id,type,title) VALUES('wi-bug-child','bug','Child Bug');
+		INSERT INTO work_item_corrective_bugs(verification_report_id,bug_work_item_id,owner_approval_required) VALUES('wivr-child','wi-bug-child',1);`)
 
 	dry := asObject(t, runPic(t, bin, root, home, "work-item", "planning-reset", id, "owner", "--dry-run"))
 	if dry["dry_run"] != true || dry["retired_materializations"] != float64(1) {
@@ -2765,6 +2779,47 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 	if len(descendantVerifications) != 1 || asObject(t, descendantVerifications[0])["id"] != "wivr-child" {
 		t.Fatalf("descendant verification reports = %#v", descendantVerifications)
 	}
+	// Every child-owned cascade table the reset retires with the descendants is
+	// previewed by name, each row carrying its owning Work Item.
+	descendantCascadeExpectations := []struct {
+		key, field, value string
+	}{
+		{"descendant_pipeline_runs", "id", "pr-child"},
+		{"descendant_labels", "label", "area:core"},
+		{"descendant_dependencies", "id", "wid-child"},
+		{"descendant_gates", "id", "wig-child"},
+		{"descendant_relations", "id", "wir-child"},
+		{"descendant_authorizations", "id", "wimpl-child"},
+		{"descendant_escalations", "id", "wiem-child"},
+		{"descendant_owner_decisions", "id", "wiod-child"},
+		{"descendant_aggregate_decisions", "id", "waod-child"},
+		{"descendant_delivery_states", "integration_mode", "branch"},
+		{"descendant_events", "id", "wiev-child"},
+		{"descendant_profiles", "profile_name", "qa"},
+	}
+	for _, expected := range descendantCascadeExpectations {
+		entries, ok := dry[expected.key].([]any)
+		if !ok || len(entries) != 1 {
+			t.Fatalf("dry-run %s = %#v", expected.key, dry[expected.key])
+		}
+		entry := asObject(t, entries[0])
+		if fmt.Sprint(entry[expected.field]) != expected.value || fmt.Sprint(entry["work_item_id"]) != childID {
+			t.Fatalf("dry-run %s entry = %#v, want %s=%s owned by %s", expected.key, entry, expected.field, expected.value, childID)
+		}
+	}
+	if entries, ok := dry["descendant_materializations"].([]any); !ok || len(entries) != 0 {
+		t.Fatalf("dry-run descendant materializations = %#v", dry["descendant_materializations"])
+	}
+	// Corrective bugs are second-order targets: the seeded row retires with the
+	// child's verification report, while the bug Work Item itself survives.
+	correctiveEntries, ok := dry["descendant_corrective_bugs"].([]any)
+	if !ok || len(correctiveEntries) != 1 {
+		t.Fatalf("descendant corrective bugs = %#v", dry["descendant_corrective_bugs"])
+	}
+	corrective := asObject(t, correctiveEntries[0])
+	if corrective["verification_report_id"] != "wivr-child" || corrective["bug_work_item_id"] != "wi-bug-child" {
+		t.Fatalf("descendant corrective bugs entry = %#v", corrective)
+	}
 	verifyDB, err := openSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
@@ -2772,6 +2827,10 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 	var seededChildArtifact int
 	if err := verifyDB.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE id='wia-child'`).Scan(&seededChildArtifact); err != nil || seededChildArtifact != 1 {
 		t.Fatalf("dry run mutated descendant rows: count=%d err=%v", seededChildArtifact, err)
+	}
+	var seededChildRuns int
+	if err := verifyDB.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE id='pr-child'`).Scan(&seededChildRuns); err != nil || seededChildRuns != 1 {
+		t.Fatalf("dry run mutated descendant pipeline runs: count=%d err=%v", seededChildRuns, err)
 	}
 	verifyDB.Close()
 	if dry["checkpoints"] != float64(6) {
@@ -2823,6 +2882,41 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 	status = asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
 	if status["next_stage"] != "scan" {
 		t.Fatalf("post-reset status = %#v", status)
+	}
+	// The actual reset must retire exactly what the preview named: every seeded
+	// cascade row dies with the child, and the bug Work Item survives (it is not
+	// a materialized descendant).
+	verifyDB, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifyDB.Close()
+	resetChecks := []struct{ query string; want int }{
+		{`SELECT COUNT(*) FROM work_items WHERE id='` + childID + `'`, 0},
+		{`SELECT COUNT(*) FROM work_items WHERE id='wi-bug-child'`, 1},
+		{`SELECT COUNT(*) FROM pipeline_runs WHERE id='pr-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_artifacts WHERE id='wia-child'`, 0},
+		{`SELECT COUNT(*) FROM workflow_checkpoints WHERE id='wic-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_completion_reports WHERE id='wicr-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_verification_reports WHERE id='wivr-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_escalations WHERE id='wiem-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_owner_decisions WHERE id='wiod-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_aggregate_owner_decisions WHERE id='waod-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_events WHERE id='wiev-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_profiles WHERE id='wiprof-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_labels WHERE label='area:core'`, 0},
+		{`SELECT COUNT(*) FROM work_item_dependencies WHERE id='wid-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_gates WHERE id='wig-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_relations WHERE id='wir-child'`, 0},
+		{`SELECT COUNT(*) FROM implementation_authorizations WHERE id='wimpl-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_delivery_states WHERE work_item_id='` + childID + `'`, 0},
+		{`SELECT COUNT(*) FROM work_item_corrective_bugs WHERE verification_report_id='wivr-child'`, 0},
+	}
+	for _, check := range resetChecks {
+		var count int
+		if err := verifyDB.QueryRow(check.query).Scan(&count); err != nil || count != check.want {
+			t.Fatalf("post-reset cascade check failed: %s => %d (want %d) err=%v", check.query, count, check.want, err)
+		}
 	}
 }
 
