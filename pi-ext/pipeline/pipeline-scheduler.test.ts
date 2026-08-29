@@ -114,10 +114,11 @@ test("planning handoff resolves the approved predecessor checkpoint from the pro
 
 test("planning dispatch binds the claim to the persisted profile version and hash", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const resolution = readFileSync(new URL("./stage-resolution.ts", import.meta.url), "utf8");
   assert.match(source, /if \(isPlanningStage\(stage\)\) \{\n\s+const \{ profile \} = this\.planEligibility\(taskId, stage\)/);
   assert.match(source, /--profile-version", String\(profile\.version\), "--profile-hash", profile\.contentHash/);
   assert.match(source, /planning stage \$\{stage\} is not in the persisted plan profile/);
-  assert.match(source, /plan_profile: resolvePlanProfile\(data\)/);
+  assert.match(resolution, /plan_profile: resolvePlanProfile\(data\)/);
 });
 
 test("planning dispatch demands a persisted Plan profile before any stage launch", () => {
@@ -317,13 +318,14 @@ test("canonical aggregate scheduling requires owner resolution after Scan reject
 
 test("full aggregate Scan fans out bounded evidence sections for contractor synthesis", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  for (const section of ["Architecture", "Lifecycle", "Authority", "Verification", "Reliability"]) assert.match(source, new RegExp(`\\["${section}"`));
-  assert.match(source, /startFullScanFanout/);
-  assert.match(source, /compose the canonical Scan Report/i);
-  assert.match(source, /root must be <scout_evidence section="\$\{section\.toLowerCase\(\)\}"/i);
-  assert.match(source, /one evidence container with one or two non-empty <source path="relative\/file"/);
-  assert.match(source, /Use exactly one concise finding, at most one gap/);
-  assert.match(source, /Keep the complete document under 2,500 characters/);
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  for (const section of ["Architecture", "Lifecycle", "Authority", "Verification", "Reliability"]) assert.match(prompts, new RegExp(`\\["${section}"`));
+  assert.match(prompts, /startFullScanFanout/);
+  assert.match(prompts, /compose the canonical Scan Report/i);
+  assert.match(prompts, /root must be <scout_evidence section="\$\{section\.toLowerCase\(\)\}"/i);
+  assert.match(prompts, /one evidence container with one or two non-empty <source path="relative\/file"/);
+  assert.match(prompts, /Use exactly one concise finding, at most one gap/);
+  assert.match(prompts, /Keep the complete document under 2,500 characters/);
   assert.match(source, /handoffs\.put\("scan"/);
   assert.match(source, /Load ephemeral handoff \$\{handoffId\}/);
   assert.doesNotMatch(source, /Scan evidence ready[^`]+\$\{output\}/);
@@ -366,8 +368,8 @@ test("canonical aggregate creation starts orchestration at Scan", () => {
 });
 
 test("canonical failed-review worker prompts include persisted correction findings", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const stagePromptBody = source.slice(source.indexOf("function stagePrompt"), source.indexOf("function rejectedCandidatePatch"));
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  const stagePromptBody = prompts.slice(prompts.indexOf("export function stagePrompt"));
   assert.match(stagePromptBody, /currentFailedReview[\s\S]+buildWorkerCorrectionContext\(\{ \.\.\.data, current_review: currentReview \}\)/);
 });
 
@@ -382,15 +384,16 @@ test("pipeline run parsing rejects malformed pic records instead of silently dro
 });
 
 test("planning pipeline stages use planning agents and prompts without an active TIP", () => {
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /if \(stage === "rri"\) throw new Error\("RRI is Contractor-owned"\)/);
+  assert.match(prompts, /if \(stage === "rri"\) throw new Error\("RRI is Contractor-owned"\)/);
   assert.match(source, /workflow\.next_stage === "rri"[\s\S]+contractor: true/);
-  assert.match(source, /vision: "task-planner"/);
-  assert.doesNotMatch(source, /contracts: "task-planner"/);
-  assert.match(source, /stage === "contracts".*Contract drafting is Contractor-owned/);
-  assert.match(source, /task_graph: "task-planner"/);
-  assert.match(source, /if \(isPlanningStage\(stage\)\) return/);
-  assert.match(source, /planningHandoff\(stage, raw, taskId\)/);
+  assert.match(prompts, /vision: "task-planner"/);
+  assert.doesNotMatch(prompts, /contracts: "task-planner"/);
+  assert.match(prompts, /stage === "contracts".*Contract drafting is Contractor-owned/);
+  assert.match(prompts, /task_graph: "task-planner"/);
+  assert.match(prompts, /if \(isPlanningStage\(stage\)\) return/);
+  assert.match(prompts, /planningHandoff\(stage, raw, taskId\)/);
   assert.match(source, /if \(planningStages\.includes\(workflow\.next_stage\)\)[\s\S]+launchGroup\(workflow\.next_stage, \[rootTaskId\]\)/);
 });
 
@@ -648,8 +651,8 @@ test("autofix context carries exact failed verification evidence and forbids con
   assert.match(prompt, /REQ-7: fail - expected 409, got 500/);
   assert.match(prompt, /not a fresh implementation or retry/i);
   assert.match(prompt, /Do not weaken tests, verification commands, acceptance criteria, or scope/);
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const stagePromptBody = source.slice(source.indexOf("function stagePrompt"), source.indexOf("function rejectedCandidatePatch"));
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  const stagePromptBody = prompts.slice(prompts.indexOf("export function stagePrompt"));
   assert.match(stagePromptBody, /stage === "autofix"[\s\S]+buildAutofixContext\(data\)/);
 });
 
@@ -1192,10 +1195,11 @@ test("review verdict is durable before restart-safe candidate integration", () =
 });
 
 test("integration stages only reviewed patch changes and orphan recovery retires unbound claims", () => {
+  const integration = readFileSync(new URL("./integration.ts", import.meta.url), "utf8");
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   const integrationBody = source.slice(source.indexOf("private integrateReviewedCandidate"), source.indexOf("private async advance"));
   assert.match(integrationBody, /finalizeReviewedIntegration\(/);
-  const finalizerBody = source.slice(source.indexOf("export function finalizeReviewedIntegration"), source.indexOf("function assertCleanGit"));
+  const finalizerBody = integration.slice(integration.indexOf("export function finalizeReviewedIntegration"), integration.indexOf("function assertCleanGit"));
   assert.match(finalizerBody, /git", \["apply", "--index"/);
   assert.doesNotMatch(integrationBody, /execGitIndexWrite\(\["add", "-A"\]/);
   const recoveryBody = source.slice(source.indexOf("private recoverOrphanedRuns"), source.indexOf("stopSession"));
@@ -1391,11 +1395,12 @@ test("failed review corrections are handed to worker", () => {
 
 test("worker launches bind sessions to the claimed instruction pack host-side", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
   // Session path must derive from the claimed pack ID (TIP lineage), not the run ID,
   // so review-fix relaunches resume the same conversation and retired packs never do.
   assert.match(source, /spec\.sessionPath = workerSessionPath\(this\.cwd, activePack\?\.id \|\| claim\.instruction_pack_id \|\| taskId\)/);
-  assert.match(source, /function workerSessionPath\(cwd: string, packKey: string\)/);
-  assert.match(source, /\.pi", "runtime", "runs", packKey, "session\.jsonl"/);
+  assert.match(prompts, /function workerSessionPath\(cwd: string, packKey: string\)/);
+  assert.match(prompts, /\.pi", "runtime", "runs", packKey, "session\.jsonl"/);
 });
 
 test("session fallback removes corrupt files instead of failing the relaunch", () => {
@@ -1419,10 +1424,12 @@ test("escalated worker reports carry a structured, source-audited escalation pay
 
 test("scheduler persists escalations fail-closed and injects resolutions at relaunch", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  const corrections = readFileSync(new URL("./corrections.ts", import.meta.url), "utf8");
   assert.match(source, /taskReport\.status === "escalated"/);
   assert.match(source, /"workflow", "escalation-save", run\.task_id, "--pipeline-run-id", run\.id, "--report-json"/);
-  assert.match(source, /buildEscalationResolutionContext\(data, parsePipelineRuns\(execPic\(\["workflow", "pipeline-runs", taskId\], cwd\)\)\)/);
-  const builder = source.slice(source.indexOf("export function buildEscalationResolutionContext"), source.indexOf("function stageAgent"));
+  assert.match(prompts, /buildEscalationResolutionContext\(data, parsePipelineRuns\(execPic\(\["workflow", "pipeline-runs", taskId\], cwd\)\)\)/);
+  const builder = corrections.slice(corrections.indexOf("export function buildEscalationResolutionContext"));
   assert.match(builder, /status === "resolved"/);
   assert.match(builder, /String\(entry\.resolved_at \|\| ""\) > lastRunStart/);
 });

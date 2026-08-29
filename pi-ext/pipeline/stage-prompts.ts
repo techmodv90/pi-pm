@@ -1,0 +1,172 @@
+import { randomUUID } from "node:crypto";
+import { join } from "node:path";
+import { execPic, execPicText } from "../core/cli-helpers.ts";
+import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
+import { buildWorkItemContinuePrompt, buildWorkItemReviewerHandoff, buildWorkItemScanPrompt } from "../tasking/work-item-prompts.ts";
+import { finalAssistantText, startSubagent, type SubagentHandle } from "../subagent/runner.ts";
+import type { SubagentResult } from "../subagent/types.ts";
+import { parsePipelineRuns, type PipelineStage } from "./pipeline-types.ts";
+import { renderCanonicalInstructionPackXml } from "./instruction-pack-xml.ts";
+import { buildAutofixContext, buildEscalationResolutionContext, buildOwnerRejectionContext, buildTargetedReReviewInstructions, buildWorkerCorrectionContext, reviewCycleCount } from "./corrections.ts";
+import { currentFailedReview, isMutationStage } from "./report-parsing.ts";
+import { normalizePipelineData } from "./stage-resolution.ts";
+
+// Known planning stages the scheduler can route and map to a bounded agent.
+// This is a stage/agent registry only; dispatch eligibility is decided by the
+// persisted Plan profile, never by this list (see resolvePlanProfile).
+export const planningStages: PipelineStage[] = ["rri", "vision", "blueprint", "contracts", "task_graph"];
+
+export function isPlanningStage(stage: PipelineStage): boolean { return planningStages.includes(stage); }
+
+
+export function reviewStagePrompt(taskId: string, cwd: string): string {
+  const handoff = buildWorkItemReviewerHandoff(taskId);
+  const runs = parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd));
+  return reviewCycleCount(runs) >= 1 ? handoff + buildTargetedReReviewInstructions() : handoff;
+}
+
+// Worker session lineage (GAP-137): key on the instruction pack ID so review-fix
+// relaunches resume the same conversation while a retired TIP (execution reset or
+// repair mints a new pack) can never inherit the old session.
+export function workerSessionPath(cwd: string, packKey: string): string {
+  return join(cwd, ".pi", "runtime", "runs", packKey, "session.jsonl");
+}
+
+export function pipelineSpawnParams(stage: PipelineStage, task: any, cwd: string): any {
+  const spec: any = { agent: task.agent, task: task.task, cwd, stage, taskId: task.taskId, acceptance: stage === "review" ? "attested" : "checked", ...(task.skillFamilies ? { skillFamilies: task.skillFamilies } : {}) };
+  if (isMutationStage(stage) || stage === "review") spec.isolation = "worktree";
+  return spec;
+}
+
+export const FULL_SCAN_SECTIONS = [
+  ["Architecture", "Map stack, modules, boundaries, entry points, and data flow. Cite files and lines; do not estimate unrelated metrics."],
+  ["Lifecycle", "Trace planning, materialization, authorization, execution, review, verification, acceptance, merge, cancellation, and reset state transitions."],
+  ["Authority", "Audit actor-role checks, child-agent capabilities, persistence boundaries, immutability, and security risks. Distinguish implemented guards from gaps."],
+  ["Verification", "Inspect manifests, test/build/typecheck commands, test layout, runtime prerequisites, and current blockers. Separate observed runs from historical evidence."],
+  ["Reliability", "Inspect the gap ledger, open invariants, operational risks, migrations, generated artifacts, and documentation drift. Report exact statuses only."],
+] as const;
+
+export const SCOUT_EVIDENCE_REQUIRED_ELEMENTS = ["scope", "findings", "gaps", "verification", "risks"] as const;
+
+export function validateScoutEvidenceXml(output: string, section: string): void {
+  const normalized = normalizeScoutEvidenceXml(output);
+  const root = normalized.match(/^<scout_evidence\b([^>]*)>([\s\S]*)<\/scout_evidence>$/);
+  const attributes = root?.[1].match(/([a-zA-Z_][\w.-]*)="([^"]*)"/g)?.reduce<Record<string, string>>((values, attribute) => {
+    const match = attribute.match(/^([a-zA-Z_][\w.-]*)="([^"]*)"$/);
+    if (match) values[match[1]] = match[2];
+    return values;
+  }, {}) || {};
+  if (!root || attributes.section !== section.toLowerCase() || !["high", "medium", "low"].includes(attributes.confidence)) throw new Error(`Scout ${section} output must be one <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low"> document`);
+  for (const element of SCOUT_EVIDENCE_REQUIRED_ELEMENTS) {
+    if (!root[2].includes(`<${element}>`) || !root[2].includes(`</${element}>`)) throw new Error(`Scout ${section} evidence missing <${element}>`);
+  }
+  if (!/<source\s+path="[^"]+"(?:\s+line="[^"]+")?\s*>[\s\S]*<\/source>/.test(root[2])) throw new Error(`Scout ${section} evidence requires at least one source citation`);
+}
+
+export function normalizeScoutEvidenceXml(output: string): string {
+  const trimmed = output.trim().replace(/^```(?:xml)?\s*([\s\S]*?)\s*```$/, "$1").trim();
+  const start = trimmed.indexOf("<scout_evidence");
+  const end = trimmed.lastIndexOf("</scout_evidence>");
+  if (start >= 0 && end > start) return trimmed.slice(start, end + "</scout_evidence>".length).trim();
+  return trimmed;
+}
+
+export function startFullScanFanout(spec: any, agent: any): SubagentHandle {
+  const id = randomUUID();
+  const handles = FULL_SCAN_SECTIONS.map(([section, assignment]) => startSubagent({
+    ...spec,
+    runId: undefined,
+    agent,
+    task: `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nThe root must be <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low">. Return exactly that one XML document. Use exactly one concise finding, at most one gap, and one evidence container with one or two non-empty <source path="relative/file"> citations. Keep the complete document under 2,500 characters, including </scout_evidence>. Do not use Markdown or compose the canonical Scan Report.`,
+  }));
+  const result = Promise.all(handles.map((handle) => handle.result)).then((results): SubagentResult => {
+    const failed = results.filter((entry) => entry.exitCode !== 0);
+    const outputs = results.map((entry) => finalAssistantText(entry.messages) || entry.errorMessage || entry.stderr || "");
+    try {
+      outputs.forEach((output, index) => validateScoutEvidenceXml(output, FULL_SCAN_SECTIONS[index]![0]));
+    } catch (error: any) {
+      const message = error?.message || String(error);
+      return {
+        runId: id,
+        agent: "task-scout-group",
+        task: spec.task,
+        exitCode: 1,
+        messages: [{ role: "assistant", content: [{ type: "text", text: `Scout fanout failed: ${message}` }] }],
+        stderr: message,
+        usage: results.reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
+      };
+    }
+    const evidence = outputs.map((output, index) => normalizeScoutEvidenceXml(output).replace("<scout_evidence ", `<scout_evidence run_id="${results[index]!.runId}" `)).join("\n");
+    return {
+      runId: id,
+      agent: "task-scout-group",
+      task: spec.task,
+      exitCode: failed.length ? 1 : 0,
+      messages: [{ role: "assistant", content: [{ type: "text", text: `<scan_evidence work_item="${spec.taskId || "unknown"}" scan_level="full">\n${evidence}\n</scan_evidence>\n\nContractor: validate each <scout_evidence> section, resolve contradictions against source, and author one canonical Scan Report. Do not persist any individual Scout output as the Scan artifact.` }] }],
+      stderr: failed.map((entry) => entry.errorMessage || entry.stderr).filter(Boolean).join("\n"),
+      usage: results.reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
+    };
+  });
+  return { id, result, stop: () => handles.forEach((handle) => handle.stop()) };
+}
+
+export function stageAgent(stage: PipelineStage): string {
+  if (stage === "contracts") throw new Error("Contract drafting is Contractor-owned");
+  if (stage === "rri") throw new Error("RRI is Contractor-owned");
+  return ({ scan: "task-scout", vision: "task-planner", blueprint: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
+}
+
+export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, taskId: string): string {
+  const requiredStages = stage === "blueprint" ? ["scan", "rri", "vision"] : ["scan", "rri", "vision", "blueprint", "contracts"];
+  const checkpoints = (Array.isArray(raw?.checkpoints) ? raw.checkpoints : [])
+    .filter((checkpoint: any) => requiredStages.includes(checkpoint.stage))
+    .reduce((latest: Map<string, any>, checkpoint: any) => {
+      const current = latest.get(checkpoint.stage);
+      if (!current || Number(checkpoint.artifact_revision || 0) > Number(current.artifact_revision || 0)) latest.set(checkpoint.stage, checkpoint);
+      return latest;
+    }, new Map<string, any>());
+  const payload = {
+    work_item: { id: taskId, title: raw?.work_item?.title || "", type: raw?.work_item?.type || "", description: String(raw?.work_item?.description || "").slice(0, 4000) },
+    project: { name: raw?.project?.name || "", root_path: raw?.project?.root_path || "." },
+    approved_context: [...checkpoints.values()].map((checkpoint: any) => ({ stage: checkpoint.stage, artifact_id: checkpoint.artifact_id, artifact_revision: checkpoint.artifact_revision, content_hash: checkpoint.content_hash })),
+    instructions: "Load each approved context artifact with task_manager action load_planning_artifact before planning. Do not use historical revisions.",
+  };
+  const encoded = JSON.stringify(payload).replaceAll("]]>", "]] ]>");
+  return `<${stage}_handoff schema_version="2" work_item_id="${taskId}"><approved_context><![CDATA[${encoded}]]></approved_context></${stage}_handoff>`;
+}
+
+// Planning profile constraint: a handoff must name the approved checkpoint of
+// the immediately precedent stage in the Plan profile so the consumer can tie
+// the dispatched stage to its persisted predecessor.
+export function predecessorCheckpointFor(data: any, stage: string, profileStages: string[]): any {
+  const index = profileStages.indexOf(stage);
+  if (index <= 0) return undefined;
+  const prior = profileStages[index - 1];
+  return (Array.isArray(data?.checkpoints) ? data.checkpoints : [])
+    .filter((checkpoint: any) => checkpoint.stage === prior)
+    .sort((a: any, b: any) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0)
+      || String(b.created_at || "").localeCompare(String(a.created_at || "")))[0];
+}
+
+export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string {
+  const raw = execPic(["show", taskId], cwd);
+  if (raw.work_item) {
+    if (stage === "scan") return buildWorkItemScanPrompt(raw.work_item, raw.project);
+    if (isPlanningStage(stage)) return `${stage === "blueprint" || stage === "task_graph" ? planningHandoff(stage, raw, taskId) + "\n" : ""}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, raw.work_item)}`;
+    const data = normalizePipelineData(raw);
+    const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
+    if (!activePack) throw new Error(`Work Item ${taskId} requires one active instruction pack`);
+    if (stage === "review") return reviewStagePrompt(taskId, cwd);
+    if (stage === "autofix") return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildAutofixContext(data);
+    const currentReview = currentFailedReview(parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)), activePack);
+    return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data) + buildEscalationResolutionContext(data, parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)));
+  }
+  const data = withInheritedParentWorkflowArtifacts(raw, cwd);
+  if (stage === "scan") return buildWorkItemScanPrompt(data.work_item, data.project);
+  if (stage === "review") return reviewStagePrompt(taskId, cwd);
+  if (stage === "autofix") {
+    const verificationReports = execPic(["workflow", "verifications", taskId], cwd);
+    return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildAutofixContext({ ...data, verification_reports: Array.isArray(verificationReports) ? verificationReports : data.verification_reports });
+  }
+  return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildWorkerCorrectionContext(data) + buildEscalationResolutionContext(data, parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)));
+}
