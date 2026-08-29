@@ -20,6 +20,23 @@ Task 5 notes: `isLegacyBootstrapStatement` is deleted; every bootstrap statement
 
 Task 4 remaining slices (each one domain at a time, CLI JSON byte-identical, full suite green per move): `internal/workitem` (CRUD/labels/relations/claim/readiness), `internal/workflow` (artifact stage machine, checkpoints, materialize, aggregate verify), `internal/pipeline` (runs, leases, checkpoints), `internal/acceptance` (Gherkin validation), `internal/store` (openDB + the migration runner from `schema_bootstrap.go`). The `internal/tip` extraction shows the pattern: move pure + transactional logic verbatim with a rename map, leave thin CLI handlers in `cmd/pic`, inject cross-domain validators (e.g. `SaveInput.ValidateAcceptance`).
 
+## Review Response (2026-08-29, second pass)
+
+All P0/P1 findings and both actionable P2s from the post-implementation review are fixed, each with regression coverage:
+
+| Finding | Resolution | Commit |
+|---|---|---|
+| P0 migrations not atomic | Every step is one-shot (`once` semantics); statement/DML steps apply AND record their version inside one transaction (`tx: true`), so a crash leaves the step fully applied and recorded or not at all. Table-rebuild steps that manage their own transactions/pragmas stay self-managed, individually atomic, and re-run in full on retry. | `ecaf99f` |
+| P3 current DBs mutate on every open | Resolved together with P0: strict once-semantics — an already-migrated database runs zero migration steps. The self-healing tests now simulate older-binary databases explicitly by clearing version records, which is what those fixtures meant all along. | `ecaf99f` |
+| P1 partial legacy states | `migrateEpicWorkflowSchema` handles epics-only databases (previously early-returned, orphaning rows) and `migrateLegacyWorkItems` imports from whichever table exists; a task whose epic was not imported gets a NULL parent. A pre-existing latent bug surfaced here — dangling `tasks.epic_id` broke the rebuilt FK check even with both tables — now normalized to NULL during migration. | `65cc81d` |
+| P1 parsePicShow element shapes | Every collection element must be a non-null object or parsing throws `pic show <key>[<index>] must be an object`. | `b862392` (pic-show hardening) |
+| P1 prose oracle | `NextAction` records with stable `id`, `kind` (tool/cli), `action`, argument template, `label`, and role `actor`; `workflow-status.next_actions` returns structured records and gate rejections render action+args+actor from the same records. | `d4fdeb3` |
+| P1 primer drops missing context | `planPrimerContext` fails closed: any preceding profile stage without an approved checkpoint bound to a present artifact blocks dispatch with the named stages. | `9af59c9` |
+| P1 dry-run counts only | The preview returns the exact artifact revisions, checkpoint rows, TIP generations, and dependent Work Items a reset would retire, queried from the same lineage the DELETE statements use. | `b254a86` |
+| P2 inferred attempt number | Attempt numbering reads the persisted `attempt` counter on the pack's pipeline runs (max+1), robust across resets and review-fix epochs; escalation resolutions flow through the ledger's context argument on the canonical dispatch path. | `b694421`, `476e0a2` |
+| P2 lint "new code only" | `no-explicit-any` is now an error in pipeline/tasking; every pre-existing occurrence carries an explicit per-line `-- legacy baseline` disable marker, so any new unmarked `any` fails lint (verified with a negative probe). | `f4870be` |
+| P2 package extraction incomplete | Acknowledged as ongoing: `internal/tip` is the established pattern; the remaining packages (workitem, workflow, pipeline, acceptance, store) follow it one domain per commit. | — |
+
 ## Original Plan (unchanged)
 
 ## Original Plan (unchanged)
