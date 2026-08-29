@@ -37,6 +37,15 @@ All P0/P1 findings and both actionable P2s from the post-implementation review a
 | P2 lint "new code only" | `no-explicit-any` is now an error in pipeline/tasking; every pre-existing occurrence carries an explicit per-line `-- legacy baseline` disable marker, so any new unmarked `any` fails lint (verified with a negative probe). | `f4870be` |
 | P2 package extraction incomplete | Acknowledged as ongoing: `internal/tip` is the established pattern; the remaining packages (workitem, workflow, pipeline, acceptance, store) follow it one domain per commit. | — |
 
+## Review Response (2026-08-29, third pass)
+
+| Finding | Resolution | Commit |
+|---|---|---|
+| P0 steps 1/3 still not atomic | Every step is now transactional without exception. `rebuildSchemaTable`, the legacy schema reconciliation, artifact-stage widening, and the pipeline-column reconciliation all run on the caller's transaction; the runner owns `foreign_keys=OFF` + `legacy_alter_table=ON` at connection level around BEGIN (both are connection-scoped and cannot change inside a transaction) and restores them after commit. Step operations and the version record commit or roll back together. Proven by `TestSchemaMigrationFailureInjectionRollsBack`: a step running real reconcile operations then failing leaves no version record, no `work_items` table (created DDL rolled back), and untouched legacy rows; a DDL step failing after CREATE leaves no table; the subsequent real migration retries cleanly. | `30d581e` |
+| P1 primer accepts unapproved/hash-mismatched checkpoints | `planPrimerContext` and `predecessorCheckpointFor` now consider only `decision_type` approved/accepted checkpoints whose `content_hash` matches the bound artifact revision, selecting the newest such revision; rejected, hash-stale, artifact-orphaned, and untyped-decision checkpoints count as missing and block dispatch. Regression cases cover rejected checkpoints, hash mismatch, and an older approved revision surviving a rejected newer one. | `d26ba70`, `8a84124`, `7540d9e` |
+| P1 dry-run misses cascade-retired descendants | The preview enumerates the descendant-owned records the reset's foreign-key cascades retire: child artifacts, checkpoints, instruction packs, completion reports, and verification reports, each keyed by owning Work Item. The regression seeds descendant-owned rows and asserts they appear in the preview while remaining unmutated. | `3f3fca4` |
+| P2 Task 4 remaining packages | Ongoing, documented: `internal/tip` is the pattern; workitem/workflow/pipeline/acceptance/store follow one domain per commit. | — |
+
 ## Original Plan (unchanged)
 
 ## Original Plan (unchanged)
