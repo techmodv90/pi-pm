@@ -1423,7 +1423,70 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 			return err
 		}
 		dependentRows.Close()
-		writeJSON(os.Stdout, map[string]any{"work_item_id": targetID, "dry_run": true, "artifacts": artifactEntries, "checkpoints_list": checkpointEntries, "instruction_packs": packEntries, "dependents": dependentEntries, "artifacts_count": artifacts, "pipeline_runs": runs, "retired_materializations": materialized, "checkpoints": checkpoints, "next_stage_after_reset": "scan"})
+		// The DELETE below cascades: every record the retired child Work Items
+		// own (artifacts, checkpoints, packs, completion and verification
+		// reports) is retired with them, so the preview enumerates those
+		// descendant-owned targets explicitly.
+		descendantFilter := ` WHERE work_item_id IN (SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id<>?)`
+		descendantArtifacts := []map[string]any{}
+		if err := collectDryRunRows(tx, `SELECT stage,id,revision,content_hash,work_item_id FROM work_item_artifacts`+descendantFilter+` ORDER BY stage`, targetID, func(scan func(...any) error) error {
+			var stage, artifactID, contentHash, owner string
+			var revision int
+			if err := scan(&stage, &artifactID, &revision, &contentHash, &owner); err != nil {
+				return err
+			}
+			descendantArtifacts = append(descendantArtifacts, map[string]any{"stage": stage, "id": artifactID, "revision": revision, "content_hash": contentHash, "work_item_id": owner})
+			return nil
+		}); err != nil {
+			return err
+		}
+		descendantCheckpoints := []map[string]any{}
+		if err := collectDryRunRows(tx, `SELECT id,stage,artifact_id,artifact_revision,work_item_id FROM workflow_checkpoints`+descendantFilter+` ORDER BY stage`, targetID, func(scan func(...any) error) error {
+			var checkpointID, stage, artifactID, owner string
+			var revision int
+			if err := scan(&checkpointID, &stage, &artifactID, &revision, &owner); err != nil {
+				return err
+			}
+			descendantCheckpoints = append(descendantCheckpoints, map[string]any{"id": checkpointID, "stage": stage, "artifact_id": artifactID, "artifact_revision": revision, "work_item_id": owner})
+			return nil
+		}); err != nil {
+			return err
+		}
+		descendantPacks := []map[string]any{}
+		if err := collectDryRunRows(tx, `SELECT id,version,content_hash,status,work_item_id FROM work_item_instruction_packs`+descendantFilter+` ORDER BY version`, targetID, func(scan func(...any) error) error {
+			var packID, contentHash, status, owner string
+			var version int
+			if err := scan(&packID, &version, &contentHash, &status, &owner); err != nil {
+				return err
+			}
+			descendantPacks = append(descendantPacks, map[string]any{"id": packID, "version": version, "content_hash": contentHash, "status": status, "work_item_id": owner})
+			return nil
+		}); err != nil {
+			return err
+		}
+		descendantCompletions := []map[string]any{}
+		if err := collectDryRunRows(tx, `SELECT id,status,pipeline_run_id,work_item_id FROM work_item_completion_reports`+descendantFilter, targetID, func(scan func(...any) error) error {
+			var reportID, status, runID, owner string
+			if err := scan(&reportID, &status, &runID, &owner); err != nil {
+				return err
+			}
+			descendantCompletions = append(descendantCompletions, map[string]any{"id": reportID, "status": status, "pipeline_run_id": runID, "work_item_id": owner})
+			return nil
+		}); err != nil {
+			return err
+		}
+		descendantVerifications := []map[string]any{}
+		if err := collectDryRunRows(tx, `SELECT id,status,completion_report_id,work_item_id FROM work_item_verification_reports`+descendantFilter, targetID, func(scan func(...any) error) error {
+			var reportID, status, completionID, owner string
+			if err := scan(&reportID, &status, &completionID, &owner); err != nil {
+				return err
+			}
+			descendantVerifications = append(descendantVerifications, map[string]any{"id": reportID, "status": status, "completion_report_id": completionID, "work_item_id": owner})
+			return nil
+		}); err != nil {
+			return err
+		}
+		writeJSON(os.Stdout, map[string]any{"work_item_id": targetID, "dry_run": true, "artifacts": artifactEntries, "checkpoints_list": checkpointEntries, "instruction_packs": packEntries, "dependents": dependentEntries, "descendant_artifacts": descendantArtifacts, "descendant_checkpoints": descendantCheckpoints, "descendant_instruction_packs": descendantPacks, "descendant_completion_reports": descendantCompletions, "descendant_verification_reports": descendantVerifications, "artifacts_count": artifacts, "pipeline_runs": runs, "retired_materializations": materialized, "checkpoints": checkpoints, "next_stage_after_reset": "scan"})
 		return nil
 	}
 	if materialized > 0 {
@@ -1491,6 +1554,24 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 // Owner-only bounded amendment: exact old→new substitutions across approved planning
 // lineage. Resolves the dual-source-of-truth hazard of injecting corrected values
 // (e.g. a port change) while frozen artifacts still state the old value, without a full re-scope.
+
+
+// collectDryRunRows runs a preview query against the reset transaction and
+// hands each row to the caller's sink.
+func collectDryRunRows(db *sql.Tx, query string, targetID string, sink func(scan func(...any) error) error) error {
+	rows, err := db.Query(query, targetID, targetID)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		if err := sink(rows.Scan); err != nil {
+			return err
+		}
+	}
+	return rows.Err()
+}
+
 func workItemPlanningAmend(db *sql.DB, args []string) error {
 	if len(args) != 3 || args[1] != "owner" {
 		return errors.New("usage: pic work-item planning-amend <id> owner <amendment-json>")

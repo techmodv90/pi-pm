@@ -2725,10 +2725,54 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 		t.Fatalf("pre-dry-run status = %#v", status)
 	}
 
+	// Seed descendant-owned records: the reset deletes child Work Items, and
+	// foreign-key cascades retire everything they own, so the preview must
+	// enumerate those cascaded targets too.
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	childDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var childID string
+	if err := childDB.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id<>?`, id, id).Scan(&childID); err != nil {
+		t.Fatal(err)
+	}
+	childDB.Close()
+	runSQLite(t, dbPath, `
+		INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-child','`+childID+`','scan',1,'<scan/>','h-child');
+		INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-child','`+childID+`','scan','wia-child',1,'h-child','accepted');
+		INSERT INTO work_item_completion_reports(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,status) VALUES('wicr-child','`+childID+`','pr-child','wip-child',1,'h-child-pack','done');
+		INSERT INTO work_item_verification_reports(id,work_item_id,checkpoint_id,completion_report_id,status,summary,verified_by_role) VALUES('wivr-child','`+childID+`','','wicr-child','passed','child verified','contractor');`)
+
 	dry := asObject(t, runPic(t, bin, root, home, "work-item", "planning-reset", id, "owner", "--dry-run"))
 	if dry["dry_run"] != true || dry["retired_materializations"] != float64(1) {
 		t.Fatalf("dry run = %#v", dry)
 	}
+	descendantArtifacts := dry["descendant_artifacts"].([]any)
+	if len(descendantArtifacts) != 1 || asObject(t, descendantArtifacts[0])["id"] != "wia-child" {
+		t.Fatalf("descendant artifacts = %#v", descendantArtifacts)
+	}
+	descendantCheckpoints := dry["descendant_checkpoints"].([]any)
+	if len(descendantCheckpoints) != 1 || asObject(t, descendantCheckpoints[0])["id"] != "wic-child" {
+		t.Fatalf("descendant checkpoints = %#v", descendantCheckpoints)
+	}
+	descendantCompletions := dry["descendant_completion_reports"].([]any)
+	if len(descendantCompletions) != 1 || asObject(t, descendantCompletions[0])["id"] != "wicr-child" {
+		t.Fatalf("descendant completion reports = %#v", descendantCompletions)
+	}
+	descendantVerifications := dry["descendant_verification_reports"].([]any)
+	if len(descendantVerifications) != 1 || asObject(t, descendantVerifications[0])["id"] != "wivr-child" {
+		t.Fatalf("descendant verification reports = %#v", descendantVerifications)
+	}
+	verifyDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seededChildArtifact int
+	if err := verifyDB.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE id='wia-child'`).Scan(&seededChildArtifact); err != nil || seededChildArtifact != 1 {
+		t.Fatalf("dry run mutated descendant rows: count=%d err=%v", seededChildArtifact, err)
+	}
+	verifyDB.Close()
 	if dry["checkpoints"] != float64(6) {
 		t.Fatalf("dry run checkpoints = %#v", dry)
 	}
