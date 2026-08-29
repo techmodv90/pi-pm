@@ -15,7 +15,7 @@
 - Build: `cd pi-ext && pnpm run build`
 - Test (all): `cd go-pic && go test ./... && cd ../pi-ext && pnpm test`
 - Test (single file): `cd go-pic && go test ./cmd/pic -run <TestName>` or `cd pi-ext && node --experimental-strip-types --test <file>.test.ts`
-- Lint: None configured
+- Lint: `cd pi-ext && pnpm lint` (typescript-eslint scoped to `pipeline/` and `tasking/`; `no-explicit-any` is an error in `pipeline/pic-show.ts` and a burn-down warning elsewhere — do not add new `any` in those folders)
 - Typecheck: `cd pi-ext && pnpm run check`
 - Run locally: `cd go-pic && go run ./cmd/pic <command>`; dashboard: `cd go-pic/web && npm run dev`
 

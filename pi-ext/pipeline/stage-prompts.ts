@@ -10,6 +10,7 @@ import { renderCanonicalInstructionPackXml } from "./instruction-pack-xml.ts";
 import { buildAutofixContext, buildEscalationResolutionContext, buildOwnerRejectionContext, buildTargetedReReviewInstructions, buildWorkerCorrectionContext, reviewCycleCount } from "./corrections.ts";
 import { currentFailedReview, isMutationStage } from "./report-parsing.ts";
 import { normalizePipelineData } from "./stage-resolution.ts";
+import { parsePicShow, type PicInstructionPack } from "./pic-show.ts";
 
 // Known planning stages the scheduler can route and map to a bounded agent.
 // This is a stage/agent registry only; dispatch eligibility is decided by the
@@ -151,10 +152,13 @@ export function predecessorCheckpointFor(data: any, stage: string, profileStages
 export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string {
   const raw = execPic(["show", taskId], cwd);
   if (raw.work_item) {
-    if (stage === "scan") return buildWorkItemScanPrompt(raw.work_item, raw.project);
-    if (isPlanningStage(stage)) return `${stage === "blueprint" || stage === "task_graph" ? planningHandoff(stage, raw, taskId) + "\n" : ""}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, raw.work_item)}`;
-    const data = normalizePipelineData(raw);
-    const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
+    // Canonical branch: fail-closed typed view of the show document. The legacy
+    // artifact-inheritance fallback below keeps the untyped raw document by design.
+    const doc = parsePicShow(raw);
+    if (stage === "scan") return buildWorkItemScanPrompt(doc.work_item, doc.project);
+    if (isPlanningStage(stage)) return `${stage === "blueprint" || stage === "task_graph" ? planningHandoff(stage, doc, taskId) + "\n" : ""}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, doc.work_item)}`;
+    const data = normalizePipelineData(doc);
+    const activePack = data.instruction_packs.find((pack: PicInstructionPack) => pack.status === "active");
     if (!activePack) throw new Error(`Work Item ${taskId} requires one active instruction pack`);
     if (stage === "review") return reviewStagePrompt(taskId, cwd);
     if (stage === "autofix") return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildAutofixContext(data);

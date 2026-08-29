@@ -16,6 +16,7 @@ import { discoverAgents } from "../subagent/agents.ts";
 import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, startSubagentResilient, type SubagentHandle } from "../subagent/runner.ts";
 
 import type { SubagentResult } from "../subagent/types.ts";
+import { parsePicShow, type PicShowDocument } from "./pic-show.ts";
 import { parsePipelineRuns, type PipelineRun, type PipelineStage } from "./pipeline-types.ts";
 import { mergeRriTAuthoringResults, parseRriTPersonaResult, RRI_T_PERSONAS } from "./rri-t.ts";
 import { activePackDoneReports, currentFailedReview, isMutationStage, latestVerificationAfter, parseReviewReport, parseTaskCompletionReport, persistedReviewOutcome, pipelineVerificationBlockReason } from "./report-parsing.ts";
@@ -126,6 +127,17 @@ export function formatPipelineStop(result: any): string {
 export class PipelineScheduler {
   readonly handoffs = new EphemeralHandoffStore();
   private cwd = "";
+
+  /** Fail-closed typed view of one `pic show` document. */
+  showItem(id: string): PicShowDocument {
+    return parsePicShow(execPic(["show", id], this.cwd));
+  }
+
+  /** Ready executable descendant ids under an aggregate root. */
+  readyLeafIds(root: PicShowDocument): string[] {
+    return canonicalReadyLeafIds(root, (id) => this.showItem(id));
+  }
+
   private integrating = Promise.resolve();
   private reconciling = false;
   private context?: ExtensionContext;
@@ -231,9 +243,14 @@ export class PipelineScheduler {
     if (!worktree) throw new Error("worker result missing assigned worktree");
     const gitToplevel = (await execFileAsync("git", ["-C", worktree, "rev-parse", "--show-toplevel"], { encoding: "utf8" })).stdout.trim();
     if (realpathSync(gitToplevel) !== realpathSync(worktree)) throw new Error(`worker worktree invariant failed after exit: assigned=${worktree} git_toplevel=${gitToplevel}`);
-    const data = execPic(["show", run.task_id], this.cwd);
-    const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
-    const constraints = JSON.parse(activePack?.constraints_json || "{}");
+    // Pre-existing tolerance: an unreadable show document (e.g. no project DB in a
+    // probe repo) falls back to default constraints instead of losing the patch.
+    let constraints: Record<string, unknown> = {};
+    try {
+      const data = this.showItem(run.task_id);
+      const activePack = data.instruction_packs.find((pack) => pack.status === "active");
+      constraints = JSON.parse(activePack?.constraints_json || "{}");
+    } catch {}
     await execFileAsync("git", ["-C", worktree, "add", "-N", "--", "."], { encoding: "utf8" });
     const changedResult = await execFileAsync("git", ["-C", worktree, "diff", "--name-only", "HEAD"], { encoding: "utf8" });
     const filtered = filterGeneratedFiles(changedResult.stdout.trim().split("\n").filter(Boolean), constraints);
@@ -430,14 +447,14 @@ export class PipelineScheduler {
   }
 
   private async scheduleReady(rootTaskId: string, explicitRetry = false): Promise<any> {
-    const root = execPic(["show", rootTaskId], this.cwd);
+    const root = this.showItem(rootTaskId);
     if (root.work_item) {
-      const taskIds = canonicalReadyLeafIds(root, (id) => execPic(["show", id], this.cwd));
+      const taskIds = this.readyLeafIds(root);
       if (!taskIds.length) return { rootTaskId, launches: [], blocked: "No authorized dependency-ready executable Work Items" };
       await new Promise<void>((resolve) => setImmediate(resolve));
       const stages = new Map<PipelineStage, string[]>();
       for (const taskId of taskIds) {
-        const data = normalizePipelineData(execPic(["show", taskId], this.cwd));
+        const data = normalizePipelineData(this.showItem(taskId));
         const stage = nextPipelineStage(data, this.pipelineRuns(taskId));
         if (stage) stages.set(stage, [...(stages.get(stage) || []), taskId]);
       }
@@ -457,7 +474,7 @@ export class PipelineScheduler {
   // envelope requires a profile version/hash, so a resolved:false profile would
   // publish an invalid envelope with no recovery.
   private planEligibility(taskId: string, stage: PipelineStage): { profile: PlanningProfileState } {
-    const profile = resolvePlanProfile(normalizePipelineData(execPic(["show", taskId], this.cwd)));
+    const profile = resolvePlanProfile(normalizePipelineData(this.showItem(taskId)));
     if (!profile.resolved || !profile.contentHash) {
       throw new Error(`planning stage ${stage} cannot dispatch for ${taskId} before the Plan profile is persisted; persist the approved profile before dispatch`);
     }
@@ -479,7 +496,7 @@ export class PipelineScheduler {
     if (isMutationStage(stage)) {
       assertCleanGit(this.cwd);
       for (const taskId of launchTaskIds) {
-        const raw = execPic(["show", taskId], this.cwd);
+        const raw = this.showItem(taskId);
         const data = raw.work_item ? normalizePipelineData(raw) : withInheritedParentWorkflowArtifacts(raw, this.cwd);
         if (!data.work_item) throw new Error(data.error || `Task ${taskId} not found`);
         const blockReason = pipelineWorkerBlockReason(data);
@@ -514,7 +531,7 @@ export class PipelineScheduler {
     const claims: PipelineRun[] = [];
     try {
       for (const taskId of launchTaskIds) {
-        const data = execPic(["show", taskId], this.cwd);
+        const data = this.showItem(taskId);
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
         const claimArgs = ["workflow", "pipeline-claim", taskId, stage, "--lease-seconds", "14400", "--environment-fingerprint", verificationEnvironmentFingerprint(this.cwd), "--base-commit", repositoryHead(this.cwd)];
         if (isPlanningStage(stage)) {
@@ -523,7 +540,7 @@ export class PipelineScheduler {
         }
         if (stage === "worker" && reviewFixTaskIds.has(taskId)) claimArgs.push("--review-fix", "1");
         if (stage === "worker" && explicitRetry) claimArgs.push("--explicit-retry", "1");
-        if (activePack && (isMutationStage(stage) || stage === "review")) claimArgs.push("--instruction-pack-id", activePack.id, "--instruction-pack-hash", activePack.content_hash);
+        if (activePack && (isMutationStage(stage) || stage === "review")) claimArgs.push("--instruction-pack-id", activePack.id ?? "", "--instruction-pack-hash", activePack.content_hash ?? "");
         const claim = execPic(claimArgs, this.cwd);
         if (claim.error) throw new Error(claim.error);
         claims.push(claim);
@@ -531,7 +548,7 @@ export class PipelineScheduler {
       if (isMutationStage(stage)) {
         await new Promise<void>((resolve) => setImmediate(resolve));
         for (const taskId of launchTaskIds) {
-          const raw = execPic(["show", taskId], this.cwd);
+          const raw = this.showItem(taskId);
           const reset = execPic(["work-item", "status", taskId, "in_progress"], this.cwd);
           if (reset.error) throw new Error(reset.error);
           if (!raw.work_item) {
@@ -545,7 +562,7 @@ export class PipelineScheduler {
       for (let index = 0; index < claims.length; index++) {
         const claim = claims[index]!;
         const taskId = launchTaskIds[index]!;
-        const data = normalizePipelineData(execPic(["show", taskId], this.cwd));
+        const data = normalizePipelineData(this.showItem(taskId));
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
         let skillFamilies: string[] = [];
         if (activePack?.skill_families_json) {
@@ -683,7 +700,7 @@ export class PipelineScheduler {
             const workspacePath = join(run.async_dir || "", "workspace.json");
             if (!existsSync(workspacePath)) throw new Error(`worker workspace diagnostics missing: ${workspacePath}`);
             const workspace = JSON.parse(readFileSync(workspacePath, "utf8"));
-            const data = normalizePipelineData(execPic(["show", run.task_id], this.cwd));
+            const data = normalizePipelineData(this.showItem(run.task_id));
             assertRunContractCurrent(data, run);
             const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
             const constraints = JSON.parse(activePack?.constraints_json || "{}");
@@ -762,7 +779,7 @@ export class PipelineScheduler {
       }
       const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state })], this.cwd);
       if (result.error) throw new Error(result.error);
-      const data = execPic(["show", run.task_id], this.cwd);
+      const data = this.showItem(run.task_id);
       const parentId = data.work_item?.parent_id;
       if (parentId) this.roots.add(parentId);
       if (isMutationStage(run.stage)) {
@@ -789,13 +806,13 @@ export class PipelineScheduler {
   }
 
   private async continueWorkerGroup(run: PipelineRun): Promise<void> {
-    const task = execPic(["show", run.task_id], this.cwd);
+    const task = this.showItem(run.task_id);
     const parentId = task.work_item?.parent_id;
-    const parent = parentId ? execPic(["show", parentId], this.cwd) : null;
+    const parent = parentId ? this.showItem(parentId) : null;
     const taskIds = parentId ? (parent?.children || []).map((child: any) => child.id) : [run.task_id];
     const taskRuns = new Map<string, PipelineRun[]>();
     const group = taskIds.flatMap((taskId: string) => {
-      const taskData = normalizePipelineData(execPic(["show", taskId], this.cwd));
+      const taskData = normalizePipelineData(this.showItem(taskId));
       if (taskData?.work_item?.status === "done") return [];
       const runs = execPic(["workflow", "pipeline-runs", taskId], this.cwd);
       if (!Array.isArray(runs)) return [];
@@ -816,7 +833,7 @@ export class PipelineScheduler {
     for (const entry of group) {
       const report = parseTaskCompletionReport(outputFor(entry));
       if (report.status === "escalated") throw new Error("escalated run cannot be integrated");
-      const data = normalizePipelineData(execPic(["show", entry.task_id], this.cwd));
+      const data = normalizePipelineData(this.showItem(entry.task_id));
       const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
       const constraints = JSON.parse(activePack?.constraints_json || "{}");
       const workspace = JSON.parse(readFileSync(join(entry.async_dir || "", "workspace.json"), "utf8"));
@@ -841,7 +858,7 @@ export class PipelineScheduler {
   }
 
   private integrateReviewedCandidate(taskId: string, reviewRun: PipelineRun): PipelineRun {
-    const data = normalizePipelineData(execPic(["show", taskId], this.cwd));
+    const data = normalizePipelineData(this.showItem(taskId));
     assertRunContractCurrent(data, reviewRun);
     const workerRun = this.pipelineRuns(taskId).find((candidate: PipelineRun) => candidate.id === reviewRun.candidate_run_id && isMutationStage(candidate.stage));
     if (!workerRun?.artifact_saved_at || !workerRun.integrated_patch_path || !workerRun.integrated_patch_hash) throw new Error("review passed without validated candidate patch evidence");
@@ -866,7 +883,7 @@ export class PipelineScheduler {
   }
 
   private promoteReviewedCandidate(run: PipelineRun): void {
-    const raw = execPic(["show", run.task_id], this.cwd);
+    const raw = this.showItem(run.task_id);
     const data = normalizePipelineData(raw);
     if ((data.completion_reports || []).some((report: any) => report.status === "done" && report.pipeline_run_id === run.id)) return;
     const report = parseTaskCompletionReport(outputFor(run));
@@ -886,7 +903,7 @@ export class PipelineScheduler {
   }
 
   private async advance(taskId: string, parentId?: string): Promise<void> {
-    const raw = execPic(["show", taskId], this.cwd);
+    const raw = this.showItem(taskId);
     const data = raw.work_item ? normalizePipelineData(raw) : withInheritedParentWorkflowArtifacts(raw, this.cwd);
     const next = nextPipelineStage(data, this.pipelineRuns(taskId));
     if (next) {
@@ -917,7 +934,7 @@ export class PipelineScheduler {
       await this.continueWorkerGroup(run);
       return;
     }
-    const data = execPic(["show", run.task_id], this.cwd);
+    const data = this.showItem(run.task_id);
     if (run.status !== "completed") {
       checkpoint(run, "advanced", this.cwd);
       return;
@@ -929,7 +946,7 @@ export class PipelineScheduler {
       if (!candidate || candidate.status !== "completed" || !candidate.artifact_saved_at || !candidate.integrated_patch_path || candidate.integrated_patch_hash !== outcome.candidatePatchHash) {
         throw new Error("completed review references invalid candidate lineage");
       }
-      const reviewData = execPic(["show", run.task_id], this.cwd);
+      const reviewData = this.showItem(run.task_id);
       if (reviewData.work_item?.review_status !== outcome.status) {
         const notes = outcome.findings.length ? `${outcome.notes}\n\n${outcome.findings.map((finding) => `- ${finding}`).join("\n")}` : outcome.notes;
         const update = execPic(["work-item", "review", run.task_id, outcome.status, "--notes", notes, "--pipeline-run-id", run.id], this.cwd);
@@ -956,7 +973,7 @@ export class PipelineScheduler {
     const payload = run.stage === "blueprint"
       ? JSON.stringify(loadLatestBlueprintDraft(this.cwd, run.task_id))
       : output;
-    const data = execPic(["show", run.task_id], this.cwd);
+    const data = this.showItem(run.task_id);
     const profile = resolvePlanProfile(data);
     const predecessor = predecessorCheckpointFor(data, run.stage, profile.stages);
     const envelope = buildPlanningHandoffXml({
@@ -982,7 +999,7 @@ export class PipelineScheduler {
   }
 
   private parentHasActiveRuns(parentId: string): boolean {
-    const parent = execPic(["show", parentId], this.cwd);
+    const parent = this.showItem(parentId);
     const childIds = (parent.children || []).map((child: any) => child.id);
     const ids = new Set([parentId, ...childIds]);
     const active = execPic(["workflow", "pipeline-active"], this.cwd);
