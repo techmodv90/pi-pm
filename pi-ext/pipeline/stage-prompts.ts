@@ -193,10 +193,11 @@ export function predecessorCheckpointFor(data: any, stage: string, profileStages
   const index = profileStages.indexOf(stage);
   if (index <= 0) return undefined;
   const prior = profileStages[index - 1];
-  return (Array.isArray(data?.checkpoints) ? data.checkpoints : [])
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    .filter((checkpoint: any) => checkpoint.stage === prior)
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+  // Same validity constraint as planPrimerContext: only approved/accepted
+  // checkpoints bind the lineage line, so a rejected checkpoint can never be
+  // presented as the approved predecessor.
+  const approved = (Array.isArray(data?.checkpoints) ? data.checkpoints : []).filter((checkpoint: any) => checkpoint.stage === prior && (checkpoint.decision_type === "approved" || checkpoint.decision_type === "accepted"));
+  return approved
     .sort((a: any, b: any) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0)
       || String(b.created_at || "").localeCompare(String(a.created_at || "")))[0];
 }
@@ -264,22 +265,27 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
 export function planPrimerContext(doc: PicShowDocument, profileStages: string[], stage: string): { digests: StagePrimerDigest[]; missing: string[] } {
   const stageIndex = profileStages.indexOf(stage);
   const predecessors = stageIndex > 0 ? profileStages.slice(0, stageIndex) : [];
-  const checkpoints = (doc.checkpoints || []).filter((checkpoint) => Boolean(checkpoint.stage) && Boolean(checkpoint.artifact_id));
+  // Checkpoint validity constraint: only approved/accepted checkpoints whose
+  // content hash matches the bound artifact revision may supply planning
+  // context; rejected, hash-stale, or artifact-orphaned checkpoints count as
+  // missing so dispatch fails closed instead of planning from tainted history.
+  const approved = (doc.checkpoints || []).filter((checkpoint) => checkpoint.decision_type === "approved" || checkpoint.decision_type === "accepted");
   const digests: StagePrimerDigest[] = [];
   const missing: string[] = [];
   for (const prior of predecessors) {
-    const checkpoint = checkpoints
+    const checkpoint = approved
       .filter((entry) => entry.stage === prior)
       .sort((a, b) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0))[0];
     if (!checkpoint) {
       missing.push(prior);
       continue;
     }
-    // A checkpoint whose bound artifact revision is absent is superseded or
-    // corrupted history: treat it as missing rather than dispatching with a
-    // silent gap in approved context.
     const artifact = (doc.artifacts || []).find((entry) => entry.id === checkpoint.artifact_id && String(entry.revision) === String(checkpoint.artifact_revision));
     if (!artifact) {
+      missing.push(prior);
+      continue;
+    }
+    if (String(checkpoint.content_hash || "") !== String(artifact.content_hash || "")) {
       missing.push(prior);
       continue;
     }

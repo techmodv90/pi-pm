@@ -1612,7 +1612,7 @@ test("primer context blocks dispatch when a predecessor checkpoint or artifact i
   const missingArtifact = planPrimerContext(
     {
       work_item: workItem,
-      checkpoints: [{ stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan" }],
+      checkpoints: [{ stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" }],
       artifacts: [{ id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" }],
     },
     stages,
@@ -1625,8 +1625,8 @@ test("primer context blocks dispatch when a predecessor checkpoint or artifact i
     {
       work_item: workItem,
       checkpoints: [
-        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan" },
-        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: "h-rri" },
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: "h-rri", decision_type: "approved" },
       ],
       artifacts: [
         { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
@@ -1644,13 +1644,64 @@ test("primer context blocks dispatch when a predecessor checkpoint or artifact i
   const noCheckpoint = planPrimerContext(
     {
       work_item: workItem,
-      checkpoints: [{ stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-rri" }],
+      checkpoints: [{ stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-rri", decision_type: "approved" }],
       artifacts: [{ id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-rri", content: "<rri/>" }],
     },
     stages,
     "contracts",
   );
   assert.deepEqual(noCheckpoint.missing, ["scan", "vision", "blueprint"]);
+
+  // Rejected checkpoints never supply context...
+  const rejected = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-rri", decision_type: "rejected" },
+      ],
+      artifacts: [{ id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-rri", content: "<rri/>" }],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(rejected.missing, ["rri"]);
+
+  // ...and neither do checkpoints whose hash disagrees with the bound artifact.
+  const hashMismatch = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-stale", decision_type: "approved" },
+      ],
+      artifacts: [{ id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-current", content: "<rri/>" }],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(hashMismatch.missing, ["rri"]);
+
+  // The newest valid approved revision wins; an older approved checkpoint
+  // supplies context when the newest one was rejected.
+  const superseded = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-rri-1", decision_type: "approved" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: "h-rri-2", decision_type: "rejected" },
+      ],
+      artifacts: [
+        { id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-rri-1", content: "<rri v1/>" },
+        { id: "wia-rri", stage: "rri", revision: 2, content_hash: "h-rri-2", content: "<rri v2/>" },
+      ],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(superseded.missing, []);
+  assert.equal(superseded.digests.find((digest) => digest.stage === "rri")?.artifact_revision, 1);
 
   const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
   assert.match(prompts, /missing\.length[\s\S]{0,200}throw new Error/);
