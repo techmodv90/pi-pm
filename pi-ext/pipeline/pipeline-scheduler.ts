@@ -50,6 +50,7 @@ function checkpoint(run: PipelineRun, name: "integrated" | "artifact_saved" | "a
   if (patchFile) args.push("--patch-file", patchFile);
   try {
     execPicText(args, cwd);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   } catch (error: any) {
     const message = error?.stderr?.toString().trim() || error?.message || String(error);
     if (message.includes("already recorded")) return;
@@ -60,6 +61,7 @@ function checkpoint(run: PipelineRun, name: "integrated" | "artifact_saved" | "a
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 function saveWorkerReport(run: PipelineRun, cwd: string, taskReport: { status: "done" | "partial" | "blocked"; markdown: string }, report: any = { changedFiles: [], commandsRun: [], criteriaSatisfied: [], diffSummary: `Async worker ${taskReport.status}`, reviewFindings: [], residualRisks: [] }): void {
   const result = execPic([
     "workflow", "completion-save", run.task_id, taskReport.status,
@@ -82,6 +84,7 @@ function outputFor(run: PipelineRun): string {
   return readFileSync(path, "utf8");
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 function statusFor(run: PipelineRun): any {
   const path = join(run.async_dir || "", "status.json");
   if (!existsSync(path)) return null;
@@ -96,6 +99,7 @@ function statusFor(run: PipelineRun): any {
   return status;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function formatPipelineStatus(result: any): string {
   const runs = Array.isArray(result?.runs) ? result.runs : [];
   if (!runs.length) return `Pipeline ${result?.task_id || "unknown"}: no runs`;
@@ -109,6 +113,7 @@ export function formatPipelineStatus(result: any): string {
   return lines.join("\n");
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function formatPipelineStop(result: any): string {
   const cancelled = Array.isArray(result?.cancelled_runs) ? result.cancelled_runs.length : 0;
   return `Pipeline ${result?.task_id || "unknown"}: cancelled ${cancelled} run${cancelled === 1 ? "" : "s"}`;
@@ -150,8 +155,10 @@ export class PipelineScheduler {
 
   constructor(pi: ExtensionAPI) { this.pi = pi; }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   async runRriT(data: any): Promise<string> {
     const item = data?.work_item || {};
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     const scope = JSON.stringify({ work_item: item, requirements: data?.requirements || [], artifacts: (data?.artifacts || []).filter((artifact: any) => ["scan", "vision", "blueprint", "contracts", "task_graph"].includes(artifact.stage)), children: data?.children || [] });
     const text = `${item.title || item.id || "Aggregate"} ${item.description || ""} ${scope}`;
     const personas: string[] = ["QA / Tester"];
@@ -330,6 +337,7 @@ export class PipelineScheduler {
     );
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   async start(rootTaskId: string, ctx: ExtensionContext): Promise<any> {
     this.cwd = ctx.cwd;
     this.context = ctx;
@@ -357,6 +365,7 @@ export class PipelineScheduler {
     return await this.scheduleReady(rootTaskId);
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   async startReadyBatch(ctx: ExtensionContext): Promise<any> {
     this.cwd = ctx.cwd;
     this.context = ctx;
@@ -366,15 +375,19 @@ export class PipelineScheduler {
     const ready = execPic(["work-item", "ready"], ctx.cwd);
     const listed = execPic(["work-item", "list"], ctx.cwd);
     const taskIds = [...new Set([
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
       ...(Array.isArray(ready) ? ready.map((item: any) => item.id) : []),
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
       ...(Array.isArray(listed) ? listed.filter((item: any) => ["task", "bug", "chore"].includes(item.type) && item.status === "in_progress").map((item: any) => item.id).filter((id: any) => {
         // Auto-batch must not touch items with a live claim; explicit retries are
         // guarded by the one-active-run-per-(task,stage) unique index instead.
         const runs = this.pipelineRuns(id);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
         if (runs.some((run: any) => run.status === "claimed" || run.status === "running")) return false;
         const state = execPic(["work-item", "workflow-status", id], ctx.cwd);
         return isResumableExecutionState(state);
       }) : []),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     ])].filter((id: any): id is string => typeof id === "string");
     if (!taskIds.length) return { launches: [], blocked: "No authorized dependency-ready executable Work Items" };
     const stages = new Map<PipelineStage, string[]>();
@@ -385,7 +398,9 @@ export class PipelineScheduler {
     }
     const launches = [];
     for (const [stage, ids] of stages) launches.push(await this.launchGroup(stage, ids));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     const pipelineRunIds = launches.flatMap((launch: any) => launch.pipelineRunIds || []);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     const subagentRunIds = launches.flatMap((launch: any) => launch.subagentRunIds || []);
     if (!pipelineRunIds.length || !subagentRunIds.length) {
       return { taskIds, launches, blocked: "Ready Work Items were found, but no persisted pipeline or subagent runs were created." };
@@ -393,12 +408,14 @@ export class PipelineScheduler {
     return { taskIds, launches, pipelineRunIds, subagentRunIds };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   dryRun(rootTaskId: string, ctx: ExtensionContext): any {
     const root = execPic(["show", rootTaskId], ctx.cwd);
     if (!root.work_item) return { rootTaskId, leaves: [], blocker: "Work Item not found" };
     return buildPipelineDryRun(root, (id) => execPic(["show", id], ctx.cwd));
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   status(taskId: string, ctx: ExtensionContext): any {
     const active = execPic(["workflow", "pipeline-active"], ctx.cwd);
     if (Array.isArray(active)) cleanupOrphanedSubagentWorktrees(ctx.cwd, new Set(active.flatMap((run: PipelineRun) => [run.id, run.subagent_run_id || ""]).filter(Boolean)));
@@ -408,6 +425,7 @@ export class PipelineScheduler {
     if (activeRun) return { task_id: activeRun.task_id, pipeline_run_id: activeRun.id, subagent_run_id: activeRun.subagent_run_id, runs: [activeRun] };
     const root = execPic(["show", taskId], ctx.cwd);
     const taskIds = root.work_item
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
       ? [taskId, ...(root.children || []).map((child: any) => child.id)]
       : [taskId];
     const runs = taskIds.flatMap((id: string) => {
@@ -417,6 +435,7 @@ export class PipelineScheduler {
     return { task_id: taskId, runs, error: runs.length ? "" : this.lastError };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   async stop(taskId: string, ctx: ExtensionContext): Promise<any> {
     const status = this.status(taskId, ctx);
     const active = (status.runs || []).filter((run: PipelineRun & { status: string }) => run.status === "claimed" || run.status === "running");
@@ -429,6 +448,7 @@ export class PipelineScheduler {
     return { task_id: taskId, cancelled_runs: active.map((run: PipelineRun) => run.id) };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   async mergeAggregate(workItemId: string, ctx: ExtensionContext): Promise<any> {
     const state = execPic(["work-item", "workflow-status", workItemId], ctx.cwd) as AggregateDeliveryState & { next_stage?: string; integration_mode?: string };
     if (state.integration_mode === "coordination" && state.next_stage === "done") return state;
@@ -446,6 +466,7 @@ export class PipelineScheduler {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   private async scheduleReady(rootTaskId: string, explicitRetry = false): Promise<any> {
     const root = this.showItem(rootTaskId);
     if (root.work_item) {
@@ -484,6 +505,7 @@ export class PipelineScheduler {
     return { profile };
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   private async launchGroup(stage: PipelineStage, taskIds: string[], explicitRetry = false): Promise<any> {
     const active = execPic(["workflow", "pipeline-active"], this.cwd);
     const activeRuns = Array.isArray(active) ? active.filter((run: PipelineRun) => run.stage === stage && taskIds.includes(run.task_id)) : [];
@@ -502,6 +524,7 @@ export class PipelineScheduler {
         const blockReason = pipelineWorkerBlockReason(data);
         if (blockReason) throw new Error(blockReason);
         const runs = this.pipelineRuns(taskId);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
         if (stage === "worker" && currentFailedReview(runs, activePack)) {
           const cycle = reviewCycleCount(runs);
@@ -532,6 +555,7 @@ export class PipelineScheduler {
     try {
       for (const taskId of launchTaskIds) {
         const data = this.showItem(taskId);
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
         const claimArgs = ["workflow", "pipeline-claim", taskId, stage, "--lease-seconds", "14400", "--environment-fingerprint", verificationEnvironmentFingerprint(this.cwd), "--base-commit", repositoryHead(this.cwd)];
         if (isPlanningStage(stage)) {
@@ -563,6 +587,7 @@ export class PipelineScheduler {
         const claim = claims[index]!;
         const taskId = launchTaskIds[index]!;
         const data = normalizePipelineData(this.showItem(taskId));
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
         let skillFamilies: string[] = [];
         if (activePack?.skill_families_json) {
@@ -685,10 +710,12 @@ export class PipelineScheduler {
     }
   }
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   private async finish(run: PipelineRun, status: any): Promise<void> {
     let reviewCompleted = false;
     try {
       const child = status.steps?.[run.child_index || 0] || {};
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
       const resolvedModel = child.model || child.resolvedModel || child.modelAttempts?.findLast?.((attempt: any) => attempt.success)?.model || "";
       if (resolvedModel) execPic(["workflow", "pipeline-model", run.id, run.lease_token, resolvedModel], this.cwd);
       if (isMutationStage(run.stage)) {
@@ -702,6 +729,7 @@ export class PipelineScheduler {
             const workspace = JSON.parse(readFileSync(workspacePath, "utf8"));
             const data = normalizePipelineData(this.showItem(run.task_id));
             assertRunContractCurrent(data, run);
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
             const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
             const constraints = JSON.parse(activePack?.constraints_json || "{}");
             const actualChangedFiles = filterGeneratedFiles(workspace.changedFiles || [], constraints).changedFiles;
@@ -809,6 +837,7 @@ export class PipelineScheduler {
     const task = this.showItem(run.task_id);
     const parentId = task.work_item?.parent_id;
     const parent = parentId ? this.showItem(parentId) : null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     const taskIds = parentId ? (parent?.children || []).map((child: any) => child.id) : [run.task_id];
     const taskRuns = new Map<string, PipelineRun[]>();
     const group = taskIds.flatMap((taskId: string) => {
@@ -834,6 +863,7 @@ export class PipelineScheduler {
       const report = parseTaskCompletionReport(outputFor(entry));
       if (report.status === "escalated") throw new Error("escalated run cannot be integrated");
       const data = normalizePipelineData(this.showItem(entry.task_id));
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
       const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
       const constraints = JSON.parse(activePack?.constraints_json || "{}");
       const workspace = JSON.parse(readFileSync(join(entry.async_dir || "", "workspace.json"), "utf8"));
@@ -885,9 +915,11 @@ export class PipelineScheduler {
   private promoteReviewedCandidate(run: PipelineRun): void {
     const raw = this.showItem(run.task_id);
     const data = normalizePipelineData(raw);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     if ((data.completion_reports || []).some((report: any) => report.status === "done" && report.pipeline_run_id === run.id)) return;
     const report = parseTaskCompletionReport(outputFor(run));
     if (report.status === "escalated") throw new Error("escalated run cannot be integrated");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
     const constraints = JSON.parse(activePack?.constraints_json || "{}");
     const workspace = JSON.parse(readFileSync(join(run.async_dir || "", "workspace.json"), "utf8"));
@@ -911,6 +943,7 @@ export class PipelineScheduler {
       await this.launchGroup(next, [taskId]);
       return;
     }
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
     if (!activePack) return;
     const verificationBlock = pipelineVerificationBlockReason(data);
@@ -1003,6 +1036,7 @@ export class PipelineScheduler {
   }
 
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   private pipelineRuns(taskId: string): any[] {
     const runs = execPic(["workflow", "pipeline-runs", taskId], this.cwd);
     return parsePipelineRuns(runs);
@@ -1010,6 +1044,7 @@ export class PipelineScheduler {
 
   private parentHasActiveRuns(parentId: string): boolean {
     const parent = this.showItem(parentId);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     const childIds = (parent.children || []).map((child: any) => child.id);
     const ids = new Set([parentId, ...childIds]);
     const active = execPic(["workflow", "pipeline-active"], this.cwd);

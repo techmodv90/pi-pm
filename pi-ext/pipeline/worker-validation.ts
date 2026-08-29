@@ -7,6 +7,7 @@ export function workerPatch(run: PipelineRun): string {
   return join(run.async_dir || "", "worktree-diffs", `task-${run.child_index || 0}-task-worker.patch`);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function validateWorkerPatchArtifact(patchPath: string, outputPath: string, report: any): void {
   if (!existsSync(patchPath)) throw new Error(`worker patch missing: ${patchPath}; output: ${outputPath}`);
   if (statSync(patchPath).size === 0 && Array.isArray(report.changedFiles) && report.changedFiles.length > 0) {
@@ -18,6 +19,7 @@ export function scopeCovers(path: string, patterns: string[]): boolean {
   return patterns.some((pattern) => pattern === "." || path === pattern || path.startsWith(`${pattern.replace(/\/+$/, "")}/`) || matchesGlob(path, pattern));
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function validateWorkerChangedFiles(changedFiles: string[], constraints: any): { unexpected: string[] } {
   const protectedPaths = [".git/**", ".pi/**", ".pi-subagents/**", ...(Array.isArray(constraints?.protected_paths) ? constraints.protected_paths : [])];
   const protectedChanges = changedFiles.filter((path) => scopeCovers(path, protectedPaths));
@@ -27,6 +29,7 @@ export function validateWorkerChangedFiles(changedFiles: string[], constraints: 
   return { unexpected: [...new Set(changedFiles.filter((path) => (roots.length > 0 && !scopeCovers(path, roots)) || scopeCovers(path, approvalRequired)))] };
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function validateWorkerOutput(status: "done" | "partial" | "blocked", actualChangedFiles: string[], constraints: any): { reported: string[]; actual: string[]; mismatch: boolean; unexpected?: string[] } {
   if (status !== "done") return { reported: [], actual: [], mismatch: false };
   const actual = [...new Set<string>(actualChangedFiles)].sort();
@@ -36,6 +39,7 @@ export function validateWorkerOutput(status: "done" | "partial" | "blocked", act
   return result;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function filterGeneratedFiles(paths: string[], constraints: any): { changedFiles: string[]; generatedFiles: string[] } {
   const patterns = [...DEFAULT_GENERATED_FILES, ...(Array.isArray(constraints?.generated_files) ? constraints.generated_files : [])];
   const generatedFiles = paths.filter((path) => patterns.some((pattern) => {

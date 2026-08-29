@@ -34,7 +34,9 @@ export function workerSessionPath(cwd: string, packKey: string): string {
   return join(cwd, ".pi", "runtime", "runs", packKey, "session.jsonl");
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function pipelineSpawnParams(stage: PipelineStage, task: any, cwd: string): any {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const spec: any = { agent: task.agent, task: task.task, cwd, stage, taskId: task.taskId, acceptance: stage === "review" ? "attested" : "checked", ...(task.skillFamilies ? { skillFamilies: task.skillFamilies } : {}) };
   if (isMutationStage(stage) || stage === "review") spec.isolation = "worktree";
   return spec;
@@ -95,10 +97,12 @@ export function planScanRetryWave(results: Array<Partial<SubagentResult>>, outpu
   return retry;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 function scoutSectionTask(spec: any, section: string, assignment: string, lastError: string): string {
   return `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nThe root must be <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low">. Return exactly that one XML document. Use exactly one concise finding, at most one gap, and one evidence container with one or two non-empty <source path="relative/file"> citations. Keep the complete document under 2,500 characters, including </scout_evidence>. Do not use Markdown or compose the canonical Scan Report.${lastError ? ` Previous output was invalid: ${lastError}. Correct exactly that defect on this retry.` : ""}`;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function startFullScanFanout(spec: any, agent: any): SubagentHandle {
   const id = randomUUID();
   const startSection = (section: string, assignment: string, lastError: string) => startSubagent({
@@ -124,6 +128,7 @@ export function startFullScanFanout(spec: any, agent: any): SubagentHandle {
     const failed = results.filter((entry) => entry.exitCode !== 0);
     try {
       outputs.forEach((output, index) => validateScoutEvidenceXml(output, FULL_SCAN_SECTIONS[index]![0]));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     } catch (error: any) {
       const message = error?.message || String(error);
       return {
@@ -156,18 +161,23 @@ export function stageAgent(stage: PipelineStage): string {
   return ({ scan: "task-scout", vision: "task-planner", blueprint: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, taskId: string): string {
   const requiredStages = stage === "blueprint" ? ["scan", "rri", "vision"] : ["scan", "rri", "vision", "blueprint", "contracts"];
   const checkpoints = (Array.isArray(raw?.checkpoints) ? raw.checkpoints : [])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     .filter((checkpoint: any) => requiredStages.includes(checkpoint.stage))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     .reduce((latest: Map<string, any>, checkpoint: any) => {
       const current = latest.get(checkpoint.stage);
       if (!current || Number(checkpoint.artifact_revision || 0) > Number(current.artifact_revision || 0)) latest.set(checkpoint.stage, checkpoint);
       return latest;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     }, new Map<string, any>());
   const payload = {
     work_item: { id: taskId, title: raw?.work_item?.title || "", type: raw?.work_item?.type || "", description: String(raw?.work_item?.description || "").slice(0, 4000) },
     project: { name: raw?.project?.name || "", root_path: raw?.project?.root_path || "." },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     approved_context: [...checkpoints.values()].map((checkpoint: any) => ({ stage: checkpoint.stage, artifact_id: checkpoint.artifact_id, artifact_revision: checkpoint.artifact_revision, content_hash: checkpoint.content_hash })),
     instructions: "Load each approved context artifact with task_manager action load_planning_artifact before planning. Do not use historical revisions.",
   };
@@ -178,12 +188,15 @@ export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, tas
 // Planning profile constraint: a handoff must name the approved checkpoint of
 // the immediately precedent stage in the Plan profile so the consumer can tie
 // the dispatched stage to its persisted predecessor.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function predecessorCheckpointFor(data: any, stage: string, profileStages: string[]): any {
   const index = profileStages.indexOf(stage);
   if (index <= 0) return undefined;
   const prior = profileStages[index - 1];
   return (Array.isArray(data?.checkpoints) ? data.checkpoints : [])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     .filter((checkpoint: any) => checkpoint.stage === prior)
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     .sort((a: any, b: any) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0)
       || String(b.created_at || "").localeCompare(String(a.created_at || "")))[0];
 }

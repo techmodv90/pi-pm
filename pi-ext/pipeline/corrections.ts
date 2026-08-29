@@ -71,6 +71,7 @@ export function renderSynthesizedFindings(synthesis: SynthesizedFindings, notes 
   return notes ? `${notes}\n\n${body}` : body;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function buildWorkerCorrectionContext(data: any): string {
   if (!data?.current_review && (data.canonical || data?.work_item?.review_status !== "failed")) return "";
   // Synthesis gate constraint: the fix worker receives only classified findings.
@@ -84,16 +85,21 @@ export function buildWorkerCorrectionContext(data: any): string {
   return `\n\n## REVIEW CORRECTIONS (synthesized findings only)\nThe rejected candidate is already applied to the assigned worktree. This is a review-fix run, not a verification-only run: make the required edits for every P0 and P1 finding below and return a non-empty patch whose SHA-256 differs from the rejected candidate. Do not report DONE or claim the fix is complete without changing the worktree. Git-derived changed files will be assessed by Reviewer.\nException: if EVERY P0 and P1 finding is demonstrably already satisfied by the current worktree or cannot be addressed by a code change, you may return DONE without edits, but your completion_report must then include a <no_change_justification> section addressing each P0 and P1 finding point by point with evidence. A missing or thin justification will be rejected; Reviewer independently re-judges the candidate either way.\n\n${renderSynthesizedFindings(synthesis)}\n`;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function buildOwnerRejectionContext(data: any): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const rejection = (data.owner_decisions || []).find((decision: any) => decision.decision === "rejected");
   if (!rejection) return "";
   return `\n\n## OWNER-REQUESTED CORRECTION\nThe owner rejected Completion Report ${rejection.completion_report_id}. Produce a fresh candidate that addresses this decision; do not reuse the rejected completion as authority.\n\n${rejection.notes || "Owner requested changes."}\n`;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function buildAutofixContext(data: any): string {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const verification = (data.verification_reports || []).find((report: any) => report.status === "failed" || report.status === "partial");
   if (!verification) throw new Error("autofix requires a failed or partial contractor verification report");
   const items = Array.isArray(verification.items) ? verification.items : [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   return `\n\n## TARGETED AUTOFIX\nThis is not a fresh implementation or retry. Preserve the integrated work and close only the concrete verification gaps below under the unchanged active TIP. Do not weaken tests, verification commands, acceptance criteria, or scope. Return scope expansion instead of editing outside the TIP.\n\nVerification summary: ${verification.summary || "failed contractor verification"}\n${items.map((item: any) => `- ${item.requirement_id || "unlinked"}: ${item.status || "failed"} - ${item.evidence || item.notes || "no evidence supplied"}`).join("\n")}\n`;
 }
 
@@ -112,12 +118,16 @@ export function assertReviewFixChangedPatch(run: PipelineRun, patch: Buffer, noC
  * Escalation resolution injection (GAP-138): resolutions recorded after every existing
  * pipeline run have not been seen by any worker yet; inject them into the next relaunch.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function buildEscalationResolutionContext(data: any, runs: PipelineRun[]): string {
   const escalations = Array.isArray(data?.escalations) ? data.escalations : [];
   const lastRunStart = runs.map((run) => String(run.created_at || "")).sort().at(-1) || "";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const pending = escalations.filter((entry: any) => entry.status === "resolved" && String(entry.resolved_at || "") > lastRunStart);
   if (pending.length === 0) return "";
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const lines = pending.map((entry: any) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     let resolution: any = {};
     try { resolution = JSON.parse(entry.resolution_json || "{}"); } catch {}
     return `- Escalation ${entry.id} (${entry.level}, TIP ${entry.instruction_pack_id}): ${JSON.stringify(resolution)}`;

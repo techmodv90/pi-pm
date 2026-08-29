@@ -4,6 +4,7 @@ export function markdownLabel(key: string): string {
   return label.charAt(0).toUpperCase() + label.slice(1);
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function markdownObject(value: Record<string, any>, indent: string, nested: boolean): string {
   return Object.entries(value).map(([key, field], index) => {
     const fieldIndent = nested && index > 0 ? `${indent}  ` : indent;
@@ -18,6 +19,7 @@ export function markdownObject(value: Record<string, any>, indent: string, neste
   }).join("\n") || `${indent}- None`;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function markdownItems(values: any, indent = ""): string {
   if (values && typeof values === "object" && !Array.isArray(values)) return markdownObject(values, indent, false);
   return (Array.isArray(values) ? values : values == null ? [] : [values])
@@ -56,6 +58,7 @@ export function validateInstructionPackXml(output: string): void {
   }
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function renderCanonicalInstructionPackXml(item: any, pack: any): string {
   const envelope = JSON.parse(pack.content_json || "{}");
   const content = envelope.content || envelope;
@@ -64,6 +67,7 @@ export function renderCanonicalInstructionPackXml(item: any, pack: any): string 
     : Array.isArray(content.requirement_snapshots) ? content.requirement_snapshots : [];
   const files = (content.files || []).map((file: unknown) => xmlValue("file", file)).join("");
   const patterns = (content.patterns || []).map((pattern: unknown) => `<pattern>${xmlFields(pattern)}</pattern>`).join("");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const requirementXml = requirements.map((requirement: any) => `<requirement key="${xmlEscape(requirement.requirement_key || requirement.requirement_id || "Requirement")}">${xmlValue("title", requirement.title || "Acceptance")}${xmlValue("acceptance_criteria", requirement.acceptance_criteria || "")}</requirement>`).join("");
   const output = `<instruction_pack schema_version="1" display_key="${xmlEscape(pack.display_key || `TIP-${pack.version}`)}" id="${xmlEscape(pack.id)}" version="${xmlEscape(pack.version)}" content_hash="${xmlEscape(pack.content_hash)}">
   <pipeline_ownership>

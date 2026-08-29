@@ -229,7 +229,9 @@ test("REQ-AGGREGATE-RRI-T-LIFECYCLE: the two-phase RRI-T handoff preserves aggre
 });
 
 test("managed scheduler fixtures run no pipeline I/O and leave no leaked scheduler process", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const pi = { events: { on: () => () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const scheduler = new PipelineScheduler(pi) as any;
   let recovered = 0;
   let reconciled = 0;

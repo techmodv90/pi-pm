@@ -205,7 +205,9 @@ export function assertCleanGit(cwd: string): void {
 // Targeted re-review constraint: a follow-up review after a review-fix round
 // answers exactly three questions (finding resolved, new defect in blast radius,
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function rejectedCandidatePatch(data: any, runs: PipelineRun[], cwd: string): string | undefined {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
   const failedReview = currentFailedReview(runs, activePack);
   const candidate = failedReview?.candidate;

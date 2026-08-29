@@ -151,7 +151,9 @@ test("normalizePipelineData adapts canonical Work Items without snapshot authori
   assert.equal(data.task, undefined);
   assert.equal(data.canonical, true);
   assert.deepEqual(data.instruction_packs[0].constraints_json, '{"scope_roots":["src"]}');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.deepEqual(data.scan_reports.map((artifact: any) => artifact.id), ["scan-1"]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.deepEqual(data.designs.map((artifact: any) => artifact.id), ["blueprint-1"]);
   assert.equal(pipelineWorkerBlockReason(data), null);
   assert.doesNotThrow(() => assertRunContractCurrent(data, { instruction_pack_id: "wip-1", instruction_pack_hash: "hash-2" }));
@@ -257,6 +259,7 @@ test("child task-manager capabilities are restricted by the launched agent role"
 });
 
 test("canonicalReadyLeafIds returns only authorized dependency-ready executable descendants", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     root: { work_item: { id: "root", type: "epic" }, children: [{ id: "feature", type: "feature" }, { id: "blocked", type: "task" }] },
     feature: { work_item: { id: "feature", type: "feature" }, children: [{ id: "ready", type: "task" }, { id: "gate", type: "gate" }] },
@@ -268,6 +271,7 @@ test("canonicalReadyLeafIds returns only authorized dependency-ready executable 
 });
 
 test("canonicalReadyLeafIds traverses materialized children of executable parents", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     child: { work_item: { id: "child", type: "task" }, ready: true, children: [] },
   };
@@ -276,6 +280,7 @@ test("canonicalReadyLeafIds traverses materialized children of executable parent
 });
 
 test("canonicalReadyLeafIds resumes items interrupted mid review or autofix", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     root: { work_item: { id: "root", type: "feature" }, children: [{ id: "stalled_review" }, { id: "dead_autofix" }, { id: "owner_block" }] },
     // Expired review run: next_stage parked at review, no durable failed status.
@@ -288,6 +293,7 @@ test("canonicalReadyLeafIds resumes items interrupted mid review or autofix", ()
 });
 
 test("canonicalReadyLeafIds treats cancelled children as absent", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     cancelled: { work_item: { id: "cancelled", type: "task", status: "cancelled" }, ready: false, children: [] },
   };
@@ -296,6 +302,7 @@ test("canonicalReadyLeafIds treats cancelled children as absent", () => {
 });
 
 test("pipeline dry-run reports planned leaf stages and blockers without mutations", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     ready: { work_item: { id: "ready", type: "task" }, ready: true, children: [], instruction_packs: [{ status: "active" }] },
     blocked: { work_item: { id: "blocked", type: "task" }, ready: false, children: [], instruction_packs: [{ status: "active" }], dependencies: [{ depends_on_work_item_id: "ready", status: "open" }] },
@@ -775,9 +782,11 @@ test("parallel sibling reviews are invalidated when the integration base changes
   execFileSync("git", ["add", "."], { cwd: repo });
   execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
   const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.doesNotThrow(() => assertReviewBaseCurrent({ base_commit: base } as any, repo));
   writeFileSync(join(repo, "file.txt"), "changed\n");
   execFileSync("git", ["commit", "-am", "changed", "-q"], { cwd: repo });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.throws(() => assertReviewBaseCurrent({ base_commit: base } as any, repo), /review base changed/);
   assert.match(source, /candidate patch no longer applies to the current integration base[\s\S]+checkpoint\(candidate, "advanced"/);
 });
@@ -788,6 +797,7 @@ test("worker integration selects an artifact-saved candidate despite a blocked h
     { id: "attempt-21", stage: "worker", status: "blocked", advanced_at: "", integrated_at: "" },
     { id: "attempt-20", stage: "worker", status: "completed", artifact_saved_at: "2026-01-01", advanced_at: "", integrated_at: "" },
     { id: "attempt-19", stage: "worker", status: "completed", artifact_saved_at: "2026-01-01", advanced_at: "", integrated_at: "" },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   ] as any;
   assert.equal(workerIntegrationCandidate(runs)?.id, "attempt-22");
 });
@@ -796,16 +806,20 @@ test("review-fix workers must change the rejected candidate patch", () => {
   const patch = Buffer.from("reviewed candidate");
   const hash = createHash("sha256").update(patch).digest("hex");
   assert.throws(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     () => assertReviewFixChangedPatch({ review_fix_cycle: 1, candidate_patch_hash: hash } as any, patch),
     /review-fix produced the unchanged rejected candidate patch/,
   );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.doesNotThrow(() => assertReviewFixChangedPatch({ review_fix_cycle: 1, candidate_patch_hash: "different" } as any, patch));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.doesNotThrow(() => assertReviewFixChangedPatch({ review_fix_cycle: 0, candidate_patch_hash: hash } as any, patch));
 });
 
 test("justified no-op review-fix may resubmit the unchanged candidate for re-review", () => {
   const patch = Buffer.from("reviewed candidate");
   const hash = createHash("sha256").update(patch).digest("hex");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const run = { review_fix_cycle: 1, candidate_patch_hash: hash } as any;
   // Thin justification does not unlock the escape hatch.
   assert.throws(
@@ -859,6 +873,7 @@ test("obsolete failed-review patch does not block a fresh correction worker", ()
     const pack = { id: "pack-1", version: 1, content_hash: "hash-1", status: "active" };
     const candidate = { id: "worker-1", stage: "worker", status: "completed", artifact_saved_at: "now", integrated_at: "", instruction_pack_id: pack.id, instruction_pack_version: pack.version, instruction_pack_hash: pack.content_hash, integrated_patch_path: patch, integrated_patch_hash: "patch-hash" };
     const review = { id: "review-1", stage: "review", status: "completed", candidate_run_id: candidate.id, candidate_patch_hash: candidate.integrated_patch_hash, result_json: JSON.stringify({ review_status: "failed", findings: ["fix immutability"] }) };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     assert.equal(rejectedCandidatePatch({ instruction_packs: [pack] }, [candidate, review] as any, repo), undefined);
   } finally {
     rmSync(repo, { recursive: true, force: true });
@@ -1208,12 +1223,15 @@ test("integration stages only reviewed patch changes and orphan recovery retires
 });
 
 test("session startup performs no pipeline I/O", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const pi = { events: { on: () => () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const scheduler = new PipelineScheduler(pi) as any;
   let recovered = 0;
   let reconciled = 0;
   scheduler.recoverOrphanedRuns = () => { recovered++; };
   scheduler.reconcileSafely = async () => { reconciled++; };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   scheduler.startSession({ cwd: "/repo" } as any);
   assert.equal(scheduler.cwd, "/repo");
   assert.equal(recovered, 0);
@@ -1248,7 +1266,9 @@ test("owned runner completion persists output and Task-specific worktree patch e
   mkdirSync(join(worktree, "test-results"));
   writeFileSync(join(worktree, "test-results", ".last-run.json"), "{}\n");
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const scheduler = new PipelineScheduler(pi) as any;
   const artifactDir = join(repo, ".pi-subagents", "pipeline", "pr-1");
   mkdirSync(artifactDir, { recursive: true });
@@ -1287,7 +1307,9 @@ test("a transient-provider exhaustion persists failure_code=transient_provider i
   execFileSync("git", ["add", "."], { cwd: repo });
   execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const scheduler = new PipelineScheduler(pi) as any;
   const runId = `agent-transient-${Date.now()}`;
   const artifactDir = join(repo, ".pi-subagents", "pipeline", "pr-transient");
@@ -1329,10 +1351,13 @@ test("generated verification artifacts are excluded from patches and scope check
 });
 
 test("blocked worker attempts proactively queue their terminal outcome", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const messages: Array<{ text: string; options: any }> = [];
   const scheduler = new PipelineScheduler({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     sendUserMessage: (text: string, options: any) => messages.push({ text, options }),
     events: { on: () => () => {} },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   } as any) as any;
 
   scheduler.notifyBlockedAttempt({ task_id: "T01", stage: "worker", attempt: 3 }, "required verification did not pass: npm test");
@@ -1442,10 +1467,12 @@ test("escalation resolutions are authoritative in the next worker prompt", () =>
     { id: "wies-3", level: "L2", status: "resolved", resolution_json: "{}", instruction_pack_id: "wip-9", resolved_at: "2026-01-01 00:00:00" },
   ] };
   const runs = [{ created_at: "2026-01-01 12:00:00" }];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const context = buildEscalationResolutionContext(data, runs as any);
   assert.match(context, /ESCALATION RESOLUTIONS/);
   assert.match(context, /use sqlite/);
   assert.doesNotMatch(context, /wies-3/, "resolutions predating the latest run are already consumed");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.equal(buildEscalationResolutionContext({ escalations: [data.escalations[1]] }, runs as any), "");
 });
 
@@ -1505,8 +1532,10 @@ test("review-fix round count derives from completed fix worker cycles", () => {
     { stage: "review", status: "completed", review_fix_cycle: undefined },
     { stage: "worker", status: "completed", review_fix_cycle: 3 },
     { stage: "worker", status: "completed", review_fix_cycle: 2 },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   ] as any;
   assert.equal(reviewCycleCount(runs), 3);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.equal(reviewCycleCount([{ stage: "review", review_fix_cycle: undefined }] as any), 0);
 });
 
@@ -1517,6 +1546,7 @@ test("review-fix round count ignores non-completed fix worker runs", () => {
     { stage: "worker", status: "blocked", review_fix_cycle: 3 },
     { stage: "worker", status: "cancelled", review_fix_cycle: 2 },
     { stage: "worker", status: "expired", review_fix_cycle: 1 },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   ] as any;
   assert.equal(reviewCycleCount(incomplete), 0);
   // Mixed set: only the completed cycles advance the cap.
@@ -1524,6 +1554,7 @@ test("review-fix round count ignores non-completed fix worker runs", () => {
     { stage: "worker", status: "running", review_fix_cycle: 5 },
     { stage: "worker", status: "failed", review_fix_cycle: 4 },
     { stage: "worker", status: "completed", review_fix_cycle: 2 },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   ] as any;
   assert.equal(reviewCycleCount(mixed), 1);
 });
@@ -1541,6 +1572,7 @@ test("canonical TIP XML renders the contract interfaces provided by the task gra
   const item = { id: "wi-1", type: "task", priority: "medium" };
   const content = { goal: "g", files: ["a.go"], business_rules: ["b"], validation_rules: ["v"], error_handling: ["e"], state_transitions: ["s"], contract_obligations: ["o"], constraints: { scope_roots: ["."] }, verification: [{ command: "go test ./..." }], skillFamilies: [], provides: ["OBL-001"], consumes: ["OBL-002"], evidence_for: ["OBL-001"] };
   const pack = { content_json: JSON.stringify({ content, requirements: [] }), version: 1, id: "wip-1", status: "active", content_hash: "sha256:x" };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const xml = renderCanonicalInstructionPackXml(item as any, pack as any);
   assert.match(xml, /<contract_interfaces><provides><obligation>OBL-001<\/obligation><\/provides><consumes><obligation>OBL-002<\/obligation><\/consumes>/);
   assert.match(xml, /<evidence_for><obligation>OBL-001<\/obligation><\/evidence_for><\/contract_interfaces>/);
@@ -1558,6 +1590,7 @@ test("scan fanout retries only failed sections once with the exact parser error"
     [
       { exitCode: 0, runId: "run-1" },
       { exitCode: 1, runId: "run-2", errorMessage: "spawn failed" },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     ] as any,
     [valid, invalid],
   );

@@ -95,7 +95,9 @@ export interface WorkItemArtifact {
 }
 
 export interface RriTScenarioContext {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   artifact: any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   content: any;
 }
 
@@ -108,11 +110,15 @@ export interface RriTScenarioContext {
 // higher-revision scenarios. Whenever rows carry work_item_id (pic show always
 // does), rows owned by another Work Item are excluded; only legacy/mocked rows
 // without ownership metadata fall back to revision order.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function latestRriTScenarios(data: any): RriTScenarioContext | undefined {
   const workItemId = data?.work_item?.id;
   const artifact = (Array.isArray(data?.artifacts) ? data.artifacts : [])
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     .filter((entry: any) => entry.stage === "rri_t_scenarios")
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     .filter((entry: any) => !entry.work_item_id || !workItemId || String(entry.work_item_id) === String(workItemId))
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     .sort((a: any, b: any) => Number(b.revision || 0) - Number(a.revision || 0))[0];
   if (!artifact) return undefined;
   try {
@@ -134,22 +140,31 @@ export const CANONICAL_SCAN_REPORT_XML_FORMAT = `<scan_report>
   <estimated_size><files>...</files><lines_of_code>...</lines_of_code><components_modules>...</components_modules><api_routes_endpoints>...</api_routes_endpoints></estimated_size>
 </scan_report>`;
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function buildTaskVerifyPrompt(data: any): string {
   const item = data.work_item || {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const completion = (data.completion_reports || []).find((report: any) => report.status === "done"
     && (!activePack?.id || report.instruction_pack_id === activePack.id)
     && (!activePack?.version || report.instruction_pack_version === activePack.version)
     && (!activePack?.content_hash || report.instruction_pack_hash === activePack.content_hash));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   let pack: any = {};
   try { pack = JSON.parse(activePack?.content_json || "{}"); } catch {}
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const checks = (pack.verification || []).flatMap((check: any) => [
     ...(check.setup_commands || []).map((command: string) => ({ command, setup: true })),
     { command: check.command, required: check.required !== false, expected: check.expected },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   ]).filter((check: any) => check.command);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const setupCommands = checks.filter((check: any) => check.setup);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const requiredCommands = checks.filter((check: any) => !check.setup);
   const commandLines = requiredCommands.length
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     ? requiredCommands.map((check: any, index: number) => `${index + 1}. \`${check.command}\`${check.expected ? ` -> ${check.expected}` : ""}`).join("\n")
     : "No persisted commands were found; inspect the active TIP and run its stated verification requirements.";
   return [
@@ -162,6 +177,7 @@ export function buildTaskVerifyPrompt(data: any): string {
     "",
     ...(setupCommands.length ? [
       "## PREREQUISITES (run before the required commands)",
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
       ...setupCommands.map((check: any) => `- \`${check.command}\``),
       "If a prerequisite fails to start, report the verification as blocked (environment_blocked) with the concrete failure output; do not modify infrastructure, install global tooling, or weaken the verification to make it pass.",
       "",
@@ -175,12 +191,15 @@ export function buildTaskVerifyPrompt(data: any): string {
   ].join("\n");
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function buildAggregateVerifyPrompt(data: any): string {
   const item = data.work_item || {};
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const descendants = (data.children || []).map((child: any) => `- ${child.id}: ${child.title} (${child.status})`).join("\n");
   const scenarios = latestRriTScenarios(data);
   const artifactLine = scenarios?.artifact ? `Loaded from artifact ${scenarios.artifact.id} (revision ${scenarios.artifact.revision || 1}, content hash ${scenarios.artifact.content_hash || "unknown"}) — never from in-memory persona output.` : "";
   const scenarioLines = scenarios
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     ? scenarios.content.scenarios.map((scenario: any, index: number) => `- [${index + 1}] ${scenario.persona} · ${scenario.dimension}/${scenario.stress_axis} (${scenario.requirement_id}, ${scenario.id || "unnamed"}): ${scenario.procedure}${scenario.remediation_hint ? ` — remediation hint: ${scenario.remediation_hint}` : ""}`).join("\n")
     : "_No persisted rri_t_scenarios artifact was found; aggregate verification is blocked until the authored scenarios are saved before execution._";
   return [

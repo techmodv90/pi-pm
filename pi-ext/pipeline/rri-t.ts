@@ -26,6 +26,7 @@ export function hasConcreteProcedure(procedure: string): boolean {
   return command.length > 0 && expected.length > 0;
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function parseRriTPersonaResult(output: string, expectedPersona: string): any {
   const xml = normalizeRriTXml(output);
   // RRI-T authoring boundary: reject malformed XML before any per-scenario work so
@@ -35,6 +36,7 @@ export function parseRriTPersonaResult(output: string, expectedPersona: string):
   const parsed = new XMLParser({ ignoreAttributes: false, attributeNamePrefix: "@_", trimValues: true }).parse(xml)?.rri_t_persona;
   if (!parsed || parsed["@_persona"] !== expectedPersona) throw new Error(`RRI-T output has unexpected persona; expected ${expectedPersona}`);
   const scenarios = Array.isArray(parsed.scenarios?.scenario) ? parsed.scenarios.scenario : parsed.scenarios?.scenario ? [parsed.scenarios.scenario] : [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const normalized = scenarios.map((scenario: any) => {
     const value = Object.fromEntries(["id", "dimension", "stress_axis", "requirement_id", "procedure", "remediation_hint", "evidence", "result", "remediation"].map((key) => [key, String(scenario[key] || "").trim()]));
     // RRI-T authoring boundary: personas author the six scenario fields only;
@@ -44,7 +46,9 @@ export function parseRriTPersonaResult(output: string, expectedPersona: string):
     if (!value.id || !RRI_T_DIMENSIONS.has(value.dimension) || !RRI_T_STRESS_AXES.has(value.stress_axis) || !value.requirement_id || !value.procedure || !hasConcreteProcedure(value.procedure) || !value.remediation_hint) throw new Error(`RRI-T ${expectedPersona} returned an invalid scenario`);
     return value;
   });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const notApplicable = parsed.not_applicable?.topic ? (Array.isArray(parsed.not_applicable.topic) ? parsed.not_applicable.topic : [parsed.not_applicable.topic]).map((topic: any) => ({ topic: String(topic.topic || ""), reason: String(topic.reason || "") })) : [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   if (notApplicable.some((topic: any) => !topic.topic || !topic.reason)) throw new Error(`RRI-T ${expectedPersona} returned an invalid N/A topic`);
   return { persona: expectedPersona, scenarios: normalized, not_applicable: notApplicable, open_blockers: parsed.open_blockers?.blocker ? (Array.isArray(parsed.open_blockers.blocker) ? parsed.open_blockers.blocker : [parsed.open_blockers.blocker]).map(String) : [] };
 }
@@ -58,10 +62,13 @@ export function parseRriTPersonaResult(output: string, expectedPersona: string):
 // never the authoring persona — so the same scenario authored by several personas
 // collapses to one deterministic row that preserves the first author's persona
 // metadata. Only the six authoring fields survive; grading records are stripped.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function mergeRriTAuthoringResults(results: Array<{ persona: string; scenarios: any[]; not_applicable: any[]; open_blockers: any[] }>, personas: readonly string[]): {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   methodology: "rri-t"; personas: string[]; scenarios: any[]; not_applicable: any[]; open_blockers: any[];
 } {
   const seen = new Set<string>();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const scenarios: any[] = [];
   for (const result of results) {
     for (const scenario of result.scenarios || []) {
@@ -71,6 +78,7 @@ export function mergeRriTAuthoringResults(results: Array<{ persona: string; scen
       scenarios.push({ ...Object.fromEntries(RRI_T_AUTHORING_FIELDS.map((field) => [field, scenario[field]])), persona: result.persona });
     }
   }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const notApplicable = results.flatMap((result) => (result.not_applicable || []).map((topic: any) => ({ ...topic, persona: result.persona })));
   const openBlockers = results.flatMap((result) => (result.open_blockers || []));
   return { methodology: "rri-t", personas: [...personas], scenarios, not_applicable: notApplicable, open_blockers: openBlockers };
