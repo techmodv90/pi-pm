@@ -12,17 +12,15 @@ Landed on `feature/two-phase-rri-t`, every commit verified with the full Go suit
 | Task 6 — next-action oracle + checkpoint-decide | Done | `fdd94b9` |
 | Task 8 — stage primer + attempt ledger | Done | `9c13d84` |
 | Task 9 — TIP contract interfaces + close-out + verify prerequisites | Done | `1dcffa0` |
-| Task 7 — planning-reset --dry-run (bounded repair loops remain) | Partial | `1a6a20a` |
-| Task 4 — Go internal package split | Not started | — |
-| Task 5 — versioned schema migrations | Not started | — |
+| Task 7 — dry-run preview + bounded scan-fanout repair | Done | `1a6a20a`, `6ab56a7` |
+| Task 5 — versioned schema migrations + explicit classification | Done | `d9a9f2b` |
+| Task 4 — Go internal packages: `internal/tip` extracted | First slice done | `73c05ac` |
 
-Deliberate re-ordering versus the phase table: the workflow/priming tasks (6, 8, 9) landed before the Go-internal tasks (4, 5) because they carry the user-visible value; Task 7's contained half (dry-run) landed with them. The `internal/tip` prerequisite for Task 4 was not built, so Task 5 may proceed inside `cmd/pic` (schema file) without waiting for the package split.
+Task 5 notes: `isLegacyBootstrapStatement` is deleted; every bootstrap statement is classified exactly once into `canonicalSchemaStatements` / `legacySchemaStatements` (mechanically derived from the old matcher, with one deliberate fix: `trg_work_item_pack_immutable` now guards canonical packs on fresh databases too). Migrations are ordered versioned steps recorded in `schema_migrations`; `initDB` remains a reconciler by design — steps re-run per open (guarded, idempotent) unless they opt into `once: true`, because the CLI must keep repairing degraded databases. The connection-scoped `PRAGMA foreign_keys = ON` moved out of the replayed list into `initDB` itself.
 
-### Follow-up notes for the remaining tasks
+Task 4 remaining slices (each one domain at a time, CLI JSON byte-identical, full suite green per move): `internal/workitem` (CRUD/labels/relations/claim/readiness), `internal/workflow` (artifact stage machine, checkpoints, materialize, aggregate verify), `internal/pipeline` (runs, leases, checkpoints), `internal/acceptance` (Gherkin validation), `internal/store` (openDB + the migration runner from `schema_bootstrap.go`). The `internal/tip` extraction shows the pattern: move pure + transactional logic verbatim with a rename map, leave thin CLI handlers in `cmd/pic`, inject cross-domain validators (e.g. `SaveInput.ValidateAcceptance`).
 
-- **Task 7 remainder — bounded stage-artifact repair:** generalize the RRI-T persona retry pattern (validate -> one relaunch carrying the exact parser error -> escalate to owner) in `pi-ext/pipeline/` to the scan/vision/blueprint/contracts/task_graph artifact validation failures. The dispatch path is `startSubagentResilient` in `stage-prompts.ts`; the persona loop in `PipelineScheduler.runRriT` is the reference implementation.
-- **Task 5 — versioned migrations:** `schema_migrations(version, name, applied_at)` plus an ordered migration slice; `isLegacyBootstrapStatement` in `cmd/pic/main.go` is the prefix filter to delete. GAP-055 already made fresh databases canonical-only, so `m002_legacy_epic_task_cutover` only serves existing project databases (see `projects.json` registry). Legacy parity fixtures were removed by GAP-055 and must be rebuilt as fixture databases before touching `initDB`.
-- **Task 4 — Go internal packages:** start with `internal/tip` (`instruction_packs.go` is self-contained except `workItemByID`, `outputOne`, `validateGherkinSteps`, `parseOptions`, `shortID`, `hashJSON`, which need seam parameters or sibling packages). CLI JSON output must stay byte-identical per move.
+## Original Plan (unchanged)
 
 ## Original Plan (unchanged)
 
