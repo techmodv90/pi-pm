@@ -224,15 +224,19 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
       const gate = ((JSON.parse(activePack.content_json || "{}") as { verification?: Array<{ command?: string }> }).verification || [])[0];
       if (gate?.command) verificationCommand = gate.command;
     } catch {}
+    // Attempt numbering comes from the persisted attempt counter on the pack's
+    // pipeline runs, not an inferred count, so circuit resets, review-fix
+    // epochs, and migrated lineage cannot desynchronize it.
+    const packAttempts = runs.filter((run) => run.stage === "worker" && run.instruction_pack_id === activePack.id).map((run) => Number(run.attempt) || 0);
     const ledger = buildWorkProgressLedger({
       activePackId: activePack.id || taskId,
       activePackVersion: activePack.version || 1,
-      attempt: runs.filter((run) => run.stage === "worker" && run.instruction_pack_id === activePack.id).length + 1,
+      attempt: (packAttempts.length ? Math.max(...packAttempts) : 0) + 1,
       priorReports: data.completion_reports.filter((report: PicCompletionReport) => !activePack.id || report.instruction_pack_id === activePack.id).slice(0, 5),
       failedVerifications: data.verification_reports.filter((report: PicVerificationReport) => report.status === "failed" || report.status === "partial").slice(0, 3).map((report: PicVerificationReport) => ({ command: verificationCommand, evidence: report.summary || "" })),
-      escalationContext: "",
+      escalationContext: buildEscalationResolutionContext(data, runs),
     });
-    return renderCanonicalInstructionPackXml(data.work_item, activePack) + ledger + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data) + buildEscalationResolutionContext(data, runs);
+    return renderCanonicalInstructionPackXml(data.work_item, activePack) + ledger + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data);
   }
   const data = withInheritedParentWorkflowArtifacts(raw, cwd);
   if (stage === "scan") return buildWorkItemScanPrompt(data.work_item, data.project);
