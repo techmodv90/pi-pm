@@ -129,7 +129,10 @@ test("REQ-AUTHORITY-BOUNDARIES: a dependency-blocked or unmediated child is neve
 test("REQ-IMMUTABLE-HISTORY: stale planning handoffs and completed-history rewrites are rejected instead of silently retried", () => {
   // The planning handoff resolves the immediately precedent approved checkpoint
   // from the persisted profile order; a missing precedent yields no handoff.
-  const data = { checkpoints: [{ stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, decision_type: "accepted" }] };
+  const data = {
+    checkpoints: [{ stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" }],
+    artifacts: [{ id: "cp-scan", stage: "scan", revision: 1, content_hash: "h-scan" }],
+  };
   assert.equal(predecessorCheckpointFor(data, "rri", ["scan", "rri", "task_graph"])?.artifact_id, "cp-scan");
   assert.equal(predecessorCheckpointFor(data, "scan", ["scan", "rri", "task_graph"]), undefined);
 

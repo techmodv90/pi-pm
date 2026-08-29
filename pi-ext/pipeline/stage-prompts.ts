@@ -11,7 +11,7 @@ import { buildAutofixContext, buildEscalationResolutionContext, buildOwnerReject
 import { currentFailedReview, isMutationStage } from "./report-parsing.ts";
 import { buildStagePrimer, buildWorkProgressLedger, type StagePrimerDigest } from "../tasking/work-item-prompts.ts";
 import { normalizePipelineData, resolvePlanProfile } from "./stage-resolution.ts";
-import { parsePicShow, type PicShowDocument, type PicCompletionReport, type PicInstructionPack, type PicVerificationReport } from "./pic-show.ts";
+import { parsePicShow, type PicShowDocument, type PicArtifact, type PicCheckpoint, type PicCompletionReport, type PicInstructionPack, type PicVerificationReport } from "./pic-show.ts";
 
 // Known planning stages the scheduler can route and map to a bounded agent.
 // This is a stage/agent registry only; dispatch eligibility is decided by the
@@ -187,19 +187,13 @@ export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, tas
 
 // Planning profile constraint: a handoff must name the approved checkpoint of
 // the immediately precedent stage in the Plan profile so the consumer can tie
-// the dispatched stage to its persisted predecessor.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-export function predecessorCheckpointFor(data: any, stage: string, profileStages: string[]): any {
+// the dispatched stage to its persisted predecessor. The predecessor uses the
+// same validity predicate as planPrimerContext, so an orphaned, hash-stale, or
+// rejected checkpoint can never be presented as the approved predecessor.
+export function predecessorCheckpointFor(doc: CheckpointSource, stage: string, profileStages: string[]): PicCheckpoint | undefined {
   const index = profileStages.indexOf(stage);
   if (index <= 0) return undefined;
-  const prior = profileStages[index - 1];
-  // Same validity constraint as planPrimerContext: only approved/accepted
-  // checkpoints bind the lineage line, so a rejected checkpoint can never be
-  // presented as the approved predecessor.
-  const approved = (Array.isArray(data?.checkpoints) ? data.checkpoints : []).filter((checkpoint: any) => checkpoint.stage === prior && (checkpoint.decision_type === "approved" || checkpoint.decision_type === "accepted")); // eslint-disable-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  return approved
-    .sort((a: any, b: any) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0) // eslint-disable-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-      || String(b.created_at || "").localeCompare(String(a.created_at || "")))[0];
+  return latestValidatedCheckpoint(doc, profileStages[index - 1])?.checkpoint;
 }
 
 export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string {
@@ -262,39 +256,43 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
   return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildWorkerCorrectionContext(data) + buildEscalationResolutionContext(data, parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)));
 }
 
+// Checkpoint validity constraint: only approved/accepted checkpoints whose
+// bound artifact revision exists and whose content hash matches that revision
+// may supply planning context or predecessor lineage. Rejected, hash-stale, or
+// artifact-orphaned checkpoints count as missing/absent, so dispatch fails
+// closed instead of planning from tainted history. Tests hand-construct partial
+// documents, so only the two collections that feed validity are required.
+type CheckpointSource = { checkpoints?: PicCheckpoint[]; artifacts?: PicArtifact[] };
+
+function latestValidatedCheckpoint(doc: CheckpointSource, stage: string): { checkpoint: PicCheckpoint; artifact: PicArtifact } | undefined {
+  const checkpoint = (doc.checkpoints || [])
+    .filter((entry) => entry.stage === stage && (entry.decision_type === "approved" || entry.decision_type === "accepted"))
+    .sort((a, b) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0)
+      || String(b.created_at || "").localeCompare(String(a.created_at || "")))[0];
+  if (!checkpoint) return undefined;
+  const artifact = (doc.artifacts || []).find((entry) => entry.id === checkpoint.artifact_id && String(entry.revision) === String(checkpoint.artifact_revision));
+  if (!artifact) return undefined;
+  if (String(checkpoint.content_hash || "") !== String(artifact.content_hash || "")) return undefined;
+  return { checkpoint, artifact };
+}
+
 export function planPrimerContext(doc: PicShowDocument, profileStages: string[], stage: string): { digests: StagePrimerDigest[]; missing: string[] } {
   const stageIndex = profileStages.indexOf(stage);
   const predecessors = stageIndex > 0 ? profileStages.slice(0, stageIndex) : [];
-  // Checkpoint validity constraint: only approved/accepted checkpoints whose
-  // content hash matches the bound artifact revision may supply planning
-  // context; rejected, hash-stale, or artifact-orphaned checkpoints count as
-  // missing so dispatch fails closed instead of planning from tainted history.
-  const approved = (doc.checkpoints || []).filter((checkpoint) => checkpoint.decision_type === "approved" || checkpoint.decision_type === "accepted");
   const digests: StagePrimerDigest[] = [];
   const missing: string[] = [];
   for (const prior of predecessors) {
-    const checkpoint = approved
-      .filter((entry) => entry.stage === prior)
-      .sort((a, b) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0))[0];
-    if (!checkpoint) {
-      missing.push(prior);
-      continue;
-    }
-    const artifact = (doc.artifacts || []).find((entry) => entry.id === checkpoint.artifact_id && String(entry.revision) === String(checkpoint.artifact_revision));
-    if (!artifact) {
-      missing.push(prior);
-      continue;
-    }
-    if (String(checkpoint.content_hash || "") !== String(artifact.content_hash || "")) {
+    const validated = latestValidatedCheckpoint(doc, prior);
+    if (!validated) {
       missing.push(prior);
       continue;
     }
     digests.push({
-      stage: String(checkpoint.stage),
-      artifact_id: String(artifact.id),
-      artifact_revision: Number(artifact.revision || 1),
-      content_hash: String(artifact.content_hash || ""),
-      content: String(artifact.content || ""),
+      stage: String(validated.checkpoint.stage),
+      artifact_id: String(validated.artifact.id),
+      artifact_revision: Number(validated.artifact.revision || 1),
+      content_hash: String(validated.artifact.content_hash || ""),
+      content: String(validated.artifact.content || ""),
     });
   }
   return { digests, missing };

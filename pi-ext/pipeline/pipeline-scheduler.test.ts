@@ -105,12 +105,31 @@ test("planning handoff contains lineage metadata, not artifact history", () => {
 test("planning handoff resolves the approved predecessor checkpoint from the profile order", () => {
   const data = {
     checkpoints: [
-      { stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, created_at: "2026-01-01", decision_type: "accepted" },
-      { stage: "rri", artifact_id: "cp-rri", artifact_revision: 1, created_at: "2026-01-02", decision_type: "approved" },
+      { stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, content_hash: "h-scan", created_at: "2026-01-01", decision_type: "accepted" },
+      { stage: "rri", artifact_id: "cp-rri", artifact_revision: 1, content_hash: "h-rri", created_at: "2026-01-02", decision_type: "approved" },
+    ],
+    artifacts: [
+      { id: "cp-scan", stage: "scan", revision: 1, content_hash: "h-scan" },
+      { id: "cp-rri", stage: "rri", revision: 1, content_hash: "h-rri" },
     ],
   };
   assert.equal(predecessorCheckpointFor(data, "vision", ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"])?.artifact_id, "cp-rri");
   assert.equal(predecessorCheckpointFor(data, "scan", ["scan", "rri", "task_graph"]), undefined);
+});
+
+test("planning predecessor lineage rejects orphaned, hash-stale, and rejected checkpoints", () => {
+  // The predecessor binds the same validity predicate as planPrimerContext, so
+  // the lineage line can never name an artifact-orphaned, hash-stale, or
+  // rejected checkpoint even when its decision_type alone looks approved.
+  const artifacts = [{ id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan" }];
+  const approved = { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", created_at: "2026-01-01", decision_type: "approved" };
+  assert.equal(predecessorCheckpointFor({ checkpoints: [{ ...approved }], artifacts }, "rri", ["scan", "rri"])?.artifact_id, "wia-scan");
+  // Orphaned: the bound artifact revision no longer exists.
+  assert.equal(predecessorCheckpointFor({ checkpoints: [{ ...approved, artifact_id: "wia-missing" }], artifacts }, "rri", ["scan", "rri"]), undefined);
+  // Hash-stale: the checkpoint hash disagrees with the bound revision.
+  assert.equal(predecessorCheckpointFor({ checkpoints: [{ ...approved, content_hash: "h-old" }], artifacts }, "rri", ["scan", "rri"]), undefined);
+  // Rejected: decision_type filtering still applies on top of artifact validity.
+  assert.equal(predecessorCheckpointFor({ checkpoints: [{ ...approved, decision_type: "rejected" }], artifacts }, "rri", ["scan", "rri"]), undefined);
 });
 
 test("planning dispatch binds the claim to the persisted profile version and hash", () => {
