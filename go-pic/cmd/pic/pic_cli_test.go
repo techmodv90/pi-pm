@@ -2668,3 +2668,55 @@ func TestInstructionPackRendersContractInterfaces(t *testing.T) {
 		t.Fatalf("legacy pack must not render an empty contract interfaces section")
 	}
 }
+
+func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Dry Epic"))
+	id := epic["id"].(string)
+	stages := []string{"scan", "rri", "vision", "blueprint", "contracts", "task_graph"}
+	for _, stage := range stages {
+		content := stage + " content"
+		if stage == "vision" {
+			content = validVisionArtifact
+		}
+		if stage == "blueprint" {
+			content = validBlueprintArtifact
+		}
+		if stage == "contracts" {
+			content = validContractArtifact
+		}
+		if stage == "task_graph" {
+			content = `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]}]}`
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, content)
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, "current", decision)
+	}
+	runPic(t, bin, root, home, "work-item", "materialize", id)
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "authorize" {
+		t.Fatalf("pre-dry-run status = %#v", status)
+	}
+
+	dry := asObject(t, runPic(t, bin, root, home, "work-item", "planning-reset", id, "owner", "--dry-run"))
+	if dry["dry_run"] != true || dry["retired_materializations"] != float64(1) {
+		t.Fatalf("dry run = %#v", dry)
+	}
+	if dry["checkpoints"] != float64(6) {
+		t.Fatalf("dry run checkpoints = %#v", dry)
+	}
+	status = asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "authorize" {
+		t.Fatalf("dry run mutated workflow state: %#v", status)
+	}
+
+	runPic(t, bin, root, home, "work-item", "planning-reset", id, "owner")
+	status = asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "scan" {
+		t.Fatalf("post-reset status = %#v", status)
+	}
+}

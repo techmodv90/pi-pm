@@ -1300,9 +1300,10 @@ func validateBlueprintReport(content string) error {
 }
 
 func workItemPlanningReset(db *sql.DB, args []string) error {
-	if len(args) != 2 || args[1] != "owner" {
-		return errors.New("usage: pic work-item planning-reset <id> owner")
+	if len(args) < 2 || len(args) > 3 || args[1] != "owner" {
+		return errors.New("usage: pic work-item planning-reset <id> owner [--dry-run]")
 	}
+	dryRun := len(args) == 3 && args[2] == "--dry-run"
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -1337,6 +1338,16 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 	}
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=?`, targetID).Scan(&runs); err != nil {
 		return err
+	}
+	var checkpoints int
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=?`, targetID).Scan(&checkpoints); err != nil {
+		return err
+	}
+	if dryRun {
+		// Invalidation blast-radius preview: report exactly what a reset would
+		// retire without mutating any persisted state.
+		writeJSON(os.Stdout, map[string]any{"work_item_id": targetID, "dry_run": true, "artifacts": artifacts, "pipeline_runs": runs, "retired_materializations": materialized, "checkpoints": checkpoints, "next_stage_after_reset": "scan"})
+		return nil
 	}
 	if materialized > 0 {
 		// Owner re-scope transition: implemented code staled the Scan, so every derived
