@@ -9,8 +9,9 @@ import { parsePipelineRuns, type PipelineStage } from "./pipeline-types.ts";
 import { renderCanonicalInstructionPackXml } from "./instruction-pack-xml.ts";
 import { buildAutofixContext, buildEscalationResolutionContext, buildOwnerRejectionContext, buildTargetedReReviewInstructions, buildWorkerCorrectionContext, reviewCycleCount } from "./corrections.ts";
 import { currentFailedReview, isMutationStage } from "./report-parsing.ts";
-import { normalizePipelineData } from "./stage-resolution.ts";
-import { parsePicShow, type PicInstructionPack } from "./pic-show.ts";
+import { buildStagePrimer, buildWorkProgressLedger, type StagePrimerDigest } from "../tasking/work-item-prompts.ts";
+import { normalizePipelineData, resolvePlanProfile } from "./stage-resolution.ts";
+import { parsePicShow, type PicShowDocument, type PicCompletionReport, type PicInstructionPack, type PicVerificationReport } from "./pic-show.ts";
 
 // Known planning stages the scheduler can route and map to a bounded agent.
 // This is a stage/agent registry only; dispatch eligibility is decided by the
@@ -156,14 +157,40 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
     // artifact-inheritance fallback below keeps the untyped raw document by design.
     const doc = parsePicShow(raw);
     if (stage === "scan") return buildWorkItemScanPrompt(doc.work_item, doc.project);
-    if (isPlanningStage(stage)) return `${stage === "blueprint" || stage === "task_graph" ? planningHandoff(stage, doc, taskId) + "\n" : ""}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, doc.work_item)}`;
+    if (isPlanningStage(stage)) {
+      const profile = resolvePlanProfile(doc);
+      const checkpoint = predecessorCheckpointFor(doc, stage, profile.stages);
+      const primer = buildStagePrimer({
+        work_item_id: taskId,
+        stage,
+        profile,
+        predecessor_checkpoint: checkpoint ? { stage: String(checkpoint.stage), artifact_id: String(checkpoint.artifact_id || ""), artifact_revision: Number(checkpoint.artifact_revision || 1), content_hash: String(checkpoint.content_hash || "") } : undefined,
+        approved_digests: approvedPrimerDigests(doc),
+      });
+      const handoff = stage === "blueprint" || stage === "task_graph" ? planningHandoff(stage, doc, taskId) + "\n" : "";
+      return `${primer}\n${handoff}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, doc.work_item)}`;
+    }
     const data = normalizePipelineData(doc);
     const activePack = data.instruction_packs.find((pack: PicInstructionPack) => pack.status === "active");
     if (!activePack) throw new Error(`Work Item ${taskId} requires one active instruction pack`);
     if (stage === "review") return reviewStagePrompt(taskId, cwd);
     if (stage === "autofix") return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildAutofixContext(data);
-    const currentReview = currentFailedReview(parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)), activePack);
-    return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data) + buildEscalationResolutionContext(data, parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)));
+    const runs = parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd));
+    const currentReview = currentFailedReview(runs, activePack);
+    let verificationCommand = "contractor verification";
+    try {
+      const gate = ((JSON.parse(activePack.content_json || "{}") as { verification?: Array<{ command?: string }> }).verification || [])[0];
+      if (gate?.command) verificationCommand = gate.command;
+    } catch {}
+    const ledger = buildWorkProgressLedger({
+      activePackId: activePack.id || taskId,
+      activePackVersion: activePack.version || 1,
+      attempt: runs.filter((run) => run.stage === "worker" && run.instruction_pack_id === activePack.id).length + 1,
+      priorReports: data.completion_reports.filter((report: PicCompletionReport) => !activePack.id || report.instruction_pack_id === activePack.id).slice(0, 5),
+      failedVerifications: data.verification_reports.filter((report: PicVerificationReport) => report.status === "failed" || report.status === "partial").slice(0, 3).map((report: PicVerificationReport) => ({ command: verificationCommand, evidence: report.summary || "" })),
+      escalationContext: "",
+    });
+    return renderCanonicalInstructionPackXml(data.work_item, activePack) + ledger + buildWorkerCorrectionContext({ ...data, current_review: currentReview }) + buildOwnerRejectionContext(data) + buildEscalationResolutionContext(data, runs);
   }
   const data = withInheritedParentWorkflowArtifacts(raw, cwd);
   if (stage === "scan") return buildWorkItemScanPrompt(data.work_item, data.project);
@@ -173,4 +200,25 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
     return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildAutofixContext({ ...data, verification_reports: Array.isArray(verificationReports) ? verificationReports : data.verification_reports });
   }
   return execPicText(["workflow", "instruction-pack-render", taskId], cwd) + buildWorkerCorrectionContext(data) + buildEscalationResolutionContext(data, parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd)));
+}
+
+// Approved-primer digest constraint: digests come only from checkpoint-bound
+// artifact revisions (stage + artifact_id + revision), never from the latest
+// unapproved artifact, so the primer can never leak unapproved design content.
+function approvedPrimerDigests(doc: PicShowDocument): StagePrimerDigest[] {
+  return (doc.checkpoints || [])
+    .filter((checkpoint) => Boolean(checkpoint.stage) && Boolean(checkpoint.artifact_id))
+    .sort((a, b) => String(a.created_at || "").localeCompare(String(b.created_at || "")))
+    .map((checkpoint): StagePrimerDigest | undefined => {
+      const artifact = (doc.artifacts || []).find((entry) => entry.id === checkpoint.artifact_id && String(entry.revision) === String(checkpoint.artifact_revision));
+      if (!artifact) return undefined;
+      return {
+        stage: String(checkpoint.stage),
+        artifact_id: String(artifact.id),
+        artifact_revision: Number(artifact.revision || 1),
+        content_hash: String(artifact.content_hash || ""),
+        content: String(artifact.content || ""),
+      };
+    })
+    .filter((entry): entry is StagePrimerDigest => Boolean(entry));
 }

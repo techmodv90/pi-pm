@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  buildStagePrimer,
+  buildWorkProgressLedger,
   assertPlanningHandoffAttributes,
   buildAggregateVerifyPrompt,
   buildPlanningHandoffXml,
@@ -258,4 +260,58 @@ test("task-worker escalation ladder is prompt-encoded and fail-closed", () => {
   assert.match(source, /status=\\"escalated\\"|status="escalated"/);
   assert.match(source, /checked_sources/);
   assert.match(source, /Never finish with a prose question inside a success summary/);
+});
+
+test("stage primer carries lineage, bounded approved digests, repo conventions, and definition of done", () => {
+  const longContent = "R".repeat(4000);
+  const primer = buildStagePrimer({
+    work_item_id: "wi-1",
+    stage: "blueprint",
+    profile: { version: 3, contentHash: "sha256:prof", stages: ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"] },
+    predecessor_checkpoint: { stage: "vision", artifact_id: "war-9", artifact_revision: 2, content_hash: "sha256:vis" },
+    approved_digests: [
+      { stage: "scan", artifact_id: "war-1", artifact_revision: 1, content_hash: "sha256:scan", content: longContent },
+      { stage: "rri", artifact_id: "war-2", artifact_revision: 1, content_hash: "sha256:rri", content: "requirements digest" },
+    ],
+  });
+  assert.match(primer, /Work Item: wi-1/);
+  assert.match(primer, /Stage: blueprint/);
+  assert.match(primer, /profile v3 \(sha256:prof\)/);
+  assert.match(primer, /Predecessor: checkpoint vision@2 \(sha256:vis\)/);
+  assert.match(primer, /load_planning_artifact/);
+  assert.match(primer, /scan @1 \(sha256:scan\)/);
+  assert.match(primer, /requirements digest/);
+  // Digest budget: an oversized artifact is truncated with an ellipsis marker.
+  assert.ok(primer.length < 4000, `primer too long: ${primer.length}`);
+  assert.match(primer, /R{1000}…/s);
+  assert.match(primer, /DEFINITION OF DONE/);
+  assert.match(primer, /Do not save or approve owner decisions yourself/);
+});
+
+test("progress ledger heads a relaunch with attempt identity and trimmed prior evidence", () => {
+  const ledger = buildWorkProgressLedger({
+    activePackId: "wip-9",
+    activePackVersion: 4,
+    attempt: 3,
+    priorReports: [
+      { id: "cr-1", status: "partial", summary: "Implemented the parser but verification failed", created_at: "2026-01-01 00:00:00" },
+    ],
+    failedVerifications: [
+      { command: "go test ./...", evidence: "FAIL TestX\n    ".concat("x".repeat(2000)) },
+    ],
+    escalationContext: "\n\n## ESCALATION RESOLUTIONS\n- Escalation esc-1: use sqlite\n",
+  });
+  assert.match(ledger, /This is attempt 3 of TIP-004 \(pack wip-9 v4\) — continue, do not re-plan from scratch/);
+  assert.match(ledger, /Attempt evidence ledger/);
+  assert.match(ledger, /cr-1 .*partial.*Implemented the parser/);
+  assert.match(ledger, /go test \.\/\.\.\./);
+  // Failed verification output is trimmed to a bounded budget.
+  assert.ok(ledger.length < 3000, `ledger too long: ${ledger.length}`);
+  assert.match(ledger, /ESCALATION RESOLUTIONS/);
+});
+
+test("scheduler stage prompts dispatch the primer and the ledger at the right stages", () => {
+  const source = readFileSync(new URL("../pipeline/stage-prompts.ts", import.meta.url), "utf8");
+  assert.match(source, /isPlanningStage\(stage\)\)[\s\S]{0,400}buildStagePrimer/);
+  assert.match(source, /buildWorkProgressLedger\(/);
 });

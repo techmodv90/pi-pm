@@ -392,7 +392,7 @@ test("planning pipeline stages use planning agents and prompts without an active
   assert.doesNotMatch(prompts, /contracts: "task-planner"/);
   assert.match(prompts, /stage === "contracts".*Contract drafting is Contractor-owned/);
   assert.match(prompts, /task_graph: "task-planner"/);
-  assert.match(prompts, /if \(isPlanningStage\(stage\)\) return/);
+  assert.match(prompts, /if \(isPlanningStage\(stage\)\) \{/);
   assert.match(prompts, /planningHandoff\(stage, doc, taskId\)/);
   assert.match(source, /if \(planningStages\.includes\(workflow\.next_stage\)\)[\s\S]+launchGroup\(workflow\.next_stage, \[rootTaskId\]\)/);
 });
