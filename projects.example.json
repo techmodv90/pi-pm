@@ -1,0 +1,14 @@
+{
+  "projects": [
+    {
+      "id": "proj-example0001",
+      "name": "my-project",
+      "rootPath": "/absolute/path/to/my-project",
+      "databasePath": "/absolute/path/to/my-project/.pi/tasks.db",
+      "changelogPath": "/absolute/path/to/my-project/CHANGELOG.md",
+      "createdAt": "2026-01-01T00:00:00.000Z",
+      "updatedAt": "2026-01-01T00:00:00.000Z"
+    }
+  ],
+  "currentProjectId": "proj-example0001"
+}
