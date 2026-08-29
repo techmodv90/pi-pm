@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 )
@@ -202,12 +204,13 @@ func reconcileLegacySchema(db schemaDB) error {
 			return err
 		}
 		if strings.Contains(tableSQL, "work_item_id TEXT NOT NULL UNIQUE") {
-			if _, err := db.Exec(`PRAGMA foreign_keys=OFF;
-				CREATE TABLE work_item_materializations_v2 (root_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), node_key TEXT NOT NULL, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(root_work_item_id,checkpoint_id,node_key));
+			// The runner holds foreign_keys=OFF on the pinned migration
+			// connection, so the copy below never enforces the rebuilt FKs;
+			// the pragma itself is a no-op inside a transaction anyway.
+			if _, err := db.Exec(`CREATE TABLE work_item_materializations_v2 (root_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), node_key TEXT NOT NULL, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(root_work_item_id,checkpoint_id,node_key));
 				INSERT INTO work_item_materializations_v2 SELECT * FROM work_item_materializations;
 				DROP TABLE work_item_materializations;
-				ALTER TABLE work_item_materializations_v2 RENAME TO work_item_materializations;
-				PRAGMA foreign_keys=ON`); err != nil {
+				ALTER TABLE work_item_materializations_v2 RENAME TO work_item_materializations`); err != nil {
 				return fmt.Errorf("migrate work item materializations: %w", err)
 			}
 		}
@@ -248,7 +251,7 @@ func applySchemaMigrations(db *sql.DB) error {
 		if applied[migration.version] {
 			continue
 		}
-		if err := applySchemaMigration(db, migration); err != nil {
+		if err := applySchemaMigration(context.Background(), db, migration); err != nil {
 			return fmt.Errorf("schema migration %03d_%s: %w", migration.version, migration.name, err)
 		}
 	}
@@ -256,35 +259,51 @@ func applySchemaMigrations(db *sql.DB) error {
 }
 
 // applySchemaMigration runs one step and records its version inside a single
-// transaction. foreign_keys and legacy_alter_table are connection-scoped and
-// cannot change inside a transaction, so the runner disables them before BEGIN
-// (table rebuilds rely on both) and restores the previous values afterwards.
-func applySchemaMigration(db *sql.DB, migration schemaMigration) error {
-	var foreignKeys, legacyAlterTable int
-	if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
-		return err
-	}
-	if err := db.QueryRow(`PRAGMA legacy_alter_table`).Scan(&legacyAlterTable); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`PRAGMA legacy_alter_table=ON`); err != nil {
-		return err
-	}
-	restored := false
-	defer func() {
-		if !restored {
-			_, _ = db.Exec(pragmaEnabled("legacy_alter_table", legacyAlterTable))
-			_, _ = db.Exec(pragmaEnabled("foreign_keys", foreignKeys))
-		}
-	}()
-	tx, err := db.Begin()
+// transaction on one pinned connection. foreign_keys and legacy_alter_table are
+// connection-scoped in SQLite and cannot change inside a transaction, and
+// database/sql gives no affinity between db.Exec and db.Begin — a pragma sent
+// through the pool is not guaranteed to land on the connection the transaction
+// ends up on. The pragma setup, the step, the version record, and the pragma
+// restore therefore all run on one explicitly pinned *sql.Conn.
+func applySchemaMigration(ctx context.Context, db *sql.DB, migration schemaMigration) error {
+	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback()
+	defer conn.Close()
+	var foreignKeys, legacyAlterTable int
+	if err := conn.QueryRowContext(ctx, `PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+		return err
+	}
+	if err := conn.QueryRowContext(ctx, `PRAGMA legacy_alter_table`).Scan(&legacyAlterTable); err != nil {
+		return err
+	}
+	restore := func() error {
+		if _, err := conn.ExecContext(ctx, pragmaEnabled("legacy_alter_table", legacyAlterTable)); err != nil {
+			return err
+		}
+		if _, err := conn.ExecContext(ctx, pragmaEnabled("foreign_keys", foreignKeys)); err != nil {
+			return err
+		}
+		return nil
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA foreign_keys=OFF`); err != nil {
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `PRAGMA legacy_alter_table=ON`); err != nil {
+		return err
+	}
+	tx, err := conn.BeginTx(ctx, nil)
+	if err != nil {
+		return errors.Join(err, restore())
+	}
+	finished := false
+	defer func() {
+		if !finished {
+			_ = tx.Rollback()
+			_ = restore()
+		}
+	}()
 	if err := migration.apply(tx); err != nil {
 		return err
 	}
@@ -294,14 +313,8 @@ func applySchemaMigration(db *sql.DB, migration schemaMigration) error {
 	if err := tx.Commit(); err != nil {
 		return err
 	}
-	if _, err := db.Exec(pragmaEnabled("legacy_alter_table", legacyAlterTable)); err != nil {
-		return err
-	}
-	if _, err := db.Exec(pragmaEnabled("foreign_keys", foreignKeys)); err != nil {
-		return err
-	}
-	restored = true
-	return nil
+	finished = true
+	return restore()
 }
 
 // applySchemaStatements executes one classified statement batch in order.

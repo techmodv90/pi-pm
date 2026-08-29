@@ -1,12 +1,13 @@
 package main
 
 import (
-	"errors"
-	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -3000,7 +3001,7 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 		}
 		return errors.New("injected failure after reconcile operations")
 	}}
-	if err := applySchemaMigration(db, poison); err == nil || !strings.Contains(err.Error(), "injected failure") {
+	if err := applySchemaMigration(context.Background(), db, poison); err == nil || !strings.Contains(err.Error(), "injected failure") {
 		t.Fatalf("poison step error = %v", err)
 	}
 	var recorded int
@@ -3028,7 +3029,7 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 		}
 		return errors.New("injected DDL failure")
 	}}
-	if err := applySchemaMigration(db, ddlPoison); err == nil || !strings.Contains(err.Error(), "injected DDL failure") {
+	if err := applySchemaMigration(context.Background(), db, ddlPoison); err == nil || !strings.Contains(err.Error(), "injected DDL failure") {
 		t.Fatalf("ddl poison error = %v", err)
 	}
 	var poisonTable int
@@ -3053,5 +3054,42 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 	var versions int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil || versions == 0 {
 		t.Fatalf("retry recorded no versions: count=%d err=%v", versions, err)
+	}
+}
+
+// Connection affinity constraint: foreign_keys and legacy_alter_table are
+// connection-scoped pragmas, and database/sql gives no affinity between
+// db.Exec and db.Begin. openSQLite's DSN enables foreign_keys on every new
+// connection and the test pools no idle connections, so a pragma sent through
+// the pool can never leak onto the transaction's connection — only a runner
+// that pins one *sql.Conn observes foreign_keys=OFF and legacy_alter_table=ON
+// inside the step's transaction.
+func TestSchemaMigrationPragmasRunOnThePinnedConnection(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The runner creates the version table before applying any step.
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')))`); err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxIdleConns(0)
+	var foreignKeys, legacyAlterTable int
+	probe := schemaMigration{version: 97, name: "pragma_affinity_probe", apply: func(db schemaDB) error {
+		if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+			return err
+		}
+		return db.QueryRow(`PRAGMA legacy_alter_table`).Scan(&legacyAlterTable)
+	}}
+	if err := applySchemaMigration(context.Background(), db, probe); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeys != 0 {
+		t.Fatalf("migration transaction saw foreign_keys=%d: pragmas did not run on the transaction's connection", foreignKeys)
+	}
+	if legacyAlterTable != 1 {
+		t.Fatalf("migration transaction saw legacy_alter_table=%d: pragmas did not run on the transaction's connection", legacyAlterTable)
 	}
 }
