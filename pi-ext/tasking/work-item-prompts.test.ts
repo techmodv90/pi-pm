@@ -314,6 +314,10 @@ test("scheduler stage prompts dispatch the primer and the ledger at the right st
   const source = readFileSync(new URL("../pipeline/stage-prompts.ts", import.meta.url), "utf8");
   assert.match(source, /isPlanningStage\(stage\)\)[\s\S]{0,700}buildStagePrimer/);
   assert.match(source, /buildWorkProgressLedger\(/);
+  // Attempt numbering reads the persisted run counter; escalations flow
+  // through the ledger's context argument on the canonical dispatch path.
+  assert.match(source, /Number\(run\.attempt\) \|\| 0/);
+  assert.match(source, /escalationContext: buildEscalationResolutionContext\(data, runs\)/);
 });
 
 test("contractor verification prompt separates environment prerequisites from required commands", () => {
