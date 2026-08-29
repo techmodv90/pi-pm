@@ -2720,3 +2720,92 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 		t.Fatalf("post-reset status = %#v", status)
 	}
 }
+
+func TestSchemaMigrationsVersioned(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := func() []string {
+		t.Helper()
+		rows, err := db.Query(`SELECT name FROM schema_migrations ORDER BY version`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var names []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			names = append(names, name)
+		}
+		return names
+	}
+	fresh := versions()
+	if len(fresh) == 0 {
+		t.Fatal("fresh database recorded no schema migrations")
+	}
+	for _, name := range fresh {
+		if strings.Contains(name, "legacy") {
+			t.Fatalf("fresh database recorded legacy migration %s", name)
+		}
+	}
+	var canonicalBaseline bool
+	for _, name := range fresh {
+		if name == "canonical_baseline" {
+			canonicalBaseline = true
+		}
+	}
+	if !canonicalBaseline {
+		t.Fatalf("fresh database missing canonical_baseline migration: %v", fresh)
+	}
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	if again := versions(); strings.Join(again, ",") != strings.Join(fresh, ",") {
+		t.Fatalf("second open changed recorded migrations: %v -> %v", fresh, again)
+	}
+	db.Close()
+
+	legacyPath := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := openSQLite(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE epics (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')))`,
+		`CREATE TABLE tasks (id TEXT PRIMARY KEY, epic_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', priority TEXT DEFAULT 'medium', created_at TEXT DEFAULT (datetime('now')))`,
+		`INSERT INTO epics(id,title) VALUES('e-old','Legacy Epic')`,
+		`INSERT INTO tasks(id,epic_id,title) VALUES('t-old','e-old','Legacy Task')`,
+	} {
+		if _, err := legacy.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy.Close()
+	if err := initDB(legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openSQLite(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var epicRows, taskRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id='e-old' AND type='epic'`).Scan(&epicRows); err != nil || epicRows != 1 {
+		t.Fatalf("legacy epic migrated rows=%d err=%v", epicRows, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id='t-old' AND type='task'`).Scan(&taskRows); err != nil || taskRows != 1 {
+		t.Fatalf("legacy task migrated rows=%d err=%v", taskRows, err)
+	}
+	var legacyRecorded bool
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name='legacy_schema_bootstrap'`).Scan(&legacyRecorded); err != nil || !legacyRecorded {
+		t.Fatalf("legacy migration not recorded err=%v", err)
+	}
+}
