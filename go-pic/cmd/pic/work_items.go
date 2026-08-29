@@ -1440,7 +1440,6 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 			{"descendant_completion_reports", "work_item_completion_reports", "work_item_id", "work_item_id", "", []string{"id", "status", "pipeline_run_id"}},
 			{"descendant_verification_reports", "work_item_verification_reports", "work_item_id", "work_item_id", "", []string{"id", "status", "completion_report_id"}},
 			{"descendant_pipeline_runs", "pipeline_runs", "task_id", "work_item_id", " ORDER BY stage,attempt", []string{"id", "stage", "attempt", "status"}},
-			{"descendant_materializations", "work_item_materializations", "root_work_item_id", "root_work_item_id", " ORDER BY node_key", []string{"checkpoint_id", "node_key", "work_item_id"}},
 			{"descendant_labels", "work_item_labels", "work_item_id", "work_item_id", " ORDER BY label", []string{"label"}},
 			{"descendant_dependencies", "work_item_dependencies", "work_item_id", "work_item_id", " ORDER BY id", []string{"id", "depends_on_work_item_id"}},
 			{"descendant_gates", "work_item_gates", "work_item_id", "work_item_id", " ORDER BY id", []string{"id", "gate_work_item_id"}},
@@ -1461,6 +1460,33 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 			}
 			descendantRecords[preview.key] = entries
 		}
+		// Materialization rows are retired twice over: the reset's own cleanup
+		// deletes every row rooted at the target — including the target's own
+		// node, which the dependent list above excludes — and any row rooted at
+		// a materialized descendant (a nested materialization root) dies with
+		// that descendant through the work_items cascade. The preview
+		// enumerates both sets exactly.
+		retiredMaterializationRows := []map[string]any{}
+		materializationRows, err := tx.Query(`SELECT root_work_item_id,checkpoint_id,node_key,work_item_id FROM work_item_materializations
+			WHERE root_work_item_id=?
+			OR root_work_item_id IN (SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id<>?)
+			ORDER BY node_key`, targetID, targetID, targetID)
+		if err != nil {
+			return err
+		}
+		for materializationRows.Next() {
+			var rootID, checkpointID, nodeKey, nodeID string
+			if err := materializationRows.Scan(&rootID, &checkpointID, &nodeKey, &nodeID); err != nil {
+				materializationRows.Close()
+				return err
+			}
+			retiredMaterializationRows = append(retiredMaterializationRows, map[string]any{"root_work_item_id": rootID, "checkpoint_id": checkpointID, "node_key": nodeKey, "work_item_id": nodeID})
+		}
+		if err := materializationRows.Err(); err != nil {
+			materializationRows.Close()
+			return err
+		}
+		materializationRows.Close()
 		// Corrective bugs are second-order cascade targets: the row dies with its
 		// verification report (or with the bug Work Item itself, if that bug is a
 		// materialized descendant). The bug Work Item itself survives a reset
@@ -1488,7 +1514,7 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 			return err
 		}
 		correctiveRows.Close()
-		output := map[string]any{"work_item_id": targetID, "dry_run": true, "artifacts": artifactEntries, "checkpoints_list": checkpointEntries, "instruction_packs": packEntries, "dependents": dependentEntries, "descendant_corrective_bugs": descendantCorrectiveBugs, "artifacts_count": artifacts, "pipeline_runs": runs, "retired_materializations": materialized, "checkpoints": checkpoints, "next_stage_after_reset": "scan"}
+		output := map[string]any{"work_item_id": targetID, "dry_run": true, "artifacts": artifactEntries, "checkpoints_list": checkpointEntries, "instruction_packs": packEntries, "dependents": dependentEntries, "retired_materialization_rows": retiredMaterializationRows, "descendant_corrective_bugs": descendantCorrectiveBugs, "artifacts_count": artifacts, "pipeline_runs": runs, "retired_materializations": materialized, "checkpoints": checkpoints, "next_stage_after_reset": "scan"}
 		for key, entries := range descendantRecords {
 			output[key] = entries
 		}

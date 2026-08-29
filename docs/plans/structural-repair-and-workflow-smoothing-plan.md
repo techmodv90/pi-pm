@@ -55,6 +55,12 @@ All P0/P1 findings and both actionable P2s from the post-implementation review a
 | P1 dry-run omits descendant pipeline runs (and other cascade tables) | Decision recorded: "exact" means every cascade-retired record. The preview is now table-driven over every child-owned FK table — pipeline runs, labels, dependencies, gates, relations, authorizations, escalations, owner decisions, aggregate decisions, delivery states, events, profiles, and sub-root materializations — in addition to the five planning-lineage tables, each row naming its owning Work Item. Corrective bugs are enumerated as second-order targets (a row dies with its descendant verification report or with the bug item itself; the bug Work Item survives unless it is itself a descendant, and the preview says so). The regression seeds every table, asserts each appears in the preview without mutation, and verifies the real reset retires exactly the previewed rows. | `593f0b7` |
 | P2 Task 4 remaining packages | Ongoing, documented: `internal/tip` is the pattern; workitem/workflow/pipeline/acceptance/store follow one domain per commit. | — |
 
+## Review Response (2026-08-29, fifth pass)
+
+| Finding | Resolution | Commit |
+|---|---|---|
+| P1 descendant_materializations preview query cannot return rows | The table-driven spec filtered `root_work_item_id IN (materialized descendant IDs)`, but `materialize` roots every row at the planning target, so the entry was permanently empty while the reset's own cleanup (`DELETE FROM work_item_materializations WHERE root_work_item_id=?`) retires the target-rooted rows the preview never named — including the target's own node, which the `dependents` list excludes. Replaced with a dedicated `retired_materialization_rows` preview enumerating `root_work_item_id`, `checkpoint_id`, `node_key`, and `work_item_id` for the exact retired set: every row rooted at the target plus any row rooted at a materialized descendant (a nested materialization root, retired through the work_items cascade). The regression now captures the expected set from the database before the dry run, asserts the preview equals it (including the target-rooted child row and the nested grandchild-rooted row), and verifies both rooted sets are gone after the real reset while the nested grandchild Work Item survives. Red-checked: dropping the nested-root branch previews 1 of 2 rows and fails the test. | (this commit) |
+
 ## Original Plan (unchanged)
 
 

@@ -2757,7 +2757,28 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 		INSERT INTO work_item_events(id,work_item_id,event_type,summary) VALUES('wiev-child','`+childID+`','note','seeded');
 		INSERT INTO work_item_profiles(id,work_item_id,profile_name,profile_version,planning_depth,stages_json,content_hash) VALUES('wiprof-child','`+childID+`','qa',99,'full','[]','h-child-profile');
 		INSERT INTO work_items(id,type,title) VALUES('wi-bug-child','bug','Child Bug');
-		INSERT INTO work_item_corrective_bugs(verification_report_id,bug_work_item_id,owner_approval_required) VALUES('wivr-child','wi-bug-child',1);`)
+		INSERT INTO work_item_corrective_bugs(verification_report_id,bug_work_item_id,owner_approval_required) VALUES('wivr-child','wi-bug-child',1);
+		INSERT INTO work_items(id,type,title) VALUES('wi-grandchild','task','Grandchild Task');
+		INSERT INTO work_item_materializations(root_work_item_id,checkpoint_id,node_key,work_item_id) VALUES('`+childID+`','wic-child','G01','wi-grandchild');`)
+
+	// The reset retires every materialization row rooted at the target (its own
+	// cleanup) plus rows rooted at a materialized descendant (nested root,
+	// retired by the work_items cascade). Capture that exact set before the dry
+	// run so the preview can be compared against it.
+	matDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expectedMaterializationRows int
+	if err := matDB.QueryRow(`SELECT COUNT(*) FROM work_item_materializations
+		WHERE root_work_item_id=?
+		OR root_work_item_id IN (SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id<>?)`, id, id, id).Scan(&expectedMaterializationRows); err != nil {
+		t.Fatal(err)
+	}
+	matDB.Close()
+	if expectedMaterializationRows < 2 {
+		t.Fatalf("expected the child and grandchild materialization rows, got %d", expectedMaterializationRows)
+	}
 
 	dry := asObject(t, runPic(t, bin, root, home, "work-item", "planning-reset", id, "owner", "--dry-run"))
 	if dry["dry_run"] != true || dry["retired_materializations"] != float64(1) {
@@ -2807,8 +2828,27 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 			t.Fatalf("dry-run %s entry = %#v, want %s=%s owned by %s", expected.key, entry, expected.field, expected.value, childID)
 		}
 	}
-	if entries, ok := dry["descendant_materializations"].([]any); !ok || len(entries) != 0 {
-		t.Fatalf("dry-run descendant materializations = %#v", dry["descendant_materializations"])
+	// Materialization rows: the preview must enumerate exactly the set the reset
+	// retires — the target-rooted rows its own cleanup deletes (including the
+	// target's own node, which the dependents list excludes) plus rows rooted at
+	// a materialized descendant, which die through the work_items cascade.
+	materializationRows, matOK := dry["retired_materialization_rows"].([]any)
+	if !matOK || len(materializationRows) != expectedMaterializationRows {
+		t.Fatalf("retired materialization rows = %#v, want %d", dry["retired_materialization_rows"], expectedMaterializationRows)
+	}
+	epicRooted := false
+	grandchildRooted := false
+	for _, entry := range materializationRows {
+		row := asObject(t, entry)
+		if row["root_work_item_id"] == id && row["work_item_id"] == childID {
+			epicRooted = true
+		}
+		if row["root_work_item_id"] == childID && row["work_item_id"] == "wi-grandchild" && row["node_key"] == "G01" {
+			grandchildRooted = true
+		}
+	}
+	if !epicRooted || !grandchildRooted {
+		t.Fatalf("retired materialization rows missing the seeded targets: %#v", materializationRows)
 	}
 	// Corrective bugs are second-order targets: the seeded row retires with the
 	// child's verification report, while the bug Work Item itself survives.
@@ -2894,7 +2934,10 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 	resetChecks := []struct{ query string; want int }{
 		{`SELECT COUNT(*) FROM work_items WHERE id='` + childID + `'`, 0},
 		{`SELECT COUNT(*) FROM work_items WHERE id='wi-bug-child'`, 1},
+		{`SELECT COUNT(*) FROM work_items WHERE id='wi-grandchild'`, 1},
 		{`SELECT COUNT(*) FROM pipeline_runs WHERE id='pr-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id='` + id + `'`, 0},
+		{`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id='` + childID + `'`, 0},
 		{`SELECT COUNT(*) FROM work_item_artifacts WHERE id='wia-child'`, 0},
 		{`SELECT COUNT(*) FROM workflow_checkpoints WHERE id='wic-child'`, 0},
 		{`SELECT COUNT(*) FROM work_item_completion_reports WHERE id='wicr-child'`, 0},
