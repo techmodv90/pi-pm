@@ -7,11 +7,11 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { buildAutoCommitMessage, findPicCli, withGitWriteLock } from "./cli-helpers.ts";
 
-test("findPicCli prefers the installed Go binary when present", () => {
+test("findPicCli prefers the package-local Go binary over stale user installs", () => {
   const binary = process.platform === "win32" ? "pic.exe" : "pic";
   const userBin = resolve(process.env.HOME || "~", ".pi", "bin", binary);
-  const goPic = resolve(dirname(fileURLToPath(import.meta.url)), "..", "go-pic", "dist", binary);
-  const expected = existsSync(userBin) ? userBin : existsSync(goPic) ? goPic : null;
+  const goPic = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "go-pic", "dist", binary);
+  const expected = existsSync(goPic) ? goPic : existsSync(userBin) ? userBin : null;
   if (expected) assert.equal(findPicCli(), expected);
 });
 

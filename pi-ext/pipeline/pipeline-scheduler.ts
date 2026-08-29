@@ -857,8 +857,6 @@ function startFullScanFanout(spec: any, agent: any): SubagentHandle {
   return { id, result, stop: () => handles.forEach((handle) => handle.stop()) };
 }
 
-const RRI_PERSONAS = ["End User", "Business Analyst", "QA / Tester", "Developer"] as const;
-
 function normalizeRriPersonaXml(output: string): string {
   const trimmed = output.trim().replace(/^```(?:xml)?\s*([\s\S]*?)\s*```$/, "$1").trim();
   const start = trimmed.indexOf("<rri_persona");
@@ -948,90 +946,6 @@ export function parseRriSynthesisResult(output: string): any {
   if (!(value.next_question === null || (value.next_question && typeof value.next_question === "object"))) throw new Error("RRI synthesis has invalid next_question");
   if (!(value.final_report === null || (value.final_report && typeof value.final_report === "object"))) throw new Error("RRI synthesis has invalid final_report");
   return value;
-}
-
-function escapeRriText(value: unknown): string {
-  return String(value ?? "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
-
-function rriQuestionKey(question: any): string {
-  return `${question.priority || "P3"}|${question.requirement_area || ""}|${String(question.question || "").trim().toLowerCase().replace(/\s+/g, " ")}`;
-}
-
-function deterministicRriSynthesis(personaResults: Array<{ persona: string; parsed: any }>): string {
-  const questions = new Map<string, any>();
-  const autoAnswered: any[] = [];
-  const notApplicable: any[] = [];
-  for (const { persona, parsed } of personaResults) {
-    for (const answer of parsed.auto_answered || []) autoAnswered.push({ ...answer, persona });
-    for (const topic of parsed.not_applicable || []) notApplicable.push({ ...topic, persona });
-    for (const question of parsed.candidate_questions || []) {
-      const key = rriQuestionKey(question);
-      const current = questions.get(key);
-      if (current) current.personas = [...new Set([...(current.personas || []), persona])];
-      else questions.set(key, { ...question, personas: [persona] });
-    }
-  }
-  const priorities = ["P0", "P1", "P2", "P3"];
-  const ordered = [...questions.values()].sort((a, b) => priorities.indexOf(a.priority) - priorities.indexOf(b.priority) || String(a.mode).localeCompare(String(b.mode)));
-  const renderQuestion = (question: any) => `<question priority="${escapeRriText(question.priority)}" classification="${escapeRriText(question.classification)}" mode="${escapeRriText(question.mode)}"><question>${escapeRriText(question.question)}</question><suggested_answer>${escapeRriText(question.suggested_answers?.[0])}</suggested_answer><reason>${escapeRriText(question.reason)}</reason><requirement_area>${escapeRriText(question.requirement_area)}</requirement_area><personas>${escapeRriText((question.personas || []).join(", "))}</personas></question>`;
-  const next = ordered[0];
-  const answers = autoAnswered.map((answer) => `<answer confidence="${escapeRriText(answer.confidence)}"><question>${escapeRriText(answer.question)}</question><answer>${escapeRriText(answer.answer)}</answer><source>${escapeRriText(`${answer.source} (${answer.persona})`)}</source></answer>`).join("");
-  const notApplicableXml = notApplicable.map((topic) => `<topic><topic>${escapeRriText(topic.topic)}</topic><reason>${escapeRriText(`${topic.reason} (${topic.persona})`)}</reason></topic>`).join("");
-  return `<rri_synthesis><next_question>${next ? renderQuestion(next) : ""}</next_question><remaining_queue>${ordered.slice(1).map(renderQuestion).join("")}</remaining_queue><auto_answered>${answers}</auto_answered><not_applicable>${notApplicableXml}</not_applicable><open_blockers></open_blockers><final_report></final_report></rri_synthesis>`;
-}
-
-function startRriFanout(spec: any, personaAgent: any, handoffs: EphemeralHandoffStore): SubagentHandle {
-  const id = randomUUID();
-  const handles: SubagentHandle[] = [];
-  let stopped = false;
-  const personas: readonly string[] = /\b(production|deploy(?:ment)?|operations?|observability|backup|recovery|scal(?:e|ing)|uptime)\b/i.test(spec.task)
-    ? [...RRI_PERSONAS, "Operator"]
-    : RRI_PERSONAS;
-  const launchPersona = async (persona: string, attempt = 0, correction = ""): Promise<{ output: string; result: SubagentResult; parsed: any; persona: string }> => {
-    const handle = startSubagent({
-      ...spec,
-      runId: undefined,
-      agent: personaAgent,
-      task: `${spec.task}\n\nAssigned persona: ${persona}. Analyze only this persona and return exactly one XML document matching your system contract.${correction ? ` Previous attempt failed validation: ${correction}. This is the only retry. The first element must be <rri_persona> and the last must be </rri_persona>; emit no other text.` : ""}`,
-    });
-    handles.push(handle);
-    const result = await handle.result;
-    if (stopped) throw new Error("RRI persona fanout cancelled");
-    try {
-      if (result.exitCode !== 0) throw new Error(result.errorMessage || result.stderr || "persona process failed");
-      const output = finalAssistantText(result.messages);
-      const parsed = parseRriPersonaResult(output, persona);
-      return { output, result, parsed, persona };
-    } catch (error) {
-      if (attempt === 0 && !stopped) return launchPersona(persona, 1, error instanceof Error ? error.message : String(error));
-      throw new Error(`RRI persona ${persona} ${error instanceof Error ? error.message : String(error)}`);
-    }
-  };
-  const result = Promise.all(personas.map((persona) => launchPersona(persona))).then((personaResults): SubagentResult => {
-    const synchronized = personaResults.map(({ output, result }) => ({ handoffId: handoffs.put("rri-persona", spec.taskId, output), result }));
-    for (const { handoffId } of synchronized) {
-      if (!handoffs.get(handoffId, spec.taskId)) throw new Error(`RRI persona handoff unavailable: ${handoffId}`);
-    }
-    const synthesisOutput = deterministicRriSynthesis(personaResults);
-    parseRriSynthesisResult(synthesisOutput);
-    for (const { handoffId } of synchronized) handoffs.delete(handoffId);
-    return {
-      runId: id,
-      agent: "rri-persona-group",
-      task: spec.task,
-      exitCode: 0,
-      messages: [{ role: "assistant", content: [{ type: "text", text: synthesisOutput }] }],
-      stderr: "",
-      errorMessage: "",
-      usage: synchronized.map((entry) => entry.result).reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
-    };
-  }).catch((error): SubagentResult => {
-    stopped = true;
-    handles.forEach((handle) => handle.stop());
-    return { runId: id, agent: "rri-persona-group", task: spec.task, exitCode: 1, messages: [], stderr: error instanceof Error ? error.message : String(error), errorMessage: error instanceof Error ? error.message : String(error), usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 } };
-  });
-  return { id, result, stop: () => { stopped = true; handles.forEach((handle) => handle.stop()); } };
 }
 
 function outputFor(run: PipelineRun): string {
@@ -1175,7 +1089,8 @@ export function buildEscalationResolutionContext(data: any, runs: PipelineRun[])
 
 function stageAgent(stage: PipelineStage): string {
   if (stage === "contracts") throw new Error("Contract drafting is Contractor-owned");
-  return ({ scan: "task-scout", rri: "rri-persona", vision: "task-planner", blueprint: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
+  if (stage === "rri") throw new Error("RRI is Contractor-owned");
+  return ({ scan: "task-scout", vision: "task-planner", blueprint: "task-planner", task_graph: "task-planner", worker: "task-worker", review: "task-reviewer", autofix: "task-worker" } as const)[stage];
 }
 
 export const REVIEW_FIX_ROUND_LIMIT = 3;
@@ -1537,6 +1452,10 @@ export class PipelineScheduler {
       }
       return await this.launchGroup("scan", [rootTaskId]);
     }
+    if (workflow.next_stage === "rri") {
+      const data = execPic(["show", rootTaskId], ctx.cwd);
+      return { stage: "rri", taskIds: [rootTaskId], contractor: true, prompt: buildWorkItemContinuePrompt(workflow, data.work_item) };
+    }
     if (planningStages.includes(workflow.next_stage)) {
       if (workflow.next_stage === "contracts") throw new Error("Contract drafting is Contractor-owned; use work_on_work_item to return the Contract prompt to the main session");
       assertCleanGit(ctx.cwd);
@@ -1797,11 +1716,7 @@ export class PipelineScheduler {
         let runId = "";
         let handle: SubagentHandle;
         try {
-          if (stage === "rri") {
-            const personaAgent = discoverAgents(this.cwd, "project").find((candidate) => candidate.name === "rri-persona");
-            if (!personaAgent) throw new Error("Task-system agent definition not found: rri-persona");
-            handle = startRriFanout(spec, personaAgent, this.handoffs);
-          } else handle = stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)
+          handle = stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)
             ? startFullScanFanout(spec, agent)
             : startSubagentResilient({ ...spec, agent }, (update) => {
                 this.reportProgress(runId, taskId, stage, update.event, finalAssistantText(update.result.messages));

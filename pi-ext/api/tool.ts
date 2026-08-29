@@ -536,7 +536,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             const data = execPic(["show", params.id], ctx.cwd);
             if (!data.work_item) return { content: [{ type: "text", text: `Error: ${data.error || "Work Item not found"}` }], details: {}, isError: true };
             const status = execPic(["work-item", "workflow-status", params.id], ctx.cwd);
-            if (!status.error && (status.next_stage === "vision" || status.next_stage === "contracts")) {
+            if (!status.error && (status.next_stage === "rri" || status.next_stage === "vision" || status.next_stage === "contracts")) {
               const prompt = buildWorkItemContinuePrompt(status, data.work_item);
               return { content: [{ type: "text", text: prompt }], details: { action: "work_on_work_item", workItem: data.work_item, next_stage: status.next_stage, contractor: true } };
             }

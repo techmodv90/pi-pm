@@ -383,7 +383,8 @@ test("pipeline run parsing rejects malformed pic records instead of silently dro
 
 test("planning pipeline stages use planning agents and prompts without an active TIP", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /rri: "rri-persona"/);
+  assert.match(source, /if \(stage === "rri"\) throw new Error\("RRI is Contractor-owned"\)/);
+  assert.match(source, /workflow\.next_stage === "rri"[\s\S]+contractor: true/);
   assert.match(source, /vision: "task-planner"/);
   assert.doesNotMatch(source, /contracts: "task-planner"/);
   assert.match(source, /stage === "contracts".*Contract drafting is Contractor-owned/);
@@ -409,7 +410,7 @@ test("planner completion publishes a draft handoff without canonical Blueprint p
   assert.match(source, /do not call save_work_item_artifact/);
 });
 
-test("RRI persona handoffs require strict assigned-persona XML", () => {
+test("legacy RRI persona parser remains strict for compatibility", () => {
   const valid = `<rri_persona persona="QA / Tester"><auto_answered><answer confidence="high"><question>Tests?</question><answer>Go and Node</answer><source>AGENTS.md</source></answer></auto_answered><candidate_questions><question priority="P1" classification="SMART-ASKED" mode="GUIDED"><question>Why this matters: failures block delivery. Which recovery outcome is required?</question><suggested_answer>Retry</suggested_answer><suggested_answer>Stop</suggested_answer><reason>Recovery policy is unspecified</reason><requirement_area>reliability</requirement_area></question></candidate_questions><not_applicable></not_applicable></rri_persona>`;
   assert.equal(parseRriPersonaResult(valid, "QA / Tester").persona, "QA / Tester");
   assert.throws(() => parseRriPersonaResult(valid, "Developer"), /expected Developer/);
@@ -513,23 +514,13 @@ test("RRI synthesis handoff is strict XML", () => {
   assert.throws(() => parseRriSynthesisResult("<rri_synthesis><next_question></next_question></rri_synthesis>"), /remaining_queue/);
 });
 
-test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () => {
+test("RRI dispatch stays in contractor session and does not spawn persona agents", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const personaInstructions = readFileSync(new URL("../agents/rri-persona.md", import.meta.url), "utf8");
-  assert.match(source, /stage === "rri"[\s\S]+startRriFanout\(spec, personaAgent, this\.handoffs\)/);
-  const fanout = source.slice(source.indexOf("function startRriFanout"), source.indexOf("function outputFor"));
-  assert.match(fanout, /personas\.map/);
-  assert.match(fanout, /parseRriPersonaResult/);
-  assert.match(fanout, /handoffs\.put\("rri-persona"/);
-  assert.doesNotMatch(fanout, /startSubagent\([\s\S]+agent: taskRriAgent/);
-  assert.match(fanout, /deterministicRriSynthesis/);
-  assert.match(fanout, /catch[\s\S]+handles\.forEach\(\(handle\) => handle\.stop\(\)\)/);
-  assert.match(personaInstructions, /first element.*<rri_persona.*last.*<\/rri_persona>/s);
-  assert.match(personaInstructions, /escape text values.*&amp;.*&lt;.*&gt;/s);
-  assert.match(personaInstructions, /Every `<candidate_questions><question>` entry must include all three attributes/);
-  assert.doesNotMatch(personaInstructions, /```json/);
-  assert.doesNotMatch(readFileSync(new URL("../agents/rri-persona.md", import.meta.url), "utf8"), /\.pi\/agent\/methodologies/);
-  assert.doesNotMatch(fanout, /RRI synthesis failed validation:[\s\S]+only retry/);
+  const prompt = readFileSync(new URL("../tasking/work-item-prompts.ts", import.meta.url), "utf8");
+  assert.match(source, /workflow\.next_stage === "rri"[\s\S]+contractor: true/);
+  assert.doesNotMatch(source, /handle = stage === "rri"/);
+  assert.match(prompt, /apply all relevant RRI persona lenses yourself/);
+  assert.match(prompt, /Do not spawn or request `rri-persona` subagents/);
 });
 
 test("review output is a single structured scheduler-owned verdict", () => {
