@@ -74,7 +74,7 @@ func hasColumn(db workflowStore, table, column string) bool {
 }
 
 func migrateEpicWorkflowSchema(db *sql.DB) error {
-	if !tableExists(db, "tasks") {
+	if !tableExists(db, "tasks") && !tableExists(db, "epics") {
 		return nil
 	}
 	if _, err := db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
@@ -85,10 +85,26 @@ func migrateEpicWorkflowSchema(db *sql.DB) error {
 	}
 	defer db.Exec(`PRAGMA legacy_alter_table=OFF`)
 
-	var epicNotNull int
-	_ = db.QueryRow(`SELECT "notnull" FROM pragma_table_info('tasks') WHERE name='epic_id'`).Scan(&epicNotNull)
-	if epicNotNull != 0 || !hasColumn(db, "tasks", "origin") || !hasColumn(db, "tasks", "revision") || hasColumn(db, "tasks", "refined") {
-		if err := rebuildSchemaTable(db, "tasks", tasksTableSQL); err != nil {
+	// Partial legacy states are supported: a database may carry either table
+	// alone, so every tasks-specific probe is guarded by table existence.
+	if tableExists(db, "tasks") {
+		var epicNotNull int
+		_ = db.QueryRow(`SELECT "notnull" FROM pragma_table_info('tasks') WHERE name='epic_id'`).Scan(&epicNotNull)
+		if epicNotNull != 0 || !hasColumn(db, "tasks", "origin") || !hasColumn(db, "tasks", "revision") || hasColumn(db, "tasks", "refined") {
+			if err := rebuildSchemaTable(db, "tasks", tasksTableSQL); err != nil {
+				return err
+			}
+		}
+		// The rebuilt tasks table declares epic_id REFERENCES epics(id), so a
+		// dangling reference (partial state, or an epic that never existed)
+		// would fail pragma_foreign_key_check. Normalize it to the empty
+		// sentinel; the canonical Work Item import records the same row with a
+		// null parent, and the legacy table stays inert history.
+		if tableExists(db, "epics") {
+			if _, err := db.Exec(`UPDATE tasks SET epic_id=NULL WHERE epic_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM epics WHERE epics.id=tasks.epic_id)`); err != nil {
+				return err
+			}
+		} else if _, err := db.Exec(`UPDATE tasks SET epic_id=NULL WHERE epic_id IS NOT NULL`); err != nil {
 			return err
 		}
 	}
@@ -162,13 +178,19 @@ func migrateLegacyWorkItems(db *sql.DB) error {
 		return err
 	}
 	defer tx.Rollback()
-	if _, err = tx.Exec(`INSERT OR IGNORE INTO work_items(id,type,title,description,status,priority,created_at)
-		SELECT id,'epic',title,description,status,'medium',created_at FROM epics`); err != nil {
-		return err
+	if tableExists(db, "epics") {
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO work_items(id,type,title,description,status,priority,created_at)
+			SELECT id,'epic',title,description,status,'medium',created_at FROM epics`); err != nil {
+			return err
+		}
 	}
-	if _, err = tx.Exec(`INSERT OR IGNORE INTO work_items(id,type,parent_id,title,description,status,priority,created_at)
-		SELECT id,'task',epic_id,title,description,status,priority,created_at FROM tasks`); err != nil {
-		return err
+	if tableExists(db, "tasks") {
+		// A task whose epic was not imported (partial state or dangling
+		// reference) migrates with a null parent instead of failing the FK.
+		if _, err = tx.Exec(`INSERT OR IGNORE INTO work_items(id,type,parent_id,title,description,status,priority,created_at)
+			SELECT id,'task',CASE WHEN EXISTS(SELECT 1 FROM work_items parent WHERE parent.id=tasks.epic_id) THEN tasks.epic_id ELSE NULL END,title,description,status,priority,created_at FROM tasks`); err != nil {
+			return err
+		}
 	}
 	return tx.Commit()
 }

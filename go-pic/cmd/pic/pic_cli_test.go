@@ -2823,3 +2823,58 @@ func TestSchemaMigrationsVersioned(t *testing.T) {
 		t.Fatalf("legacy migration not recorded err=%v", err)
 	}
 }
+
+func TestPartialLegacyStateMigrates(t *testing.T) {
+	tasksOnly := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := openSQLite(tasksOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE tasks(id TEXT PRIMARY KEY, epic_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', priority TEXT DEFAULT 'medium', created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO tasks(id,epic_id,title) VALUES('t-part','e-missing','Orphan Task')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := initDB(tasksOnly); err != nil {
+		t.Fatalf("tasks-only database failed to migrate: %v", err)
+	}
+	db, err = openSQLite(tasksOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var taskRows, violations int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id='t-part' AND type='task'`).Scan(&taskRows); err != nil || taskRows != 1 {
+		t.Fatalf("tasks-only migration rows=%d err=%v", taskRows, err)
+	}
+	var parentNull bool
+	if err := db.QueryRow(`SELECT parent_id IS NULL FROM work_items WHERE id='t-part'`).Scan(&parentNull); err != nil || !parentNull {
+		t.Fatalf("orphan task parent must be null: parentNull=%v err=%v", parentNull, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil || violations != 0 {
+		t.Fatalf("tasks-only migration violations=%d err=%v", violations, err)
+	}
+	db.Close()
+
+	epicsOnly := filepath.Join(t.TempDir(), "epics.db")
+	db, err = openSQLite(epicsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE epics(id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO epics(id,title) VALUES('e-part','Lone Epic')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := initDB(epicsOnly); err != nil {
+		t.Fatalf("epics-only database failed to migrate: %v", err)
+	}
+	db, err = openSQLite(epicsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var epicRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id='e-part' AND type='epic'`).Scan(&epicRows); err != nil || epicRows != 1 {
+		t.Fatalf("epics-only migration rows=%d err=%v", epicRows, err)
+	}
+}
