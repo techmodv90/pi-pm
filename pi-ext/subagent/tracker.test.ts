@@ -43,6 +43,31 @@ test("tracker retains completed runs but removes them from the active footer", (
   assert.equal(formatAgentFooter(tracker.list(), 80), "");
 });
 
+test("tracker sync salvages a done completion report from a dead process instead of failing the run", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
+  const tracker = new AgentRunTracker();
+  tracker.start({ runId: "salvage", agent: "task-worker", task: "Build", cwd });
+  tracker.event("salvage", "message", 'All verification complete. <completion_report tip_id="wip-1" version="1" status="done">...</completion_report>');
+  tracker.setPid("salvage", 2_147_483_647);
+
+  tracker.sync(cwd);
+
+  assert.equal(tracker.get("salvage")?.status, "completed");
+  assert.match(tracker.get("salvage")?.terminalReason || "", /salvaged/);
+});
+
+test("tracker sync salvages a terminal review verdict from a dead process instead of failing the run", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
+  const tracker = new AgentRunTracker();
+  tracker.start({ runId: "salvage-review", agent: "task-reviewer", task: "Review", cwd });
+  tracker.event("salvage-review", "message", '<review_report status="passed"><notes>ok</notes></review_report>');
+  tracker.setPid("salvage-review", 2_147_483_647);
+
+  tracker.sync(cwd);
+
+  assert.equal(tracker.get("salvage-review")?.status, "completed");
+});
+
 test("tracker sync marks a running agent failed when its persisted process is gone", () => {
   const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
   const tracker = new AgentRunTracker();

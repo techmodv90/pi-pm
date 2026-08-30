@@ -295,6 +295,60 @@ test("startSubagent streams message events before the child exits", async () => 
   ]);
 });
 
+test("runner finalizes on child exit even when close is deferred by detached grandchildren", async () => {
+  // Regression: detached bash grandchildren hold pipe write-ends, so "close"
+  // never fires and the terminal result is lost; finalization must ride "exit".
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+  const tracker = new AgentRunTracker();
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-exit-finalize-"));
+
+  const handle = startSubagent({
+    agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "worker.md" },
+    task: "work",
+    cwd,
+    stage: "worker",
+    acceptance: "checked",
+    tracker,
+  }, undefined, (() => {
+    setImmediate(() => {
+      child.stdout.emit("data", VALID_OUTPUT);
+      child.emit("exit", 0);
+      // No "close": a detached grandchild still holds the pipe write-end.
+    });
+    return child;
+  }) as any);
+
+  const result = await handle.result;
+  assert.equal(result.exitCode, 0);
+  assert.equal(finalAssistantText(result.messages), "done");
+  assert.equal(tracker.get(handle.id)?.status, "completed");
+});
+
+test("runner exit finalization flushes a buffered final line that never got a newline", async () => {
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+  const tracker = new AgentRunTracker();
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-exit-flush-"));
+
+  const handle = startSubagent({
+    agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "worker.md" },
+    task: "work",
+    cwd,
+    stage: "worker",
+    acceptance: "checked",
+    tracker,
+  }, undefined, (() => {
+    setImmediate(() => {
+      child.stdout.emit("data", VALID_OUTPUT);
+      child.emit("exit", 0);
+    });
+    return child;
+  }) as any);
+
+  const result = await handle.result;
+  assert.equal(result.exitCode, 0);
+  assert.equal(finalAssistantText(result.messages), "done");
+});
+
 test("isolated worker binds the child process and tool root to one canonical worktree", async () => {
   const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
   const repo = mkdtempSync(join(tmpdir(), "task-subagent-worktree-"));

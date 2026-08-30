@@ -20,6 +20,9 @@ export const REVIEW_FIX_DEADLINE_MS = 45 * 60 * 1000;
 // Watchdog constraint: a managed child silent this long is wedged (provider hang),
 // not thinking — pi JSON mode emits stdout events continuously during live turns.
 export const RUNNER_INACTIVITY_KILL_MS = 15 * 60 * 1000;
+// Grace between "exit" and drain-or-finalize; long enough for normal stdio
+// flush, short enough to beat the tracker's 1s dead-pid failure sync.
+export const EXIT_FINALIZE_GRACE_MS = 500;
 const WORKER_WRAP_UP_MS = 5_000;
 const execFileAsync = promisify(execFile);
 const defaultHerdrPanel = createHerdrPanel();
@@ -289,6 +292,7 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
   const inactivityKillMs = (spec as any).inactivityKillMs ?? RUNNER_INACTIVITY_KILL_MS;
   let deadlineTimer: NodeJS.Timeout | undefined;
   let activityTimer: NodeJS.Timeout | undefined;
+  let exitGraceTimer: NodeJS.Timeout | undefined;
   let abortListener: (() => void) | undefined;
   // Tracker state must outlive worktree cleanup: persist under the host repo,
   // not the worktree cwd that gets removed when the run completes.
@@ -307,6 +311,7 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
       if (abortListener) spec.signal?.removeEventListener("abort", abortListener);
       if (deadlineTimer) clearTimeout(deadlineTimer);
       if (activityTimer) clearTimeout(activityTimer);
+      if (exitGraceTimer) clearTimeout(exitGraceTimer);
       if (result.workspace) {
         try {
           result.workspace.statusAfter = gitText(result.workspace.assignedWorktree, ["status", "--short"]);
@@ -404,7 +409,23 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
         if (text.trim()) tracker.event(id, "stderr", text.trim());
       });
       child.on("error", (error) => { result.errorMessage = error.message; finish(1, "error"); });
-      child.on("close", (code) => { if (buffer.trim()) processLine(buffer); finish(code ?? 1); });
+      // Terminal-result constraint: finalize on "exit", not "close". Detached
+      // grandchildren can hold the pipe write-ends and defer "close"
+      // indefinitely, so finish() would never run and the final message (which
+      // carries the done completion or review report) would be lost. "close"
+      // remains the drain-fast-path; the exit grace flushes whatever the child
+      // wrote but that never got a trailing newline.
+      child.on("close", (code) => { if (buffer.trim()) processLine(buffer); buffer = ""; finish(code ?? 1); });
+      child.on("exit", (code) => {
+        if (settled) return;
+        exitGraceTimer = setTimeout(() => {
+          if (settled) return;
+          if (buffer.trim()) processLine(buffer);
+          buffer = "";
+          finish(code ?? 1);
+        }, EXIT_FINALIZE_GRACE_MS);
+        exitGraceTimer.unref();
+      });
       stopChild = () => {
         if (settled) return;
         if (result.stopReason !== "timed_out" && result.stopReason !== "stalled") result.stopReason = "aborted";

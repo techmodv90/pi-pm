@@ -173,7 +173,15 @@ export class AgentRunTracker {
     }
     for (const run of this.runs.values()) {
       if (run.status !== "running" || !run.pid) continue;
-      if (!isSameProcess(run)) this.finish(run.runId, "failed", "agent process exited without a terminal result");
+      if (isSameProcess(run)) continue;
+      // Salvage constraint: the runner normally finalizes via tracker.finish
+      // before the process dies. If this sync observes a dead pid first, only
+      // treat the run as failed when the child left no terminal report; a last
+      // message carrying a done completion report or a review verdict means the
+      // terminal result was produced and must not be discarded.
+      const lastMessage = [...run.events].reverse().find((event) => event.type === "message")?.summary ?? "";
+      const salvaged = /<completion_report[^>]*status="done"/.test(lastMessage) || /<review_report[^>]*status="(passed|failed)"/.test(lastMessage);
+      this.finish(run.runId, salvaged ? "completed" : "failed", salvaged ? "terminal report salvaged after child exit" : "agent process exited without a terminal result");
     }
     if (changed) this.emit();
   }
