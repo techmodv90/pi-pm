@@ -22,3 +22,9 @@ go-pic/dist/
 go-pic/pic
 go-pic/web/build/
 .claude/
+
+# Local project registry (machine-specific paths)
+projects.json
+
+# macOS metadata
+.DS_Store

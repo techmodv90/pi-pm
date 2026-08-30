@@ -2,7 +2,7 @@ const childTaskManagerActions: Record<string, ReadonlySet<string>> = {
   "task-reviewer": new Set(["show_work_item", "work_item_workflow_status", "trigger_work_item_review", "search"]),
   "task-scout": new Set(["list_work_items", "show_work_item", "work_item_workflow_status", "search"]),
   "task-planner": new Set(["list_work_items", "show_work_item", "work_item_workflow_status", "load_planning_artifact", "save_blueprint_draft", "save_work_item_artifact", "validate_work_item_graph", "search"]),
-  "rri-persona": new Set(["show_work_item", "work_item_workflow_status", "search"]),
+
   "rri-t-persona": new Set(["show_work_item", "work_item_workflow_status", "search"]),
   // Worker, autofix, and debugger subagents implement within the isolated worktree
   // and never transition workflow lifecycle; persist nothing through task_manager,

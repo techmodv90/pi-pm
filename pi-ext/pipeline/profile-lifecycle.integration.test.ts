@@ -18,6 +18,7 @@ import {
 } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
+import { buildAggregateVerifyPrompt, latestRriTScenarios } from "../tasking/work-item-prompts.ts";
 
 // profile-lifecycle.integration.test.ts exercises the complete persisted
 // profile, scheduler, authority, standalone, corrective, and promotion flow
@@ -128,7 +129,10 @@ test("REQ-AUTHORITY-BOUNDARIES: a dependency-blocked or unmediated child is neve
 test("REQ-IMMUTABLE-HISTORY: stale planning handoffs and completed-history rewrites are rejected instead of silently retried", () => {
   // The planning handoff resolves the immediately precedent approved checkpoint
   // from the persisted profile order; a missing precedent yields no handoff.
-  const data = { checkpoints: [{ stage: "scan", artifact_id: "cp-scan", artifact_revision: 1 }] };
+  const data = {
+    checkpoints: [{ stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" }],
+    artifacts: [{ id: "cp-scan", stage: "scan", revision: 1, content_hash: "h-scan" }],
+  };
   assert.equal(predecessorCheckpointFor(data, "rri", ["scan", "rri", "task_graph"])?.artifact_id, "cp-scan");
   assert.equal(predecessorCheckpointFor(data, "scan", ["scan", "rri", "task_graph"]), undefined);
 
@@ -176,8 +180,61 @@ test("REQ-PROMOTION-GATE: the scheduler merges the verified aggregate head to de
   }
 });
 
+test("REQ-AGGREGATE-RRI-T-LIFECYCLE: the two-phase RRI-T handoff preserves aggregate verification, owner acceptance, and merge ordering", () => {
+  // One persisted artifact owns two requirement-bound scenarios sharing persona,
+  // dimension, stress axis, and requirement but differing in id; the parent
+  // carries a higher-revision scenario that must never leak into the feature.
+  const persisted = {
+    methodology: "rri-t",
+    personas: ["QA / Tester"],
+    scenarios: [
+      { id: "SC-1", persona: "QA / Tester", dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-1", procedure: "submit the empty form → inline error is shown", remediation_hint: "Assert the inline error" },
+      { id: "SC-2", persona: "QA / Tester", dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-1", procedure: "submit a malformed payload → rejected without state change", remediation_hint: "Assert the rejection" },
+    ],
+    not_applicable: [],
+    open_blockers: [],
+  };
+  const data = {
+    work_item: { id: "wi-feature", title: "Feature" },
+    children: [{ id: "wi-child", title: "Child", status: "done" }],
+    artifacts: [
+      { id: "wia-own", work_item_id: "wi-feature", stage: "rri_t_scenarios", revision: 1, content_hash: "hash-own", content: JSON.stringify(persisted) },
+      { id: "wia-parent", work_item_id: "wi-epic", stage: "rri_t_scenarios", revision: 3, content_hash: "hash-parent", content: JSON.stringify({ ...persisted, scenarios: [{ id: "PARENT-REV3", persona: "QA / Tester", dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-1", procedure: "parent only", remediation_hint: "" }] }) },
+    ],
+  };
+  // Persisted verification boundary: only the aggregate's own artifact revision
+  // is consumable for grading, never a parent's higher revision.
+  assert.equal(latestRriTScenarios(data)?.artifact.id, "wia-own");
+  const prompt = buildAggregateVerifyPrompt(data);
+  assert.match(prompt, /Loaded from artifact wia-own \(revision 1, content hash hash-own\) — never from in-memory persona output/);
+  assert.match(prompt, /Execute the final aggregate verification now/);
+  assert.match(prompt, /REQ-1, SC-1\)/);
+  assert.match(prompt, /REQ-1, SC-2\)/);
+  assert.doesNotMatch(prompt, /PARENT-REV3/);
+  // Phase 2 ownership: the contractor executes and grades in the main session;
+  // personas authored only scenarios and no result or evidence comes from them.
+  assert.match(prompt, /Do not run, amend, or re-author persona output, and do not re-run persona subagents/);
+  assert.match(prompt, /no subagent executes procedures or produces grades/);
+  assert.match(prompt, /never grade a scenario you did not execute/);
+  assert.match(prompt, /Each retained scenario receives exactly one outcome/);
+  assert.match(prompt, /not_applicable with a concrete reason/);
+  assert.match(prompt, /trim or defer/i);
+  // Submission ends with the contractor's aggregate verification: the rri_t
+  // evidence carries the persisted scenario id and the single owner decision plus
+  // the bound branch merge remain the only subsequent aggregate decisions.
+  assert.match(prompt, /verify_aggregate_work_item/);
+  assert.match(prompt, /rri_t_evidence_json/);
+  assert.match(prompt, /actor_role=contractor/);
+  assert.match(prompt, /Do not call owner acceptance/);
+  assert.match(prompt, /single owner decision gate/);
+  assert.doesNotMatch(prompt, /accept_aggregate_work_item|merge_aggregate_work_item/);
+  assert.ok(prompt.indexOf("verify_aggregate_work_item") < prompt.indexOf("Do not call owner acceptance"));
+});
+
 test("managed scheduler fixtures run no pipeline I/O and leave no leaked scheduler process", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const pi = { events: { on: () => () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const scheduler = new PipelineScheduler(pi) as any;
   let recovered = 0;
   let reconciled = 0;

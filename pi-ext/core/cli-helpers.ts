@@ -91,9 +91,9 @@ export function findPicCli(): string {
   const realExtDir = realpathSync(extDir);
   const binaryName = process.platform === "win32" ? "pic.exe" : "pic";
   const candidates = [
-    resolve(process.env.HOME || "~", ".pi", "bin", binaryName),
-    resolve(realExtDir, "..", "go-pic", "dist", binaryName),
+    resolve(realExtDir, "..", "..", "go-pic", "dist", binaryName),
     resolve(process.env.HOME || "~", ".pi", "task-system", "go-pic", "dist", binaryName),
+    resolve(process.env.HOME || "~", ".pi", "bin", binaryName),
   ];
   return candidates.find(existsSync) || "pic";
 }

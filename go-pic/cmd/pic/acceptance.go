@@ -405,7 +405,7 @@ func validateTaskGherkin(db *sql.DB, taskID, description string) error {
 		return err
 	}
 	if description == "" {
-		if err := db.QueryRow(`SELECT description FROM tasks WHERE id=?`, taskID).Scan(&description); err != nil {
+		if err := db.QueryRow(`SELECT description FROM work_items WHERE id=?`, taskID).Scan(&description); err != nil {
 			return err
 		}
 	}

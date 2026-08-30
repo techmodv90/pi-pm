@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriPersonaResult, parseRriSynthesisResult, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
+import { planPrimerContext, planScanRetryWave } from "./stage-prompts.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
 
@@ -104,20 +105,40 @@ test("planning handoff contains lineage metadata, not artifact history", () => {
 test("planning handoff resolves the approved predecessor checkpoint from the profile order", () => {
   const data = {
     checkpoints: [
-      { stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, created_at: "2026-01-01" },
-      { stage: "rri", artifact_id: "cp-rri", artifact_revision: 1, created_at: "2026-01-02" },
+      { stage: "scan", artifact_id: "cp-scan", artifact_revision: 1, content_hash: "h-scan", created_at: "2026-01-01", decision_type: "accepted" },
+      { stage: "rri", artifact_id: "cp-rri", artifact_revision: 1, content_hash: "h-rri", created_at: "2026-01-02", decision_type: "approved" },
+    ],
+    artifacts: [
+      { id: "cp-scan", stage: "scan", revision: 1, content_hash: "h-scan" },
+      { id: "cp-rri", stage: "rri", revision: 1, content_hash: "h-rri" },
     ],
   };
   assert.equal(predecessorCheckpointFor(data, "vision", ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"])?.artifact_id, "cp-rri");
   assert.equal(predecessorCheckpointFor(data, "scan", ["scan", "rri", "task_graph"]), undefined);
 });
 
+test("planning predecessor lineage rejects orphaned, hash-stale, and rejected checkpoints", () => {
+  // The predecessor binds the same validity predicate as planPrimerContext, so
+  // the lineage line can never name an artifact-orphaned, hash-stale, or
+  // rejected checkpoint even when its decision_type alone looks approved.
+  const artifacts = [{ id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan" }];
+  const approved = { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", created_at: "2026-01-01", decision_type: "approved" };
+  assert.equal(predecessorCheckpointFor({ checkpoints: [{ ...approved }], artifacts }, "rri", ["scan", "rri"])?.artifact_id, "wia-scan");
+  // Orphaned: the bound artifact revision no longer exists.
+  assert.equal(predecessorCheckpointFor({ checkpoints: [{ ...approved, artifact_id: "wia-missing" }], artifacts }, "rri", ["scan", "rri"]), undefined);
+  // Hash-stale: the checkpoint hash disagrees with the bound revision.
+  assert.equal(predecessorCheckpointFor({ checkpoints: [{ ...approved, content_hash: "h-old" }], artifacts }, "rri", ["scan", "rri"]), undefined);
+  // Rejected: decision_type filtering still applies on top of artifact validity.
+  assert.equal(predecessorCheckpointFor({ checkpoints: [{ ...approved, decision_type: "rejected" }], artifacts }, "rri", ["scan", "rri"]), undefined);
+});
+
 test("planning dispatch binds the claim to the persisted profile version and hash", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const resolution = readFileSync(new URL("./stage-resolution.ts", import.meta.url), "utf8");
   assert.match(source, /if \(isPlanningStage\(stage\)\) \{\n\s+const \{ profile \} = this\.planEligibility\(taskId, stage\)/);
   assert.match(source, /--profile-version", String\(profile\.version\), "--profile-hash", profile\.contentHash/);
   assert.match(source, /planning stage \$\{stage\} is not in the persisted plan profile/);
-  assert.match(source, /plan_profile: resolvePlanProfile\(data\)/);
+  assert.match(resolution, /plan_profile: resolvePlanProfile\(data\)/);
 });
 
 test("planning dispatch demands a persisted Plan profile before any stage launch", () => {
@@ -149,7 +170,9 @@ test("normalizePipelineData adapts canonical Work Items without snapshot authori
   assert.equal(data.task, undefined);
   assert.equal(data.canonical, true);
   assert.deepEqual(data.instruction_packs[0].constraints_json, '{"scope_roots":["src"]}');
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.deepEqual(data.scan_reports.map((artifact: any) => artifact.id), ["scan-1"]);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.deepEqual(data.designs.map((artifact: any) => artifact.id), ["blueprint-1"]);
   assert.equal(pipelineWorkerBlockReason(data), null);
   assert.doesNotThrow(() => assertRunContractCurrent(data, { instruction_pack_id: "wip-1", instruction_pack_hash: "hash-2" }));
@@ -255,6 +278,7 @@ test("child task-manager capabilities are restricted by the launched agent role"
 });
 
 test("canonicalReadyLeafIds returns only authorized dependency-ready executable descendants", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     root: { work_item: { id: "root", type: "epic" }, children: [{ id: "feature", type: "feature" }, { id: "blocked", type: "task" }] },
     feature: { work_item: { id: "feature", type: "feature" }, children: [{ id: "ready", type: "task" }, { id: "gate", type: "gate" }] },
@@ -266,6 +290,7 @@ test("canonicalReadyLeafIds returns only authorized dependency-ready executable 
 });
 
 test("canonicalReadyLeafIds traverses materialized children of executable parents", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     child: { work_item: { id: "child", type: "task" }, ready: true, children: [] },
   };
@@ -274,6 +299,7 @@ test("canonicalReadyLeafIds traverses materialized children of executable parent
 });
 
 test("canonicalReadyLeafIds resumes items interrupted mid review or autofix", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     root: { work_item: { id: "root", type: "feature" }, children: [{ id: "stalled_review" }, { id: "dead_autofix" }, { id: "owner_block" }] },
     // Expired review run: next_stage parked at review, no durable failed status.
@@ -286,6 +312,7 @@ test("canonicalReadyLeafIds resumes items interrupted mid review or autofix", ()
 });
 
 test("canonicalReadyLeafIds treats cancelled children as absent", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     cancelled: { work_item: { id: "cancelled", type: "task", status: "cancelled" }, ready: false, children: [] },
   };
@@ -294,6 +321,7 @@ test("canonicalReadyLeafIds treats cancelled children as absent", () => {
 });
 
 test("pipeline dry-run reports planned leaf stages and blockers without mutations", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const details: Record<string, any> = {
     ready: { work_item: { id: "ready", type: "task" }, ready: true, children: [], instruction_packs: [{ status: "active" }] },
     blocked: { work_item: { id: "blocked", type: "task" }, ready: false, children: [], instruction_packs: [{ status: "active" }], dependencies: [{ depends_on_work_item_id: "ready", status: "open" }] },
@@ -317,13 +345,14 @@ test("canonical aggregate scheduling requires owner resolution after Scan reject
 
 test("full aggregate Scan fans out bounded evidence sections for contractor synthesis", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  for (const section of ["Architecture", "Lifecycle", "Authority", "Verification", "Reliability"]) assert.match(source, new RegExp(`\\["${section}"`));
-  assert.match(source, /startFullScanFanout/);
-  assert.match(source, /compose the canonical Scan Report/i);
-  assert.match(source, /root must be <scout_evidence section="\$\{section\.toLowerCase\(\)\}"/i);
-  assert.match(source, /one evidence container with one or two non-empty <source path="relative\/file"/);
-  assert.match(source, /Use exactly one concise finding, at most one gap/);
-  assert.match(source, /Keep the complete document under 2,500 characters/);
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  for (const section of ["Architecture", "Lifecycle", "Authority", "Verification", "Reliability"]) assert.match(prompts, new RegExp(`\\["${section}"`));
+  assert.match(prompts, /startFullScanFanout/);
+  assert.match(prompts, /compose the canonical Scan Report/i);
+  assert.match(prompts, /root must be <scout_evidence section="\$\{section\.toLowerCase\(\)\}"/i);
+  assert.match(prompts, /one evidence container with one or two non-empty <source path="relative\/file"/);
+  assert.match(prompts, /Use exactly one concise finding, at most one gap/);
+  assert.match(prompts, /Keep the complete document under 2,500 characters/);
   assert.match(source, /handoffs\.put\("scan"/);
   assert.match(source, /Load ephemeral handoff \$\{handoffId\}/);
   assert.doesNotMatch(source, /Scan evidence ready[^`]+\$\{output\}/);
@@ -366,8 +395,8 @@ test("canonical aggregate creation starts orchestration at Scan", () => {
 });
 
 test("canonical failed-review worker prompts include persisted correction findings", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const stagePromptBody = source.slice(source.indexOf("function stagePrompt"), source.indexOf("function rejectedCandidatePatch"));
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  const stagePromptBody = prompts.slice(prompts.indexOf("export function stagePrompt"));
   assert.match(stagePromptBody, /currentFailedReview[\s\S]+buildWorkerCorrectionContext\(\{ \.\.\.data, current_review: currentReview \}\)/);
 });
 
@@ -382,14 +411,16 @@ test("pipeline run parsing rejects malformed pic records instead of silently dro
 });
 
 test("planning pipeline stages use planning agents and prompts without an active TIP", () => {
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /rri: "rri-persona"/);
-  assert.match(source, /vision: "task-planner"/);
-  assert.doesNotMatch(source, /contracts: "task-planner"/);
-  assert.match(source, /stage === "contracts".*Contract drafting is Contractor-owned/);
-  assert.match(source, /task_graph: "task-planner"/);
-  assert.match(source, /if \(isPlanningStage\(stage\)\) return/);
-  assert.match(source, /planningHandoff\(stage, raw, taskId\)/);
+  assert.match(prompts, /if \(stage === "rri"\) throw new Error\("RRI is Contractor-owned"\)/);
+  assert.match(source, /workflow\.next_stage === "rri"[\s\S]+contractor: true/);
+  assert.match(prompts, /vision: "task-planner"/);
+  assert.doesNotMatch(prompts, /contracts: "task-planner"/);
+  assert.match(prompts, /stage === "contracts".*Contract drafting is Contractor-owned/);
+  assert.match(prompts, /task_graph: "task-planner"/);
+  assert.match(prompts, /if \(isPlanningStage\(stage\)\) \{/);
+  assert.match(prompts, /planningHandoff\(stage, doc, taskId\)/);
   assert.match(source, /if \(planningStages\.includes\(workflow\.next_stage\)\)[\s\S]+launchGroup\(workflow\.next_stage, \[rootTaskId\]\)/);
 });
 
@@ -409,48 +440,98 @@ test("planner completion publishes a draft handoff without canonical Blueprint p
   assert.match(source, /do not call save_work_item_artifact/);
 });
 
-test("RRI persona handoffs require strict assigned-persona XML", () => {
-  const valid = `<rri_persona persona="QA / Tester"><auto_answered><answer confidence="high"><question>Tests?</question><answer>Go and Node</answer><source>AGENTS.md</source></answer></auto_answered><candidate_questions><question priority="P1" classification="SMART-ASKED" mode="GUIDED"><question>Why this matters: failures block delivery. Which recovery outcome is required?</question><suggested_answer>Retry</suggested_answer><suggested_answer>Stop</suggested_answer><reason>Recovery policy is unspecified</reason><requirement_area>reliability</requirement_area></question></candidate_questions><not_applicable></not_applicable></rri_persona>`;
-  assert.equal(parseRriPersonaResult(valid, "QA / Tester").persona, "QA / Tester");
-  assert.throws(() => parseRriPersonaResult(valid, "Developer"), /expected Developer/);
-  assert.throws(() => parseRriPersonaResult('<rri_persona persona="QA / Tester"></rri_persona>', "QA / Tester"), /auto_answered/);
-  assert.equal(parseRriPersonaResult("```xml\n" + valid + "\n```", "QA / Tester").persona, "QA / Tester");
-  assert.equal(parseRriPersonaResult("Here is the result:\n" + valid, "QA / Tester").persona, "QA / Tester");
-  assert.throws(() => parseRriPersonaResult(valid.replace("Tests?", "Tests & CI?"), "QA / Tester"), /invalid XML/);
-  assert.throws(() => parseRriPersonaResult(valid.replace("<reason>Recovery policy is unspecified</reason>", ""), "QA / Tester"), /candidate question missing or invalid: reason element/);
-});
-
-test("RRI-T persona results require requirement-bound executable scenarios", () => {
-  const valid = `<rri_t_persona persona="QA / Tester"><scenarios><scenario><id>RRI-T-1</id><dimension>D3</dimension><stress_axis>ERROR</stress_axis><requirement_id>REQ-1</requirement_id><procedure>Submit invalid input</procedure><evidence>go test ./...</evidence><result>PASS</result><remediation></remediation></scenario></scenarios><not_applicable></not_applicable><open_blockers></open_blockers></rri_t_persona>`;
-  assert.equal(parseRriTPersonaResult(valid, "QA / Tester").scenarios[0].result, "PASS");
+test("RRI-T persona results accept the six-field authoring contract and ignore legacy grading fields", () => {
+  const valid = `<rri_t_persona persona="QA / Tester"><scenarios><scenario><id>RRI-T-1</id><dimension>D3</dimension><stress_axis>ERROR</stress_axis><requirement_id>REQ-1</requirement_id><procedure>Submit the empty form → inline error is shown</procedure><remediation_hint>Assert the error text on the form</remediation_hint></scenario></scenarios><not_applicable></not_applicable><open_blockers></open_blockers></rri_t_persona>`;
+  const parsed = parseRriTPersonaResult(valid, "QA / Tester");
+  assert.equal(parsed.scenarios[0].id, "RRI-T-1");
+  assert.equal(parsed.scenarios[0].remediation_hint, "Assert the error text on the form");
+  assert.equal(parsed.scenarios[0].result, "");
+  assert.equal(parseRriTPersonaResult(valid.replace("→", "->"), "QA / Tester").scenarios[0].procedure.includes("->"), true);
+  const legacy = valid.replace("<remediation_hint>", "<evidence>go test ./...</evidence><result>PASS</result><remediation></remediation><remediation_hint>");
+  assert.equal(parseRriTPersonaResult(legacy, "QA / Tester").scenarios[0].result, "PASS");
   assert.throws(() => parseRriTPersonaResult(valid.replace("REQ-1", ""), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "Submit invalid input"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "→ inline error is shown"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "Submit the empty form →"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("Submit the empty form → inline error is shown", "->"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("<remediation_hint>Assert the error text on the form</remediation_hint>", ""), "QA / Tester"), /invalid scenario/);
+  // unknown dimensions or stress axes and a fully missing procedure are rejected
+  assert.throws(() => parseRriTPersonaResult(valid.replace(">D3<", ">D8<"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace(">ERROR<", ">NOPE<"), "QA / Tester"), /invalid scenario/);
+  assert.throws(() => parseRriTPersonaResult(valid.replace("<procedure>Submit the empty form → inline error is shown</procedure>", ""), "QA / Tester"), /invalid scenario/);
+  // malformed XML fails closed instead of being leniently parsed
+  assert.throws(() => parseRriTPersonaResult(valid.replace("</scenario></scenarios>", "</scenarios>"), "QA / Tester"), /invalid XML/);
+  assert.throws(() => parseRriTPersonaResult("no document at all", "QA / Tester"), /one rri_t_persona document/);
 });
 
-
-test("RRI synthesis handoff is strict XML", () => {
-  const valid = "<rri_synthesis><remaining_queue></remaining_queue><auto_answered></auto_answered><not_applicable></not_applicable><open_blockers></open_blockers><final_report></final_report></rri_synthesis>";
-  assert.deepEqual(parseRriSynthesisResult(valid), { remaining_queue: [], auto_answered: [], not_applicable: [], open_blockers: [], next_question: null, final_report: null });
-  assert.throws(() => parseRriSynthesisResult("Prepared interview"), /one XML document/);
-  assert.throws(() => parseRriSynthesisResult("<rri_synthesis><next_question></next_question></rri_synthesis>"), /remaining_queue/);
+test("RRI-T merge keeps one deterministic scenario per identity and preserves author persona metadata", () => {
+  const authoring = (persona: string, id: string) => ({
+    persona,
+    scenarios: [{
+      id, dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-1",
+      procedure: "submit the empty form → inline error is shown", remediation_hint: "Assert the inline error",
+      evidence: "go test ./...", result: "PASS",
+    }],
+    not_applicable: [],
+    open_blockers: [],
+  });
+  const merged = mergeRriTAuthoringResults([
+    authoring("QA / Tester", "RRI-T-1"),
+    authoring("Developer", "RRI-T-1"), // duplicate identity from a second persona
+    { ...authoring("End User", "RRI-T-2"), not_applicable: [{ topic: "UI", reason: "none" }], open_blockers: ["blocker-1"] },
+  ], ["QA / Tester", "Developer", "End User"] as const);
+  // duplicate identity collapses to one deterministic scenario keeping the first author
+  assert.equal(merged.scenarios.length, 2);
+  assert.equal(merged.scenarios[0].persona, "QA / Tester");
+  assert.equal(merged.scenarios[1].persona, "End User");
+  // scenario-only output: grading fields never reach the merged list
+  assert.equal(merged.scenarios[0].result, undefined);
+  assert.equal(merged.scenarios[0].evidence, undefined);
+  assert.deepEqual(merged.personas, ["QA / Tester", "Developer", "End User"]);
+  assert.deepEqual(merged.not_applicable, [{ topic: "UI", reason: "none", persona: "End User" }]);
+  assert.deepEqual(merged.open_blockers, ["blocker-1"]);
+  // distinct identities never collapse, and a same-persona repeat of an identity also deduplicates
+  assert.equal(mergeRriTAuthoringResults([authoring("QA / Tester", "RRI-T-1"), authoring("Developer", "RRI-T-2")], ["QA / Tester", "Developer"] as const).scenarios.length, 2);
+  assert.equal(mergeRriTAuthoringResults([{ ...authoring("QA / Tester", "RRI-T-1"), scenarios: [...authoring("QA / Tester", "RRI-T-1").scenarios, ...authoring("QA / Tester", "RRI-T-1").scenarios] }], ["QA / Tester"] as const).scenarios.length, 1);
 });
 
-test("RRI dispatch is scheduler-owned persona fanout followed by synthesis", () => {
+test("RRI-T authoring output is a scenario list without grading records or counts", () => {
+  const merged = mergeRriTAuthoringResults([{ persona: "QA / Tester", scenarios: [
+    { id: "s1", dimension: "D1", stress_axis: "TIME", requirement_id: "REQ-A", procedure: "open the page → renders", remediation_hint: "hint", result: "FAIL", evidence: "x" },
+  ], not_applicable: [], open_blockers: [] }], ["QA / Tester"] as const);
+  assert.equal(merged.scenarios.length, 1);
+  const serialized = JSON.stringify(merged);
+  assert.equal(serialized.includes("result"), false);
+  assert.equal(serialized.includes("evidence"), false);
+  assert.equal(serialized.includes("summary"), false);
+});
+
+test("RRI-T authoring fanout runs read-only personas on the bounded resilient runner without executing or grading", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const personaInstructions = readFileSync(new URL("../agents/rri-persona.md", import.meta.url), "utf8");
-  assert.match(source, /stage === "rri"[\s\S]+startRriFanout\(spec, personaAgent, this\.handoffs\)/);
-  const fanout = source.slice(source.indexOf("function startRriFanout"), source.indexOf("function outputFor"));
-  assert.match(fanout, /personas\.map/);
-  assert.match(fanout, /parseRriPersonaResult/);
-  assert.match(fanout, /handoffs\.put\("rri-persona"/);
-  assert.doesNotMatch(fanout, /startSubagent\([\s\S]+agent: taskRriAgent/);
-  assert.match(fanout, /deterministicRriSynthesis/);
-  assert.match(fanout, /catch[\s\S]+handles\.forEach\(\(handle\) => handle\.stop\(\)\)/);
-  assert.match(personaInstructions, /first element.*<rri_persona.*last.*<\/rri_persona>/s);
-  assert.match(personaInstructions, /escape text values.*&amp;.*&lt;.*&gt;/s);
-  assert.match(personaInstructions, /Every `<candidate_questions><question>` entry must include all three attributes/);
-  assert.doesNotMatch(personaInstructions, /```json/);
-  assert.doesNotMatch(readFileSync(new URL("../agents/rri-persona.md", import.meta.url), "utf8"), /\.pi\/agent\/methodologies/);
-  assert.doesNotMatch(fanout, /RRI synthesis failed validation:[\s\S]+only retry/);
+  const rriTBody = source.slice(source.indexOf("async runRriT"), source.indexOf("private async persistAgentResult"));
+  assert.match(rriTBody, /const handle = startSubagentResilient\(\{/);
+  assert.doesNotMatch(rriTBody, /isolation: "worktree"/);
+  assert.match(rriTBody, /attempt < 2/);
+  assert.match(rriTBody, /Previous output was invalid: \$\{lastError\}[\s\S]+Correct it on this retry/);
+  assert.match(rriTBody, /do not execute any procedure, collect evidence, or grade results/);
+  assert.match(rriTBody, /mergeRriTAuthoringResults/);
+  assert.doesNotMatch(rriTBody, /summary: counts/);
+  // the launch itself must never bypass the persona read-only tool contract
+  const persona = readFileSync(new URL("../agents/rri-t-persona.md", import.meta.url), "utf8");
+  assert.match(persona, /^tools: read, grep, find, ls$/m);
+  assert.doesNotMatch(persona, /tools:[^\n]*bash/);
+  assert.match(persona, /no worktree isolation/);
+  const runner = readFileSync(new URL("../subagent/runner.ts", import.meta.url), "utf8");
+  assert.match(runner, /READ_ONLY_AGENTS = new Set\(\[[^\]]*"rri-t-persona"/);
+});
+
+test("RRI dispatch stays in contractor session and does not spawn persona agents", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const prompt = readFileSync(new URL("../tasking/work-item-prompts.ts", import.meta.url), "utf8");
+  assert.match(source, /workflow\.next_stage === "rri"[\s\S]+contractor: true/);
+  assert.doesNotMatch(source, /handle = stage === "rri"/);
+  assert.match(prompt, /apply all relevant RRI persona lenses yourself/);
+  assert.match(prompt, /Do not spawn or request `rri-persona` subagents/);
 });
 
 test("review output is a single structured scheduler-owned verdict", () => {
@@ -597,8 +678,8 @@ test("autofix context carries exact failed verification evidence and forbids con
   assert.match(prompt, /REQ-7: fail - expected 409, got 500/);
   assert.match(prompt, /not a fresh implementation or retry/i);
   assert.match(prompt, /Do not weaken tests, verification commands, acceptance criteria, or scope/);
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const stagePromptBody = source.slice(source.indexOf("function stagePrompt"), source.indexOf("function rejectedCandidatePatch"));
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  const stagePromptBody = prompts.slice(prompts.indexOf("export function stagePrompt"));
   assert.match(stagePromptBody, /stage === "autofix"[\s\S]+buildAutofixContext\(data\)/);
 });
 
@@ -720,9 +801,11 @@ test("parallel sibling reviews are invalidated when the integration base changes
   execFileSync("git", ["add", "."], { cwd: repo });
   execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
   const base = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.doesNotThrow(() => assertReviewBaseCurrent({ base_commit: base } as any, repo));
   writeFileSync(join(repo, "file.txt"), "changed\n");
   execFileSync("git", ["commit", "-am", "changed", "-q"], { cwd: repo });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.throws(() => assertReviewBaseCurrent({ base_commit: base } as any, repo), /review base changed/);
   assert.match(source, /candidate patch no longer applies to the current integration base[\s\S]+checkpoint\(candidate, "advanced"/);
 });
@@ -733,6 +816,7 @@ test("worker integration selects an artifact-saved candidate despite a blocked h
     { id: "attempt-21", stage: "worker", status: "blocked", advanced_at: "", integrated_at: "" },
     { id: "attempt-20", stage: "worker", status: "completed", artifact_saved_at: "2026-01-01", advanced_at: "", integrated_at: "" },
     { id: "attempt-19", stage: "worker", status: "completed", artifact_saved_at: "2026-01-01", advanced_at: "", integrated_at: "" },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   ] as any;
   assert.equal(workerIntegrationCandidate(runs)?.id, "attempt-22");
 });
@@ -741,16 +825,20 @@ test("review-fix workers must change the rejected candidate patch", () => {
   const patch = Buffer.from("reviewed candidate");
   const hash = createHash("sha256").update(patch).digest("hex");
   assert.throws(
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     () => assertReviewFixChangedPatch({ review_fix_cycle: 1, candidate_patch_hash: hash } as any, patch),
     /review-fix produced the unchanged rejected candidate patch/,
   );
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.doesNotThrow(() => assertReviewFixChangedPatch({ review_fix_cycle: 1, candidate_patch_hash: "different" } as any, patch));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.doesNotThrow(() => assertReviewFixChangedPatch({ review_fix_cycle: 0, candidate_patch_hash: hash } as any, patch));
 });
 
 test("justified no-op review-fix may resubmit the unchanged candidate for re-review", () => {
   const patch = Buffer.from("reviewed candidate");
   const hash = createHash("sha256").update(patch).digest("hex");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const run = { review_fix_cycle: 1, candidate_patch_hash: hash } as any;
   // Thin justification does not unlock the escape hatch.
   assert.throws(
@@ -804,6 +892,7 @@ test("obsolete failed-review patch does not block a fresh correction worker", ()
     const pack = { id: "pack-1", version: 1, content_hash: "hash-1", status: "active" };
     const candidate = { id: "worker-1", stage: "worker", status: "completed", artifact_saved_at: "now", integrated_at: "", instruction_pack_id: pack.id, instruction_pack_version: pack.version, instruction_pack_hash: pack.content_hash, integrated_patch_path: patch, integrated_patch_hash: "patch-hash" };
     const review = { id: "review-1", stage: "review", status: "completed", candidate_run_id: candidate.id, candidate_patch_hash: candidate.integrated_patch_hash, result_json: JSON.stringify({ review_status: "failed", findings: ["fix immutability"] }) };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     assert.equal(rejectedCandidatePatch({ instruction_packs: [pack] }, [candidate, review] as any, repo), undefined);
   } finally {
     rmSync(repo, { recursive: true, force: true });
@@ -1141,10 +1230,11 @@ test("review verdict is durable before restart-safe candidate integration", () =
 });
 
 test("integration stages only reviewed patch changes and orphan recovery retires unbound claims", () => {
+  const integration = readFileSync(new URL("./integration.ts", import.meta.url), "utf8");
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   const integrationBody = source.slice(source.indexOf("private integrateReviewedCandidate"), source.indexOf("private async advance"));
   assert.match(integrationBody, /finalizeReviewedIntegration\(/);
-  const finalizerBody = source.slice(source.indexOf("export function finalizeReviewedIntegration"), source.indexOf("function assertCleanGit"));
+  const finalizerBody = integration.slice(integration.indexOf("export function finalizeReviewedIntegration"), integration.indexOf("function assertCleanGit"));
   assert.match(finalizerBody, /git", \["apply", "--index"/);
   assert.doesNotMatch(integrationBody, /execGitIndexWrite\(\["add", "-A"\]/);
   const recoveryBody = source.slice(source.indexOf("private recoverOrphanedRuns"), source.indexOf("stopSession"));
@@ -1152,12 +1242,15 @@ test("integration stages only reviewed patch changes and orphan recovery retires
 });
 
 test("session startup performs no pipeline I/O", async () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const pi = { events: { on: () => () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const scheduler = new PipelineScheduler(pi) as any;
   let recovered = 0;
   let reconciled = 0;
   scheduler.recoverOrphanedRuns = () => { recovered++; };
   scheduler.reconcileSafely = async () => { reconciled++; };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   scheduler.startSession({ cwd: "/repo" } as any);
   assert.equal(scheduler.cwd, "/repo");
   assert.equal(recovered, 0);
@@ -1192,7 +1285,9 @@ test("owned runner completion persists output and Task-specific worktree patch e
   mkdirSync(join(worktree, "test-results"));
   writeFileSync(join(worktree, "test-results", ".last-run.json"), "{}\n");
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const scheduler = new PipelineScheduler(pi) as any;
   const artifactDir = join(repo, ".pi-subagents", "pipeline", "pr-1");
   mkdirSync(artifactDir, { recursive: true });
@@ -1231,7 +1326,9 @@ test("a transient-provider exhaustion persists failure_code=transient_provider i
   execFileSync("git", ["add", "."], { cwd: repo });
   execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const scheduler = new PipelineScheduler(pi) as any;
   const runId = `agent-transient-${Date.now()}`;
   const artifactDir = join(repo, ".pi-subagents", "pipeline", "pr-transient");
@@ -1273,10 +1370,13 @@ test("generated verification artifacts are excluded from patches and scope check
 });
 
 test("blocked worker attempts proactively queue their terminal outcome", () => {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const messages: Array<{ text: string; options: any }> = [];
   const scheduler = new PipelineScheduler({
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     sendUserMessage: (text: string, options: any) => messages.push({ text, options }),
     events: { on: () => () => {} },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   } as any) as any;
 
   scheduler.notifyBlockedAttempt({ task_id: "T01", stage: "worker", attempt: 3 }, "required verification did not pass: npm test");
@@ -1340,11 +1440,12 @@ test("failed review corrections are handed to worker", () => {
 
 test("worker launches bind sessions to the claimed instruction pack host-side", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
   // Session path must derive from the claimed pack ID (TIP lineage), not the run ID,
   // so review-fix relaunches resume the same conversation and retired packs never do.
   assert.match(source, /spec\.sessionPath = workerSessionPath\(this\.cwd, activePack\?\.id \|\| claim\.instruction_pack_id \|\| taskId\)/);
-  assert.match(source, /function workerSessionPath\(cwd: string, packKey: string\)/);
-  assert.match(source, /\.pi", "runtime", "runs", packKey, "session\.jsonl"/);
+  assert.match(prompts, /function workerSessionPath\(cwd: string, packKey: string\)/);
+  assert.match(prompts, /\.pi", "runtime", "runs", packKey, "session\.jsonl"/);
 });
 
 test("session fallback removes corrupt files instead of failing the relaunch", () => {
@@ -1368,10 +1469,12 @@ test("escalated worker reports carry a structured, source-audited escalation pay
 
 test("scheduler persists escalations fail-closed and injects resolutions at relaunch", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  const corrections = readFileSync(new URL("./corrections.ts", import.meta.url), "utf8");
   assert.match(source, /taskReport\.status === "escalated"/);
   assert.match(source, /"workflow", "escalation-save", run\.task_id, "--pipeline-run-id", run\.id, "--report-json"/);
-  assert.match(source, /buildEscalationResolutionContext\(data, parsePipelineRuns\(execPic\(\["workflow", "pipeline-runs", taskId\], cwd\)\)\)/);
-  const builder = source.slice(source.indexOf("export function buildEscalationResolutionContext"), source.indexOf("function stageAgent"));
+  assert.match(prompts, /buildEscalationResolutionContext\(data, parsePipelineRuns\(execPic\(\["workflow", "pipeline-runs", taskId\], cwd\)\)\)/);
+  const builder = corrections.slice(corrections.indexOf("export function buildEscalationResolutionContext"));
   assert.match(builder, /status === "resolved"/);
   assert.match(builder, /String\(entry\.resolved_at \|\| ""\) > lastRunStart/);
 });
@@ -1383,10 +1486,12 @@ test("escalation resolutions are authoritative in the next worker prompt", () =>
     { id: "wies-3", level: "L2", status: "resolved", resolution_json: "{}", instruction_pack_id: "wip-9", resolved_at: "2026-01-01 00:00:00" },
   ] };
   const runs = [{ created_at: "2026-01-01 12:00:00" }];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const context = buildEscalationResolutionContext(data, runs as any);
   assert.match(context, /ESCALATION RESOLUTIONS/);
   assert.match(context, /use sqlite/);
   assert.doesNotMatch(context, /wies-3/, "resolutions predating the latest run are already consumed");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.equal(buildEscalationResolutionContext({ escalations: [data.escalations[1]] }, runs as any), "");
 });
 
@@ -1446,8 +1551,10 @@ test("review-fix round count derives from completed fix worker cycles", () => {
     { stage: "review", status: "completed", review_fix_cycle: undefined },
     { stage: "worker", status: "completed", review_fix_cycle: 3 },
     { stage: "worker", status: "completed", review_fix_cycle: 2 },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   ] as any;
   assert.equal(reviewCycleCount(runs), 3);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.equal(reviewCycleCount([{ stage: "review", review_fix_cycle: undefined }] as any), 0);
 });
 
@@ -1458,6 +1565,7 @@ test("review-fix round count ignores non-completed fix worker runs", () => {
     { stage: "worker", status: "blocked", review_fix_cycle: 3 },
     { stage: "worker", status: "cancelled", review_fix_cycle: 2 },
     { stage: "worker", status: "expired", review_fix_cycle: 1 },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   ] as any;
   assert.equal(reviewCycleCount(incomplete), 0);
   // Mixed set: only the completed cycles advance the cap.
@@ -1465,6 +1573,7 @@ test("review-fix round count ignores non-completed fix worker runs", () => {
     { stage: "worker", status: "running", review_fix_cycle: 5 },
     { stage: "worker", status: "failed", review_fix_cycle: 4 },
     { stage: "worker", status: "completed", review_fix_cycle: 2 },
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   ] as any;
   assert.equal(reviewCycleCount(mixed), 1);
 });
@@ -1476,4 +1585,151 @@ test("round cap produces a synthesized owner-action block for the next fix", () 
   assert.match(block, /P0 \(critical, must fix\):[\s\S]+security bug/);
   assert.match(block, /P1 \(important, fix now\):[\s\S]+Wire expectedVersion/);
   assert.match(block, /will not relaunch automatically/);
+});
+
+test("canonical TIP XML renders the contract interfaces provided by the task graph", () => {
+  const item = { id: "wi-1", type: "task", priority: "medium" };
+  const content = { goal: "g", files: ["a.go"], business_rules: ["b"], validation_rules: ["v"], error_handling: ["e"], state_transitions: ["s"], contract_obligations: ["o"], constraints: { scope_roots: ["."] }, verification: [{ command: "go test ./..." }], skillFamilies: [], provides: ["OBL-001"], consumes: ["OBL-002"], evidence_for: ["OBL-001"] };
+  const pack = { content_json: JSON.stringify({ content, requirements: [] }), version: 1, id: "wip-1", status: "active", content_hash: "sha256:x" };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+  const xml = renderCanonicalInstructionPackXml(item as any, pack as any);
+  assert.match(xml, /<contract_interfaces><provides><obligation>OBL-001<\/obligation><\/provides><consumes><obligation>OBL-002<\/obligation><\/consumes>/);
+  assert.match(xml, /<evidence_for><obligation>OBL-001<\/obligation><\/evidence_for><\/contract_interfaces>/);
+});
+
+test("closing a leaf notifies the owner with dependency-ready next work", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /"work-item", "status", taskId, "done"[\s\S]{0,900}readyLeafIds\(/);
+});
+
+test("scan fanout retries only failed sections once with the exact parser error", () => {
+  const valid = `<scout_evidence section="architecture" confidence="high"><finding>Uses SQLite</finding><verification>go test ./...</verification><risks></risks><sources><source path="cmd/pic/main.go">DB open</source></sources></scout_evidence>`;
+  const invalid = "prose without xml";
+  const wave = planScanRetryWave(
+    [
+      { exitCode: 0, runId: "run-1" },
+      { exitCode: 1, runId: "run-2", errorMessage: "spawn failed" },
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+    ] as any,
+    [valid, invalid],
+  );
+  assert.equal(wave.length, 2);
+  assert.deepEqual(wave.map((entry) => entry.index), [0, 1]);
+  assert.match(wave[0]!.error, /missing <scope>/);
+  assert.equal(wave[1]!.error, "spawn failed");
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  assert.match(prompts, /SCAN_FANOUT_RETRY_LIMIT = 1/);
+  assert.match(prompts, /planScanRetryWave\(/);
+  assert.match(prompts, /Previous output was invalid/);
+});
+
+test("primer context blocks dispatch when a predecessor checkpoint or artifact is missing", () => {
+  const stages = ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"];
+  const workItem = { id: "wi-1", type: "epic", title: "Aggregate" };
+  // rri approved but its bound artifact row is absent: vision dispatch must fail
+  // closed naming rri instead of continuing with reduced context.
+  const missingArtifact = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [{ stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" }],
+      artifacts: [{ id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" }],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(missingArtifact.missing, ["rri"]);
+
+  // All predecessors present: digests bind checkpoint revision and artifact.
+  const complete = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: "h-rri", decision_type: "approved" },
+      ],
+      artifacts: [
+        { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
+        { id: "wia-rri", stage: "rri", revision: 2, content_hash: "h-rri", content: "<rri/>" },
+      ],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(complete.missing, []);
+  assert.deepEqual(complete.digests.map((digest) => digest.stage), ["scan", "rri"]);
+  assert.equal(complete.digests[1]!.artifact_revision, 2);
+
+  // A predecessor with no checkpoint at all is also missing.
+  const noCheckpoint = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [{ stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-rri", decision_type: "approved" }],
+      artifacts: [{ id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-rri", content: "<rri/>" }],
+    },
+    stages,
+    "contracts",
+  );
+  assert.deepEqual(noCheckpoint.missing, ["scan", "vision", "blueprint"]);
+
+  // Rejected checkpoints never supply context...
+  const rejected = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-rri", decision_type: "rejected" },
+      ],
+      artifacts: [
+        { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
+        { id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-rri", content: "<rri/>" },
+      ],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(rejected.missing, ["rri"]);
+
+  // ...and neither do checkpoints whose hash disagrees with the bound artifact.
+  const hashMismatch = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-stale", decision_type: "approved" },
+      ],
+      artifacts: [
+        { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
+        { id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-current", content: "<rri/>" },
+      ],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(hashMismatch.missing, ["rri"]);
+
+  // The newest valid approved revision wins; an older approved checkpoint
+  // supplies context when the newest one was rejected.
+  const superseded = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 1, content_hash: "h-rri-1", decision_type: "approved" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: "h-rri-2", decision_type: "rejected" },
+      ],
+      artifacts: [
+        { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
+        { id: "wia-rri", stage: "rri", revision: 1, content_hash: "h-rri-1", content: "<rri v1/>" },
+        { id: "wia-rri", stage: "rri", revision: 2, content_hash: "h-rri-2", content: "<rri v2/>" },
+      ],
+    },
+    stages,
+    "vision",
+  );
+  assert.deepEqual(superseded.missing, []);
+  assert.equal(superseded.digests.find((digest) => digest.stage === "rri")?.artifact_revision, 1);
+
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  assert.match(prompts, /missing\.length[\s\S]{0,200}throw new Error/);
+  assert.match(prompts, /planning stage \$\{stage\} is missing approved/);
 });

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
+  buildStagePrimer,
+  buildWorkProgressLedger,
   assertPlanningHandoffAttributes,
   buildAggregateVerifyPrompt,
   buildPlanningHandoffXml,
@@ -12,6 +14,7 @@ import {
   buildWorkItemReviewerHandoff,
   buildWorkItemScanPrompt,
   formatWorkItemChecklist,
+  latestRriTScenarios,
   normalizePlanningHandoffAttributes,
   parsePlanningHandoffAttributes,
 } from "./work-item-prompts.ts";
@@ -85,6 +88,127 @@ test("aggregate verification handoff precedes the single owner decision", () => 
   assert.match(prompt, /Do not call owner acceptance/);
 });
 
+test("aggregate verification handoff loads persisted scenarios before contractor grading", () => {
+  const artifact = JSON.stringify({
+    methodology: "rri-t",
+    personas: ["QA / Tester"],
+    scenarios: [{ id: "RRI-T-1", persona: "QA / Tester", dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-1", procedure: "submit the empty form → inline error is shown", remediation_hint: "Assert the error text" }],
+    not_applicable: [],
+    open_blockers: [],
+  });
+  const prompt = buildAggregateVerifyPrompt({
+    work_item: { id: "wi-epic", title: "Release" },
+    children: [{ id: "wi-child", title: "Child", status: "done" }],
+    artifacts: [{ id: "wia-1", work_item_id: "wi-epic", stage: "rri_t_scenarios", revision: 1, content_hash: "hash-1", content: artifact }],
+  });
+  // persisted artifact, not in-memory persona output
+  assert.match(prompt, /Persisted RRI-T Scenarios/);
+  assert.match(prompt, /Loaded from artifact wia-1 \(revision 1, content hash hash-1\) — never from in-memory persona output/);
+  assert.match(prompt, /RRI-T-1/);
+  assert.match(prompt, /Do not\s+re-run persona subagents/i);
+  // soft owner gate: explicit trim/defer honored, no response proceeds without stalling
+  assert.match(prompt, /Owner Scenario Gate \(soft\)/);
+  assert.match(prompt, /trim or defer/i);
+  assert.match(prompt, /without stalling/);
+  // contractor-only execution and grading with not_applicable reasons
+  assert.match(prompt, /contractor only/);
+  assert.match(prompt, /no subagent executes procedures or produces grades/);
+  assert.match(prompt, /not_applicable with a concrete reason/);
+  assert.match(prompt, /instead of failing verification/);
+  assert.match(prompt, /FAIL blocks aggregate verification/);
+  // submission paths to the canonical aggregate verification action
+  assert.match(prompt, /verify_aggregate_work_item/);
+  assert.match(prompt, /rri_t_evidence_json/);
+  assert.match(prompt, /actor_role=contractor/);
+});
+
+test("aggregate verification blocks when no scenario artifact was persisted", () => {
+  const prompt = buildAggregateVerifyPrompt({ work_item: { id: "wi-epic", title: "Release" }, children: [] });
+  assert.match(prompt, /No persisted rri_t_scenarios artifact was found/);
+  assert.match(prompt, /blocked until the authored scenarios are saved before execution/);
+  assert.match(prompt, /verify_aggregate_work_item/);
+});
+
+test("aggregate scenario selection stays on the aggregate's own artifact, never a parent's higher revision", () => {
+  const parentArtifact = JSON.stringify({
+    methodology: "rri-t",
+    personas: ["QA / Tester"],
+    scenarios: [{ id: "PARENT-REV3", persona: "QA / Tester", dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-P", procedure: "parent scenario must not leak", remediation_hint: "" }],
+    not_applicable: [],
+    open_blockers: [],
+  });
+  const ownArtifact = JSON.stringify({
+    methodology: "rri-t",
+    personas: ["QA / Tester"],
+    scenarios: [{ id: "FEATURE-REV1", persona: "QA / Tester", dimension: "D3", stress_axis: "ERROR", requirement_id: "REQ-1", procedure: "submit the empty form → inline error is shown", remediation_hint: "Assert the error text" }],
+    not_applicable: [],
+    open_blockers: [],
+  });
+  // Merged-data shape produced by withInheritedParentWorkflowArtifacts: the
+  // parent's higher-revision scenarios appear next to the aggregate's own rows.
+  const merged = {
+    work_item: { id: "wi-feature", title: "Feature" },
+    inherited_parent_work_item: { id: "wi-epic", title: "Epic" },
+    children: [{ id: "wi-child", title: "Child", status: "done" }],
+    artifacts: [
+      { id: "wia-own", work_item_id: "wi-feature", stage: "rri_t_scenarios", revision: 1, content_hash: "hash-own", content: ownArtifact },
+      { id: "wia-parent", work_item_id: "wi-epic", stage: "rri_t_scenarios", revision: 3, content_hash: "hash-parent", content: parentArtifact },
+    ],
+  };
+  const selected = latestRriTScenarios(merged);
+  assert.equal(selected?.artifact.id, "wia-own");
+  assert.equal(selected?.artifact.revision, 1);
+  const prompt = buildAggregateVerifyPrompt(merged);
+  assert.match(prompt, /Loaded from artifact wia-own \(revision 1/);
+  assert.match(prompt, /FEATURE-REV1/);
+  assert.doesNotMatch(prompt, /PARENT-REV3/);
+});
+
+test("tool persists the scenario artifact before execution and never re-authors at grading submission", () => {
+  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  // save-before-execution: persona authoring output is persisted as the rri_t_scenarios artifact
+  assert.match(tool, /artifact-save[\s\S]{0,80}rri_t_scenarios/);
+  assert.match(tool, /await scheduler\.runRriT\(data\)/);
+  // the verify action compiles graded evidence from the persisted artifact via the canonical --rri-t-json path
+  const verifyCase = tool.slice(tool.indexOf('case "verify_aggregate_work_item"'), tool.indexOf('case "accept_aggregate_work_item"'));
+  assert.doesNotMatch(verifyCase, /runRriT/);
+  assert.match(verifyCase, /compileRriTSubmission/);
+  assert.match(verifyCase, /--rri-t-json/);
+  // grading happens before submission, so a missing persisted artifact blocks instead of executing an unpersisted list
+  assert.ok(verifyCase.indexOf("compileRriTSubmission") < verifyCase.indexOf('"aggregate-verify"'));
+  // the aggregate's own persisted scenarios are graded, never parent-inherited rows
+  assert.doesNotMatch(verifyCase, /withInheritedParentWorkflowArtifacts/);
+});
+
+test("RRI-T grading compiler dedupes on the id-based identity and rejects duplicate deferred dispositions", () => {
+  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  const compile = tool.slice(tool.indexOf("function rriTScenarioIdentity"), tool.indexOf("export function registerTaskManagerTool"));
+  // The identity contract is id-based (dimension|stress_axis|requirement_id|id) —
+  // never the persona — so scenarios sharing persona, dimension, stress axis, and
+  // requirement stay distinct by id, and the compiled outcome carries the
+  // persisted scenario id for the canonical Go validator.
+  assert.match(compile, /\$\{scenario\.dimension\}\|\$\{scenario\.stress_axis\}\|\$\{scenario\.requirement_id\}\|\$\{scenario\.id\}/);
+  assert.doesNotMatch(compile, /\$\{scenario\.persona\}\|\$\{scenario\.dimension\}/);
+  assert.match(compile, /scenarios\.push\(\{ id: match\.id,/);
+  // One persisted scenario receives exactly one outcome: the shared outcome set
+  // rejects a duplicate deferred disposition (the same scenario deferred twice via
+  // not_applicable) as well as a scenario graded and deferred at once.
+  assert.match(compile, /outcomes\.has\(key\)/);
+  assert.match(compile, /received more than one outcome/);
+});
+
+test("graded submission requires persisted identities, executed evidence, and not_applicable reasons", () => {
+  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  const compile = tool.slice(tool.indexOf("function compileRriTSubmission"), tool.indexOf("export function registerTaskManagerTool"));
+  assert.match(compile, /persisted rri_t_scenarios artifact is missing/);
+  assert.match(compile, /not in the persisted rri_t_scenarios artifact/);
+  assert.match(compile, /requires executed evidence/);
+  assert.match(compile, /result must be PASS, ACCEPTABLE, PAINFUL, or FAIL/);
+  assert.match(compile, /not_applicable scenario .* requires a concrete reason/);
+  assert.match(compile, /received more than one outcome/);
+  assert.match(compile, /must reuse the persisted procedure verbatim/);
+});
+
 test("Work Item prompts use only canonical lifecycle actions", () => {
   const prompts = [
     buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "scan" }, { title: "Canonical item" }),
@@ -136,4 +260,127 @@ test("task-worker escalation ladder is prompt-encoded and fail-closed", () => {
   assert.match(source, /status=\\"escalated\\"|status="escalated"/);
   assert.match(source, /checked_sources/);
   assert.match(source, /Never finish with a prose question inside a success summary/);
+});
+
+test("stage primer carries lineage, bounded approved digests, repo conventions, and definition of done", () => {
+  const longContent = "R".repeat(4000);
+  const primer = buildStagePrimer({
+    work_item_id: "wi-1",
+    stage: "blueprint",
+    profile: { version: 3, contentHash: "sha256:prof", stages: ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"] },
+    predecessor_checkpoint: { stage: "vision", artifact_id: "war-9", artifact_revision: 2, content_hash: "sha256:vis" },
+    approved_digests: [
+      { stage: "scan", artifact_id: "war-1", artifact_revision: 1, content_hash: "sha256:scan", content: longContent },
+      { stage: "rri", artifact_id: "war-2", artifact_revision: 1, content_hash: "sha256:rri", content: "requirements digest" },
+    ],
+  });
+  assert.match(primer, /Work Item: wi-1/);
+  assert.match(primer, /Stage: blueprint/);
+  assert.match(primer, /profile v3 \(sha256:prof\)/);
+  assert.match(primer, /Predecessor: checkpoint vision@2 \(sha256:vis\)/);
+  assert.match(primer, /load_planning_artifact/);
+  assert.match(primer, /scan @1 \(sha256:scan\)/);
+  assert.match(primer, /requirements digest/);
+  // Digest budget: an oversized artifact is truncated with an ellipsis marker.
+  assert.ok(primer.length < 4000, `primer too long: ${primer.length}`);
+  assert.match(primer, /R{1000}…/s);
+  assert.match(primer, /DEFINITION OF DONE/);
+  assert.match(primer, /Do not save or approve owner decisions yourself/);
+});
+
+test("progress ledger heads a relaunch with attempt identity and trimmed prior evidence", () => {
+  const ledger = buildWorkProgressLedger({
+    activePackId: "wip-9",
+    activePackVersion: 4,
+    attempt: 3,
+    priorReports: [
+      { id: "cr-1", status: "partial", summary: "Implemented the parser but verification failed", created_at: "2026-01-01 00:00:00" },
+    ],
+    failedVerifications: [
+      { command: "go test ./...", evidence: "FAIL TestX\n    ".concat("x".repeat(2000)) },
+    ],
+    escalationContext: "\n\n## ESCALATION RESOLUTIONS\n- Escalation esc-1: use sqlite\n",
+  });
+  assert.match(ledger, /This is attempt 3 of TIP-004 \(pack wip-9 v4\) — continue, do not re-plan from scratch/);
+  assert.match(ledger, /Attempt evidence ledger/);
+  assert.match(ledger, /cr-1 .*partial.*Implemented the parser/);
+  assert.match(ledger, /go test \.\/\.\.\./);
+  // Failed verification output is trimmed to a bounded budget.
+  assert.ok(ledger.length < 3000, `ledger too long: ${ledger.length}`);
+  assert.match(ledger, /ESCALATION RESOLUTIONS/);
+});
+
+test("scheduler stage prompts dispatch the primer and the ledger at the right stages", () => {
+  const source = readFileSync(new URL("../pipeline/stage-prompts.ts", import.meta.url), "utf8");
+  assert.match(source, /isPlanningStage\(stage\)\)[\s\S]{0,700}buildStagePrimer/);
+  assert.match(source, /buildWorkProgressLedger\(/);
+  // Attempt numbering reads the persisted run counter; escalations flow
+  // through the ledger's context argument on the canonical dispatch path.
+  assert.match(source, /Number\(run\.attempt\) \|\| 0/);
+  assert.match(source, /escalationContext: buildEscalationResolutionContext\(data, runs\)/);
+});
+
+test("contractor verification prompt separates environment prerequisites from required commands", () => {
+  const prompt = buildTaskVerifyPrompt({
+    work_item: { id: "wi-9", title: "Prereq check" },
+    instruction_packs: [{ id: "wip-9", status: "active", content_json: JSON.stringify({ verification: [
+      { command: "pytest", required: true, setup_commands: ["docker compose up -d"], expected: "all pass" },
+    ] }) }],
+    completion_reports: [{ id: "wicr-9", instruction_pack_id: "wip-9", status: "done" }],
+  });
+  assert.match(prompt, /PREREQUISITES/);
+  assert.match(prompt, /docker compose up -d/);
+  assert.match(prompt, /environment_blocked/i);
+  assert.match(prompt, /do not modify infrastructure/i);
+  assert.match(prompt, /Required Commands/);
+  assert.match(prompt, /pytest/);
+});
+
+test("Blueprint prompt publishes the solution spec with owner-approved seams", () => {
+  const prompt = buildWorkItemContinuePrompt({ work_item_id: "wi-b", next_stage: "blueprint" }, { title: "Blueprint", type: "epic" });
+  assert.match(prompt, /"decomposition_policy_version":2/);
+  assert.match(prompt, /verification_seams/);
+  assert.match(prompt, /highest seam that isolates each requirement under test/);
+  assert.match(prompt, /Do not include a task_decomposition_preview/);
+  assert.doesNotMatch(prompt, /task_decomposition_preview with estimated_tasks/);
+  assert.match(prompt, /"verification_seams":true/);
+  // The tool gate accepts the policy-dependent fifth check from the draft.
+  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  assert.match(tool, /decomposition_policy_version[\s\S]{0,120}"verification_seams", "nothing_missing"/);
+  const primer = buildStagePrimer({ work_item_id: "wi-b", stage: "blueprint", approved_digests: [] });
+  assert.match(primer, /owner-approved verification_seams \(decomposition_policy_version 2, no task_decomposition_preview\)/);
+});
+
+test("Contract prompt binds the approved Blueprint lineage and classifies obligations", () => {
+  const prompt = buildWorkItemContinuePrompt({ work_item_id: "wi-c", next_stage: "contracts" }, { title: "Contract", type: "epic" });
+  assert.match(prompt, /"decomposition_policy_version":2/);
+  assert.match(prompt, /source_blueprint/);
+  assert.match(prompt, /artifact_id/);
+  assert.match(prompt, /user_behavior, data_invariant, interface_contract, security, migration_rule, operational_rule, integration_gate/);
+  assert.match(prompt, /a seam that the approved Blueprint's verification_seams declares/);
+});
+
+test("Task Graph prompt encodes tracer-bullet decomposition with justified exceptions", () => {
+  const prompt = buildWorkItemContinuePrompt({ work_item_id: "wi-t", next_stage: "task_graph" }, { title: "Graph", type: "epic" });
+  assert.match(prompt, /"decomposition_policy_version":2/);
+  assert.match(prompt, /bind "source_contract" to the exact approved Contract lineage/);
+  assert.match(prompt, /vertical by default/);
+  assert.match(prompt, /What behavior becomes possible\?/);
+  assert.match(prompt, /What is its direct blocker\?/);
+  assert.match(prompt, /Can it fit one focused execution session\?/);
+  assert.match(prompt, /exception_reason/);
+  assert.match(prompt, /paired_contract_node/);
+  assert.match(prompt, /depends_on closure/);
+  assert.match(prompt, /integration_gate/);
+  assert.match(prompt, /depends_on_rationale/);
+  assert.match(prompt, /effective acceptance contract/);
+  assert.match(prompt, /seam is a verification seam the approved Blueprint declares/);
+  // Reference, don't restate: a single-requirement node resolves its acceptance.
+  assert.match(prompt, /resolves that requirement's acceptance/);
+  const primer = buildStagePrimer({ work_item_id: "wi-t", stage: "task_graph", approved_digests: [] });
+  assert.match(primer, /five granularity questions/);
+  // Standalone graphs have no Blueprint/Contract predecessors and stay on v1.
+  const standalone = buildWorkItemContinuePrompt({ work_item_id: "wi-s", next_stage: "task_graph" }, { title: "Leaf", type: "task" });
+  assert.doesNotMatch(standalone, /"decomposition_policy_version":2/);
+  assert.match(standalone, /stays on policy v1/);
 });

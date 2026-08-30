@@ -219,7 +219,7 @@ func TestPipelineStageProfileBinding(t *testing.T) {
 		t.Fatalf("stale profile hash accepted: %s", out)
 	}
 	// Approve scan so rri is the eligible next planning stage.
-	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-bind-scan','`+id+`','scan',1,'<scan/>','scan-bind-hash'); INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-bind-scan','`+id+`','scan','wia-bind-scan',1,'scan-bind-hash','approved');`)
+	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-bind-scan','`+id+`','scan',1,'<scan/>','scan-bind-hash'); INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-bind-scan','`+id+`','scan','wia-bind-scan',1,'scan-bind-hash','accepted');`)
 	// Correct bound hash is accepted for the next eligible stage.
 	bound := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "rri", "--profile-hash", expectedHash))
 	if bound["profile_version"] != float64(1) {

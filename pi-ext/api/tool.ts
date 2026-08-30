@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { execPic } from "../core/cli-helpers";
 import { buildReviewContext } from "../tasking/settings";
-import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemDebugPrompt } from "../tasking/work-item-prompts";
+import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemDebugPrompt, latestRriTScenarios } from "../tasking/work-item-prompts";
 import { assertTaskManagerActionAllowed } from "../tasking/agent-capabilities.ts";
 import { parseCanonicalScanReportXml, renderScanReportMarkdown, prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
 import { parseRriReportJson, renderRriReportMarkdown } from "../reporting/rri-report.ts";
@@ -44,6 +44,87 @@ function rriDraftRoot(cwd: string): string {
   return project.root_path;
 }
 
+// RRI-T scenario identity constraint: the id-based identity
+// (dimension|stress_axis|requirement_id|id) — shared with the canonical Go
+// validator and the authoring merge — never the persona, so two persisted
+// scenarios may share persona, dimension, stress axis, and requirement while
+// remaining distinct by id, and one persisted scenario can be deferred at most
+// once.
+function rriTScenarioIdentity(scenario: any): string {
+  return `${scenario.dimension}|${scenario.stress_axis}|${scenario.requirement_id}|${scenario.id}`;
+}
+
+// RRI-T save-before-execution (OB-5): persist the validated persona authoring
+// result as the rri_t_scenarios artifact before any prompt asks the contractor
+// to execute or grade; a resumed verification reuses the saved artifact instead
+// of re-running persona subagents, and an authoring or save failure surfaces as
+// a blocked aggregate verification rather than an unpersisted execution list.
+// Subagent sessions only observe lifecycle state and never author scenarios.
+async function ensureRriTScenariosArtifact(scheduler: PipelineScheduler, data: any, cwd: string): Promise<void> {
+  if (process.env.PI_TASK_AGENT_NAME) return;
+  if (latestRriTScenarios(data)) return;
+  const workItemId = data?.work_item?.id;
+  if (!workItemId) throw new Error("RRI-T scenario authoring requires a Work Item");
+  const authored = await scheduler.runRriT(data);
+  const saved = execPic(["work-item", "artifact-save", workItemId, "rri_t_scenarios", authored], cwd);
+  if (saved.error) throw new Error(`RRI-T scenario artifact save failed: ${saved.error}`);
+}
+
+// RRI-T contractor grading (OB-6/OB-7): compile the submission from the
+// persisted scenario artifact and the contractor's in-session evidence; each
+// retained scenario receives exactly one outcome (PASS/ACCEPTABLE/PAINFUL/FAIL
+// with evidence, or not_applicable with a reason that stays out of the
+// executable scenarios), and FAIL blocking plus PAINFUL remediation/deferral
+// remain authoritative on the Go validation side.
+function compileRriTSubmission(data: any, gradedJson: string): string {
+  const persisted = latestRriTScenarios(data);
+  if (!persisted) throw new Error("persisted rri_t_scenarios artifact is missing; authoring was never saved, so aggregate verification is blocked instead of executing an unpersisted list");
+  let graded: { scenarios?: any[]; not_applicable?: any[] };
+  try {
+    graded = JSON.parse(gradedJson || "");
+  } catch {
+    throw new Error("rri_t_evidence_json must be a JSON object with scenarios and/or not_applicable arrays");
+  }
+  if (!graded || typeof graded !== "object" || Array.isArray(graded) || (!Array.isArray(graded.scenarios) && !Array.isArray(graded.not_applicable))) {
+    throw new Error("rri_t_evidence_json must be a JSON object with scenarios and/or not_applicable arrays");
+  }
+  const persistedByIdentity = new Map<string, any>();
+  for (const scenario of persisted.content.scenarios || []) {
+    const key = rriTScenarioIdentity(scenario);
+    if (!persistedByIdentity.has(key)) persistedByIdentity.set(key, scenario);
+  }
+  const outcomes = new Set<string>();
+  const scenarios: any[] = [];
+  for (const grade of graded.scenarios || []) {
+    const key = rriTScenarioIdentity(grade);
+    const match = persistedByIdentity.get(key);
+    if (!match) throw new Error(`graded scenario ${key} is not in the persisted rri_t_scenarios artifact`);
+    if (outcomes.has(key)) throw new Error(`scenario ${key} received more than one outcome`);
+    outcomes.add(key);
+    if (String(grade.procedure || "").trim() !== String(match.procedure || "").trim()) throw new Error(`graded scenario ${key} must reuse the persisted procedure verbatim`);
+    if (!String(grade.evidence || "").trim()) throw new Error(`graded scenario ${key} requires executed evidence`);
+    if (!["PASS", "ACCEPTABLE", "PAINFUL", "FAIL"].includes(String(grade.result || ""))) throw new Error(`graded scenario ${key} result must be PASS, ACCEPTABLE, PAINFUL, or FAIL`);
+    scenarios.push({ id: match.id, persona: match.persona, dimension: match.dimension, stress_axis: match.stress_axis, requirement_id: match.requirement_id, procedure: match.procedure, evidence: String(grade.evidence).trim(), result: String(grade.result).trim() });
+  }
+  const notApplicable: any[] = [];
+  for (const grade of graded.not_applicable || []) {
+    const key = rriTScenarioIdentity(grade);
+    const match = persistedByIdentity.get(key);
+    if (!match) throw new Error(`not_applicable scenario ${key} is not in the persisted rri_t_scenarios artifact`);
+    if (outcomes.has(key)) throw new Error(`scenario ${key} received more than one outcome`);
+    outcomes.add(key);
+    if (!String(grade.reason || "").trim()) throw new Error(`not_applicable scenario ${key} requires a concrete reason`);
+    notApplicable.push({ id: match.id, persona: match.persona, dimension: match.dimension, stress_axis: match.stress_axis, requirement_id: match.requirement_id, reason: String(grade.reason).trim() });
+  }
+  return JSON.stringify({
+    methodology: "rri-t",
+    personas: persisted.content.personas || [],
+    scenarios,
+    not_applicable: [...(Array.isArray(persisted.content.not_applicable) ? persisted.content.not_applicable : []), ...notApplicable],
+    open_blockers: persisted.content.open_blockers || [],
+  });
+}
+
 export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: PipelineScheduler) {
     pi.registerTool({
       name: "task_manager",
@@ -68,6 +149,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         notes: Type.Optional(Type.String({ description: "Concise note or summary to append" })),
         query: Type.Optional(Type.String({ description: "Search query" })),
         summary: Type.Optional(Type.String({ description: "Workflow artifact summary" })),
+        rri_t_evidence_json: Type.Optional(Type.String({ description: "Graded RRI-T scenario JSON (persisted scenarios plus per-scenario evidence/result or not_applicable with reason) submitted by the contractor with verify_aggregate_work_item" })),
         verification_status: Type.Optional(StringEnum(["passed", "failed", "partial", "blocked"] as const)),
         actor_role: Type.Optional(Type.String({ description: "Explicit actor role; owner-only actions require owner confirmation from the user" })),
         event_type: Type.Optional(Type.String({ description: "Debug trigger type" })),
@@ -282,8 +364,13 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             const draft = loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id);
             let checkpoint: Record<string, unknown>;
             try { checkpoint = JSON.parse(params.content) as Record<string, unknown>; }
-            catch { return { content: [{ type: "text", text: "Error: content must be a JSON object with the five checkpoint booleans: architecture, design, requirements, task_decomposition, nothing_missing" }], details: {}, isError: true }; }
-            const checks = ["architecture", "design", "requirements", "task_decomposition", "nothing_missing"];
+            catch { return { content: [{ type: "text", text: "Error: content must be a JSON object with the five checkpoint booleans: architecture, design, requirements, task_decomposition (verification_seams for decomposition policy v2 drafts), nothing_missing" }], details: {}, isError: true }; }
+            // The fifth check is policy-dependent: decomposition policy v2 drafts
+            // are reviewed for verification seams, v1 drafts for task decomposition.
+            const policyVersion = (JSON.parse(draft.content) as { decomposition_policy_version?: number }).decomposition_policy_version ?? 1;
+            const checks = policyVersion === 2
+              ? ["architecture", "design", "requirements", "verification_seams", "nothing_missing"]
+              : ["architecture", "design", "requirements", "task_decomposition", "nothing_missing"];
             if (!checks.every((key) => checkpoint[key] === true)) return { content: [{ type: "text", text: `Error: all five Blueprint checks must pass; set each to true: ${checks.join(", ")}` }], details: {}, isError: true };
             const reviewed = saveBlueprintDraft(ctx.cwd, params.id, draft.content, checkpoint);
             blueprintPresentation = renderBlueprintReportMarkdown(parseBlueprintReportJson(draft.content)).replaceAll("- [ ]", "- [x]");
@@ -365,11 +452,19 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           }
           case "verify_aggregate_work_item": {
             if (!params.id || !params.verification_status || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, verification_status, and actor_role=contractor required" }], details: {}, isError: true };
-            const aggregateData = withInheritedParentWorkflowArtifacts(execPic(["show", params.id], ctx.cwd), ctx.cwd);
+            // RRI-T scenario ownership (OB-5): compile the grading submission from
+            // the aggregate's own persisted scenarios only; parent-inherited rows
+            // are never a valid scenario source for a feature aggregate, so the
+            // aggregate is loaded directly instead of merged with parent artifacts.
+            const aggregateData = execPic(["show", params.id], ctx.cwd);
             if (!aggregateData.work_item) return { content: [{ type: "text", text: `Error: ${aggregateData.error || "Work Item not found"}` }], details: {}, isError: true };
             let rriTJson = "";
             try {
-              rriTJson = await pipelineScheduler.runRriT(aggregateData);
+              // RRI-T grading submission (OB-6): compile the graded scenario
+              // evidence from the persisted rri_t_scenarios artifact only; the
+              // contractor grades in the main session, so the submission never
+              // re-runs persona subagents and fails closed without a saved list.
+              rriTJson = compileRriTSubmission(aggregateData, params.rri_t_evidence_json || "");
             } catch (error) {
               const message = error instanceof Error ? error.message : String(error);
               return { content: [{ type: "text", text: `RRI-T verification blocked: ${message}` }], details: { error: message }, isError: true };
@@ -446,7 +541,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             const data = execPic(["show", params.id], ctx.cwd);
             if (!data.work_item) return { content: [{ type: "text", text: `Error: ${data.error || "Work Item not found"}` }], details: {}, isError: true };
             const status = execPic(["work-item", "workflow-status", params.id], ctx.cwd);
-            if (!status.error && (status.next_stage === "vision" || status.next_stage === "contracts")) {
+            if (!status.error && (status.next_stage === "rri" || status.next_stage === "vision" || status.next_stage === "contracts")) {
               const prompt = buildWorkItemContinuePrompt(status, data.work_item);
               return { content: [{ type: "text", text: prompt }], details: { action: "work_on_work_item", workItem: data.work_item, next_stage: status.next_stage, contractor: true } };
             }
@@ -515,7 +610,17 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             const parent = execPic(["show", parentID], ctx.cwd);
             const parentStatus = execPic(["work-item", "workflow-status", parentID], ctx.cwd);
             if (parentStatus.next_stage === "aggregate_verification") {
-              return { content: [{ type: "text", text: buildAggregateVerifyPrompt(parent) }], details: { verification: result, next_stage: "aggregate_verification", work_item: parent.work_item } };
+              try {
+                // RRI-T save-before-execution (OB-5): persist the authored
+                // scenario artifact before the contractor is asked to execute or
+                // grade anything; a saved artifact is reused on resumption.
+                await ensureRriTScenariosArtifact(pipelineScheduler, parent, ctx.cwd);
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Aggregate verification blocked: ${message}` }], details: { verification: result, next_stage: "aggregate_verification", error: message }, isError: true };
+              }
+              const parentWithScenarios = execPic(["show", parentID], ctx.cwd);
+              return { content: [{ type: "text", text: buildAggregateVerifyPrompt(parentWithScenarios) }], details: { verification: result, next_stage: "aggregate_verification", work_item: parentWithScenarios.work_item } };
             }
             try {
               const pipeline = await pipelineScheduler.start(parentID, ctx);
@@ -561,7 +666,18 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         if (!result.error && params.action === "work_item_workflow_status" && ["aggregate_verification", "owner_acceptance", "merge_pending"].includes(result.next_stage)) {
           const data = execPic(["show", params.id!], ctx.cwd);
           if (data.error) text = `Error: ${data.error}`;
-          else if (result.next_stage === "aggregate_verification") text = buildAggregateVerifyPrompt(data);
+          else if (result.next_stage === "aggregate_verification") {
+            try {
+              // RRI-T save-before-execution (OB-5): when verification resumes,
+              // reuse the persisted scenarios and only author when never saved;
+              // submission later blocks unless the artifact is present.
+              await ensureRriTScenariosArtifact(pipelineScheduler, data, ctx.cwd);
+              text = buildAggregateVerifyPrompt(execPic(["show", params.id!], ctx.cwd));
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Aggregate verification blocked: ${message}` }], details: { ...result, error: message }, isError: true };
+            }
+          }
           else text = buildWorkItemContinuePrompt(result, data.work_item);
         }
   

@@ -312,11 +312,6 @@ func TestPromotionGateProductionEntrypoint(t *testing.T) {
 	db, workItemID, profileID, contentHash, stages := productionPromotionTestDB(t)
 	defer db.Close()
 
-	// The candidate is an epic Work Item; register the matching epics ledger row
-	// so requirements can reference it by epic_id.
-	if _, err := db.Exec(`INSERT INTO epics(id,title) VALUES(?,?)`, workItemID, "Promotion epic"); err != nil {
-		t.Fatal(err)
-	}
 	for _, key := range []string{"REQ-PROMOTION-GATE", "REQ-PIPELINE-PROFILES"} {
 		if _, err := db.Exec(`INSERT INTO requirements(id,epic_id,requirement_key,title,description,acceptance_criteria,priority) VALUES(?,?,?,?,?,?,'tier2')`, "req-"+strings.ToLower(key), workItemID, key, key, "desc", "Given a candidate profile When evaluated Then evidence bound"); err != nil {
 			t.Fatal(err)

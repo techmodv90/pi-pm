@@ -31,6 +31,7 @@ test("mergeParentWorkflowArtifacts inherits canonical Work Item artifacts by par
     },
   );
 
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   assert.deepEqual(merged.artifacts.map((artifact: any) => artifact.id), ["child-scan", "parent-scan", "parent-design"]);
   assert.equal(merged.inherited_parent_work_item.id, "parent");
 });

@@ -11,6 +11,7 @@ import { normalizeWorkflowMode, workflowModeBadge } from "./workflow-modes.ts";
  * Return a stable model identifier for reporting only.
  * Expects a pi model object and returns provider/id without changing models.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function modelKey(model: any): string | undefined {
   if (!model) return undefined;
   return `${model.provider || "unknown"}/${model.id}`;
@@ -32,16 +33,20 @@ export function extractTaskIdFromWorkPrompt(prompt: string): string | null {
  * Build a review request from persisted task context and repository diff.
  * Expects a task id and cwd; returns review markdown plus task/diff metadata.
  */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function buildReviewContext(taskId: string, cwd: string): { text?: string; task?: any; gitDiff?: string; changedFiles?: string[]; error?: string } {
   const data = execPic(["show", taskId], cwd);
   if (!data.work_item) return { error: data.error || "Work Item not found" };
 
   const task = data.work_item;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const activePacks = (data.instruction_packs || []).filter((pack: any) => pack.status === "active");
   if (activePacks.length !== 1) return { error: "Review requires exactly one active Task Instruction Pack" };
   const pack = activePacks[0];
   const runs = execPic(["workflow", "pipeline-runs", taskId], cwd);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const activeReview = Array.isArray(runs) ? runs.find((run: any) => run.stage === "review" && ["claimed", "running"].includes(run.status)) : null;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const candidate = Array.isArray(runs) ? runs.find((run: any) => run.id === activeReview?.candidate_run_id && ["worker", "autofix"].includes(run.stage)) : null;
   if (!activeReview || !candidate) return { error: "Review requires a bound Worker candidate pipeline run" };
   if (candidate.instruction_pack_id !== pack.id || Number(candidate.instruction_pack_version) !== Number(pack.version) || candidate.instruction_pack_hash !== pack.content_hash) {
@@ -52,6 +57,7 @@ export function buildReviewContext(taskId: string, cwd: string): { text?: string
   try { candidateReport = readFileSync(`${candidate.async_dir}/output-${candidate.child_index || 0}.log`, "utf8"); } catch { return { error: "Persisted candidate Worker output is unavailable" }; }
   const renderedPack = execPicText(["workflow", "instruction-pack-render", taskId], cwd);
   const items = data.items || [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const doneItems = items.filter((i: any) => i.done);
   const allDone = doneItems.length === items.length && items.length > 0;
 
@@ -86,6 +92,7 @@ export function buildReviewContext(taskId: string, cwd: string): { text?: string
   }
   text += `## Completed Items\n${formatWorkItemChecklist(doneItems, true)}`;
   if (!allDone && items.length > 0) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     text += `\n## Remaining Items\n${formatWorkItemChecklist(items.filter((i: any) => !i.done), false)}`;
   }
   text += `\n## Changed Files\n`;

@@ -368,7 +368,7 @@ func integrationStaleHandoff(t *testing.T, bin, root, home string) {
 	if claim["stage"] != "scan" || persistedText(claim["profile_hash"]) == "" {
 		t.Fatalf("scan claim did not bind profile: %#v", claim)
 	}
-	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-stale','`+id+`','scan',1,'<scan/>','hash-stale'); INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-stale','`+id+`','scan','wia-stale',1,'hash-stale','approved');`)
+	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-stale','`+id+`','scan',1,'<scan/>','hash-stale'); INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-stale','`+id+`','scan','wia-stale',1,'hash-stale','accepted');`)
 	// A stale persisted profile hash is not silently retried.
 	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "rri", "--profile-hash", "deadbeef"); !strings.Contains(out, "profile hash changed") {
 		t.Fatalf("stale profile hash accepted: %s", out)

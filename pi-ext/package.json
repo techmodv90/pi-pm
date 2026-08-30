@@ -11,7 +11,8 @@
     "build:web": "cd ../go-pic/web && npm run build",
     "build:pic": "cd ../go-pic && mkdir -p dist && go build -o dist/pic ./cmd/pic",
     "check": "tsc --noEmit",
-    "test": "node --experimental-strip-types --test core/*.test.ts tasking/*.test.ts pipeline/*.test.ts subagent/*.test.ts ui/*.test.ts reporting/*.test.ts"
+    "test": "node --experimental-strip-types --test core/*.test.ts tasking/*.test.ts pipeline/*.test.ts subagent/*.test.ts ui/*.test.ts reporting/*.test.ts",
+    "lint": "eslint pipeline tasking"
   },
   "pi": {
     "extensions": [
@@ -26,7 +27,9 @@
   },
   "devDependencies": {
     "@types/node": "26.2.0",
-    "typescript": "^6.0.3"
+    "eslint": "^9.39.5",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.68.0"
   },
   "dependencies": {
     "fast-xml-parser": "^5.10.1"

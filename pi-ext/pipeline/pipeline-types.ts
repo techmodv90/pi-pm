@@ -53,3 +53,5 @@ export function parsePipelineRuns(value: unknown): PipelineRunRecord[] {
   if (invalid) throw new Error("pic pipeline-runs returned an invalid pipeline run record");
   return value;
 }
+/** Runtime view of one pipeline run record used across scheduler modules. */
+export type PipelineRun = PipelineRunRecord;

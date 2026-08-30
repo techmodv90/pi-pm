@@ -2,9 +2,12 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -48,7 +51,7 @@ func runPic(t *testing.T, bin string, cwd string, home string, args ...string) a
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(clearedPiEnv(), "HOME="+home)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("pic %v failed: %v\n%s", args, err, out)
@@ -64,7 +67,7 @@ func runPicError(t *testing.T, bin string, cwd string, home string, args ...stri
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(clearedPiEnv(), "HOME="+home)
 	out, err := cmd.CombinedOutput()
 	if err == nil {
 		t.Fatalf("pic %v unexpectedly succeeded: %s", args, out)
@@ -100,7 +103,7 @@ func runMarkdown(t *testing.T, bin string, cwd string, home string, args ...stri
 	t.Helper()
 	cmd := exec.Command(bin, args...)
 	cmd.Dir = cwd
-	cmd.Env = append(os.Environ(), "HOME="+home)
+	cmd.Env = append(clearedPiEnv(), "HOME="+home)
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		t.Fatalf("pic %v failed: %v\n%s", args, err, out)
@@ -233,9 +236,9 @@ func TestWorkItemCommandCutover(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	counts := func() string {
-		var value string
-		if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM epics)||':'||(SELECT COUNT(*) FROM tasks)||':'||(SELECT COUNT(*) FROM work_items)`).Scan(&value); err != nil {
+	counts := func() int {
+		var value int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM work_items`).Scan(&value); err != nil {
 			t.Fatal(err)
 		}
 		return value
@@ -253,43 +256,16 @@ func TestWorkItemCommandCutover(t *testing.T) {
 		}
 	}
 	if after := counts(); after != before {
-		t.Fatalf("removed commands mutated storage: before=%s after=%s", before, after)
+		t.Fatalf("removed commands mutated storage: before=%d after=%d", before, after)
 	}
-}
-
-func TestShowPrefersCanonicalHybridWorkItem(t *testing.T) {
-	bin := buildPic(t)
-	root, home := initProject(t, bin)
-	runSQLite(t, filepath.Join(root, ".pi", "tasks.db"), `
-		INSERT INTO tasks(id,title,status,review_status) VALUES('t-hybrid','Legacy','in_progress','pending');
-		INSERT INTO work_items(id,type,title,status,review_status) VALUES('t-hybrid','task','Canonical','done','passed');
-	`)
-
-	shown := asObject(t, runPic(t, bin, root, home, "show", "t-hybrid"))
-	item := asObject(t, shown["work_item"])
-	if item["status"] != "done" || item["review_status"] != "passed" {
-		t.Fatalf("generic show returned stale legacy lifecycle state: %#v", shown)
-	}
-}
-
-func TestShowReportsCanonicalReadinessForHybridWorkItem(t *testing.T) {
-	bin := buildPic(t)
-	root, home := initProject(t, bin)
-	runSQLite(t, filepath.Join(root, ".pi", "tasks.db"), `
-		INSERT INTO tasks(id,title,status) VALUES('t-blocker','Blocker','done'),('t-hybrid','Legacy','open');
-		INSERT INTO work_items(id,type,title,status,review_status) VALUES('t-blocker','task','Blocker','done','passed'),('t-hybrid','task','Canonical','open','pending');
-		INSERT INTO task_dependencies(id,task_id,depends_on_task_id) VALUES('td-hybrid','t-hybrid','t-blocker');
-		INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES('wir-hybrid','t-hybrid','blocks','t-blocker');
-	`)
-
-	shown := asObject(t, runPic(t, bin, root, home, "show", "t-hybrid"))
-	if shown["ready"] != false {
-		t.Fatalf("hybrid Work Item without an active TIP is ready: %#v", shown)
-	}
-	dependencies := shown["dependencies"].([]any)
-	dependency := asObject(t, dependencies[0])
-	if dependency["status"] != "done" || dependency["review_status"] != "passed" {
-		t.Fatalf("generic show returned stale legacy dependency state: %#v", dependency)
+	for _, table := range []string{"epics", "tasks", "epic_events", "task_events", "scan_reports", "rri_sessions", "designs", "completion_reports", "task_instruction_packs", "verification_reports", "escalations"} {
+		var exists int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, table).Scan(&exists); err != nil {
+			t.Fatal(err)
+		}
+		if exists != 0 {
+			t.Fatalf("fresh database created legacy table %s", table)
+		}
 	}
 }
 
@@ -402,27 +378,6 @@ func TestWorkItemSchemaMigration(t *testing.T) {
 	}
 	if eventPayload != `{"unchanged":true}` || eventCreated != "2026-01-03 00:00:00" || violations != 0 {
 		t.Fatalf("historical artifact payload=%q created=%q violations=%d", eventPayload, eventCreated, violations)
-	}
-}
-
-func TestLegacyInstructionPackBackfillsCanonicalWorkItemPack(t *testing.T) {
-	bin := buildPic(t)
-	root, home := initProject(t, bin)
-	dbPath := filepath.Join(root, ".pi", "tasks.db")
-	runSQLite(t, dbPath, `
-		INSERT INTO epics(id,title) VALUES('e-migrate','Legacy');
-		INSERT INTO tasks(id,epic_id,title) VALUES('t-migrate','e-migrate','Legacy Task');
-		INSERT INTO work_items(id,type,title) VALUES('t-migrate','task','Canonical Task');
-		INSERT INTO task_instruction_packs(id,display_key,task_id,version,status,source_type,source_task_revision,goal,files_json,patterns_json,business_rules_json,validation_rules_json,error_handling_json,state_transitions_json,contract_obligations_json,constraints_json,verification_json,requirement_snapshots_json,content_hash,activated_at)
-		VALUES('pack-migrate','TIP-MIGRATE','t-migrate',1,'active','standalone_task',1,'Ship it','[]','[]','[]','[]','[]','[]','[]','{}','[]','[]','hash-migrate',datetime('now'));
-	`)
-
-	for range 2 {
-		shown := asObject(t, runPic(t, bin, root, home, "show", "t-migrate"))
-		packs := shown["instruction_packs"].([]any)
-		if len(packs) != 1 || asObject(t, packs[0])["id"] != "pack-migrate" || shown["ready"] != true {
-			t.Fatalf("legacy TIP backfill = %#v", shown)
-		}
 	}
 }
 
@@ -993,8 +948,8 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 		t.Fatalf("RRI artifacts=%d err=%v", artifacts, err)
 	}
 	var legacyEpic int
-	if err = db.QueryRow(`SELECT COUNT(*) FROM epics WHERE id=?`, id).Scan(&legacyEpic); err != nil || legacyEpic != 1 {
-		t.Fatalf("legacy Epic projection count=%d err=%v", legacyEpic, err)
+	if err = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='epics'`).Scan(&legacyEpic); err != nil || legacyEpic != 0 {
+		t.Fatalf("legacy Epic table exists=%d err=%v", legacyEpic, err)
 	}
 	var canonicalRevision int
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&canonicalRevision); err != nil || canonicalRevision != 1 {
@@ -1197,7 +1152,7 @@ func TestAggregateDeliveryLifecycle(t *testing.T) {
 
 func TestTaskPlanRejectsDependencyCycle(t *testing.T) {
 	plan := `{"version":1,"execution_policy":"parallel_allowed","nodes":[{"key":"T01","name":"One","goal":"One","requirement_keys":["REQ-001"],"depends_on":["T02"],"priority":"P1","module":"x","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"true","required":true}]},{"key":"T02","name":"Two","goal":"Two","requirement_keys":["REQ-001"],"depends_on":["T01"],"priority":"P1","module":"x","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"true","required":true}]}]}`
-	_, err := parseTaskPlanJSON("```task-plan-json\n" + plan + "\n```")
+	_, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + plan + "\n```")
 	if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
 		t.Fatalf("cycle error = %v", err)
 	}
@@ -1205,10 +1160,10 @@ func TestTaskPlanRejectsDependencyCycle(t *testing.T) {
 
 func TestTaskPlanV2RequiresExplicitSkillFamilies(t *testing.T) {
 	base := `{"version":2,"execution_policy":"strict_sequential","nodes":[{"key":"T01","name":"One","goal":"One","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"x",%s"files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"true","required":true}]}]}`
-	if _, err := parseTaskPlanJSON("```task-plan-json\n" + strings.Replace(base, "%s", "", 1) + "\n```"); err == nil || !strings.Contains(err.Error(), "requires skillFamilies") {
+	if _, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + strings.Replace(base, "%s", "", 1) + "\n```"); err == nil || !strings.Contains(err.Error(), "requires skillFamilies") {
 		t.Fatalf("missing skillFamilies error = %v", err)
 	}
-	plan, err := parseTaskPlanJSON("```task-plan-json\n" + strings.Replace(base, "%s", `"skillFamilies":[],`, 1) + "\n```")
+	plan, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + strings.Replace(base, "%s", `"skillFamilies":[],`, 1) + "\n```")
 	if err != nil || plan.Nodes[0].SkillFamilies == nil || len(*plan.Nodes[0].SkillFamilies) != 0 {
 		t.Fatalf("explicit empty skillFamilies plan=%#v err=%v", plan, err)
 	}
@@ -1265,23 +1220,23 @@ func createLegacyVerificationFixture(t *testing.T, bin, root, home, taskID strin
 }
 
 func TestValidateInstructionPackVerificationContract(t *testing.T) {
-	base := instructionPackContent{
+	base := tip.InstructionPackContent{
 		Goal: "Change source", Files: []string{"src/main.ts"}, BusinessRules: []any{"rule"}, ValidationRules: []any{"rule"},
 		ErrorHandling: []any{"rule"}, StateTransitions: []any{"rule"}, ContractObligations: []any{"rule"}, SchemaVersion: 2,
 		Constraints:  map[string]any{"generated_files": []any{"test-results/**"}},
 		Verification: []any{map[string]any{"command": "npm test", "required": true, "expected_writes": []any{"test-results/**"}}},
 	}
-	if err := validateInstructionPackContent(base); err != nil {
+	if err := tip.ValidateInstructionPackContent(base); err != nil {
 		t.Fatalf("valid verification contract rejected: %v", err)
 	}
 	failedGate := base
 	failedGate.Verification = []any{map[string]any{"required": true}}
-	if err := validateInstructionPackContent(failedGate); err == nil || !strings.Contains(err.Error(), "verification command") {
+	if err := tip.ValidateInstructionPackContent(failedGate); err == nil || !strings.Contains(err.Error(), "verification command") {
 		t.Fatalf("verification without command accepted: %v", err)
 	}
 	missingSetup := base
 	missingSetup.Verification = []any{map[string]any{"command": "npm test", "required": true, "requires": []any{"dev-server"}}}
-	if err := validateInstructionPackContent(missingSetup); err == nil || !strings.Contains(err.Error(), "setup_commands") {
+	if err := tip.ValidateInstructionPackContent(missingSetup); err == nil || !strings.Contains(err.Error(), "setup_commands") {
 		t.Fatalf("service prerequisite without setup accepted: %v", err)
 	}
 }
@@ -1295,7 +1250,7 @@ func TestPipelineClaimAcceptsCurrentPlanningStageWithoutTIP(t *testing.T) {
 	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "rri"); !strings.Contains(out, "current planning stage is scan") {
 		t.Fatalf("out-of-order RRI claim was not rejected: %s", out)
 	}
-	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-scan','`+id+`','scan',1,'<scan_report/>','scan-hash'); INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-scan','`+id+`','scan','wia-scan',1,'scan-hash','approved');`)
+	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-scan','`+id+`','scan',1,'<scan_report/>','scan-hash'); INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-scan','`+id+`','scan','wia-scan',1,'scan-hash','accepted');`)
 
 	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "rri"))
 	if claim["stage"] != "rri" || claim["instruction_pack_id"] != "" {
@@ -1355,12 +1310,16 @@ func TestVerificationAfterAllPipelineActivityAnchorsCompletionReport(t *testing.
 		dbPath := filepath.Join(root, ".pi", "tasks.db")
 		activateTestWorkItemTIP(t, dbPath, id)
 		suffix := strings.TrimPrefix(id, "wi-")
+		// The seeded rows are migration-time legacy evidence, so the version
+		// records are cleared and the next open performs the migration
+		// reconciliation exactly as it would on a pre-migration database.
 		runSQLite(t, dbPath, `
 			INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,integrated_patch_path,integrated_patch_hash,artifact_saved_at,integrated_at,result_json,created_at,completed_at,advanced_at) VALUES('pr-verified','`+id+`','worker',1,'completed','lease-verified',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','verified.patch','verified-hash','2026-01-01 00:00:01','2026-01-01 00:00:02','{}','2026-01-01 00:00:01','2026-01-01 00:00:02','2026-01-01 00:00:02');
 			INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,candidate_run_id,candidate_patch_hash,result_json,created_at,completed_at,advanced_at) VALUES('pr-verified-review','`+id+`','review',1,'completed','lease-review',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','pr-verified','verified-hash','{"review_status":"passed","candidate_run_id":"pr-verified","candidate_patch_hash":"verified-hash","notes":"passed","findings":[]}','2026-01-01 00:00:03','2026-01-01 00:00:03','2026-01-01 00:00:03');
 			INSERT INTO work_item_completion_reports(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,status,created_at) VALUES('wicr-verified','`+id+`','pr-verified','wip-`+suffix+`',1,'pack-`+suffix+`','done','2026-01-01 00:00:04');
 			INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,integrated_patch_hash,artifact_saved_at,created_at,completed_at) VALUES('pr-noop-before','`+id+`','worker',2,'completed','lease-noop',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','empty-hash','2026-01-01 00:00:05','2026-01-01 00:00:05','2026-01-01 00:00:05');
-			INSERT INTO work_item_verification_reports(id,work_item_id,completion_report_id,status,summary,verified_by_role,created_at) VALUES('wivr-verified','`+id+`','wicr-verified','passed','verified after retry','contractor','2026-01-01 00:00:06');`)
+			INSERT INTO work_item_verification_reports(id,work_item_id,completion_report_id,status,summary,verified_by_role,created_at) VALUES('wivr-verified','`+id+`','wicr-verified','passed','verified after retry','contractor','2026-01-01 00:00:06');
+			DELETE FROM schema_migrations;`)
 		return bin, root, home, id
 	}
 
@@ -1898,108 +1857,6 @@ Then it completes')`)
 	}
 }
 
-func TestLegacyTIPRemoval(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openSQLite(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = db.Exec(`
-		CREATE TABLE tips(id TEXT PRIMARY KEY,task_id TEXT NOT NULL REFERENCES tasks(id),tip_key TEXT NOT NULL,title TEXT NOT NULL);
-		CREATE TABLE tip_dependencies(id TEXT PRIMARY KEY,tip_id TEXT NOT NULL REFERENCES tips(id),depends_on_tip_id TEXT NOT NULL REFERENCES tips(id));
-		CREATE TABLE tip_requirement_links(id TEXT PRIMARY KEY,tip_id TEXT NOT NULL REFERENCES tips(id),requirement_id TEXT NOT NULL REFERENCES requirements(id));
-		ALTER TABLE completion_reports ADD COLUMN tip_id TEXT REFERENCES tips(id);
-		ALTER TABLE verification_items ADD COLUMN tip_id TEXT REFERENCES tips(id);
-		ALTER TABLE escalations ADD COLUMN tip_id TEXT REFERENCES tips(id);
-		INSERT INTO epics(id,title) VALUES('e-legacy-tip','Legacy TIP');
-		INSERT INTO tasks(id,epic_id,title) VALUES('t-legacy-tip','e-legacy-tip','Legacy TIP task');
-		INSERT INTO requirements(id,task_id,requirement_key,title) VALUES('req-legacy-tip','t-legacy-tip','REQ-001','Requirement');
-		INSERT INTO tips(id,task_id,tip_key,title) VALUES('tip-legacy','t-legacy-tip','TIP-001','Legacy pack');
-		INSERT INTO tip_requirement_links(id,tip_id,requirement_id) VALUES('trl-legacy','tip-legacy','req-legacy-tip');
-		INSERT INTO completion_reports(id,task_id,tip_id,status,summary) VALUES('cr-legacy-tip','t-legacy-tip','tip-legacy','done','completion survives');
-		INSERT INTO verification_reports(id,task_id,status,summary) VALUES('vr-legacy-tip','t-legacy-tip','passed','verification survives');
-		INSERT INTO verification_items(id,verification_report_id,requirement_id,tip_id,status,evidence) VALUES('vi-legacy-tip','vr-legacy-tip','req-legacy-tip','tip-legacy','pass','evidence survives');
-		INSERT INTO escalations(id,task_id,tip_id,level,title) VALUES('esc-legacy-tip','t-legacy-tip','tip-legacy',1,'escalation survives');`)
-	if err != nil {
-		db.Close()
-		t.Fatal(err)
-	}
-	db.Close()
-
-	if err := initDB(dbPath); err != nil {
-		t.Fatal(err)
-	}
-	db, err = openSQLite(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	for _, table := range []string{"tips", "tip_dependencies", "tip_requirement_links"} {
-		if tableExists(db, table) {
-			t.Fatalf("legacy table %s still exists", table)
-		}
-	}
-	for _, pair := range [][2]string{{"completion_reports", "tip_id"}, {"verification_items", "tip_id"}, {"escalations", "tip_id"}} {
-		if hasColumn(db, pair[0], pair[1]) {
-			t.Fatalf("legacy column %s.%s still exists", pair[0], pair[1])
-		}
-	}
-	for _, pair := range [][2]string{{"completion_reports", "cr-legacy-tip"}, {"verification_items", "vi-legacy-tip"}, {"escalations", "esc-legacy-tip"}} {
-		if ok, err := rowExists(db, `SELECT 1 FROM `+pair[0]+` WHERE id=?`, pair[1]); err != nil || !ok {
-			t.Fatalf("non-TIP row %s.%s was not preserved: %v", pair[0], pair[1], err)
-		}
-	}
-}
-
-func TestPipelineSchemaMigratesLegacyColumns(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
-		t.Fatal(err)
-	}
-	db, err := openSQLite(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, stmt := range []string{
-		`DROP INDEX idx_completion_reports_pipeline_run`,
-		`DROP INDEX idx_verification_reports_pipeline_run`,
-		`DROP INDEX idx_pipeline_runs_pending`,
-		`ALTER TABLE completion_reports DROP COLUMN pipeline_run_id`,
-		`ALTER TABLE verification_reports DROP COLUMN pipeline_run_id`,
-		`ALTER TABLE pipeline_runs DROP COLUMN integrated_patch_path`,
-		`ALTER TABLE pipeline_runs DROP COLUMN integrated_patch_hash`,
-		`ALTER TABLE pipeline_runs ADD COLUMN integrated_patch TEXT DEFAULT ''`,
-		`ALTER TABLE pipeline_runs DROP COLUMN integrated_at`,
-		`ALTER TABLE pipeline_runs DROP COLUMN artifact_saved_at`,
-		`ALTER TABLE pipeline_runs DROP COLUMN advanced_at`,
-	} {
-		if _, err := db.Exec(stmt); err != nil {
-			db.Close()
-			t.Fatal(err)
-		}
-	}
-	db.Close()
-	if err := initDB(dbPath); err != nil {
-		t.Fatal(err)
-	}
-	db, err = openSQLite(dbPath)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer db.Close()
-	if hasColumn(db, "pipeline_runs", "integrated_patch") {
-		t.Fatal("obsolete inline integrated_patch column was not removed")
-	}
-	for _, pair := range [][2]string{{"completion_reports", "pipeline_run_id"}, {"verification_reports", "pipeline_run_id"}, {"pipeline_runs", "integrated_patch_path"}, {"pipeline_runs", "integrated_patch_hash"}, {"pipeline_runs", "integrated_at"}, {"pipeline_runs", "artifact_saved_at"}, {"pipeline_runs", "advanced_at"}} {
-		if !hasColumn(db, pair[0], pair[1]) {
-			t.Fatalf("missing migrated column %s.%s", pair[0], pair[1])
-		}
-	}
-}
-
 func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	if err := initDB(dbPath); err != nil {
@@ -2025,12 +1882,16 @@ func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 	}
 	if _, err = db.Exec(`INSERT INTO pipeline_runs SELECT * FROM pipeline_runs_legacy_seed;
 		DROP TABLE pipeline_runs_legacy_seed;
-		PRAGMA legacy_alter_table=OFF`); err != nil {
+		PRAGMA legacy_alter_table=OFF;
+		DELETE FROM schema_migrations`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
 	db.Close()
 
+	// The degraded schema simulates a database from an older binary, which also
+	// predates schema_migrations version records; clearing them makes the next
+	// open re-run the migrations exactly as an upgrade would.
 	if err := initDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
@@ -2076,12 +1937,15 @@ func TestInitDBRepairsStalePipelineForeignKey(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err = db.Exec(`INSERT INTO pipeline_runs SELECT * FROM pipeline_runs__workflow_migration;
-		DROP TABLE pipeline_runs__workflow_migration`); err != nil {
+		DROP TABLE pipeline_runs__workflow_migration;
+		DELETE FROM schema_migrations`); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
 	db.Close()
 
+	// Older-binary database simulation: clear version records so the next open
+	// re-runs the migrations and repairs the stale foreign key.
 	if err := initDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
@@ -2123,20 +1987,6 @@ func approvePlanningTask(t *testing.T, bin, root, home, taskID string) {
 	runPic(t, bin, root, home, "workflow", "vision-status", taskID, "approved", "--vision-id", vision["id"].(string))
 	runPic(t, bin, root, home, "workflow", "design-save", taskID, "--blueprint", "# Blueprint")
 	runPic(t, bin, root, home, "workflow", "design-status", taskID, "approved")
-}
-
-func TestRebuildMigratesLegacySchemaAndPreservesRows(t *testing.T) {
-	bin := buildPic(t)
-	root, home := initProject(t, bin)
-	dbPath := filepath.Join(root, ".pi", "tasks.db")
-	runSQLite(t, dbPath, `PRAGMA foreign_keys=OFF; CREATE TABLE projects(id TEXT PRIMARY KEY,name TEXT,root_path TEXT,created_at TEXT); INSERT INTO projects VALUES('p','Legacy','`+root+`','2020-01-01'); ALTER TABLE epics ADD COLUMN project_id TEXT; UPDATE epics SET project_id='p';`)
-	result := asObject(t, runPic(t, bin, root, home, "rebuild"))
-	if result["rebuilt"] != true || result["removed_projects_table"] != true || result["removed_epic_project_id"] != true || result["backup_path"] == "" {
-		t.Fatalf("rebuild = %#v", result)
-	}
-	if _, err := os.Stat(result["backup_path"].(string)); err != nil {
-		t.Fatalf("backup missing: %v", err)
-	}
 }
 
 func TestWebAPISupportsDashboardContract(t *testing.T) {
@@ -2454,4 +2304,1532 @@ Then the scaffold mounts')`)
 	if strings.Contains(amendedGraph, "9173") || !strings.Contains(amendedGraph, "55173") {
 		t.Fatalf("task graph not amended")
 	}
+}
+
+func TestRriTScenarioArtifact(t *testing.T) {
+	t.Setenv("PI_TASK_AGENT_NAME", "")
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Scenario Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	scenariosA := `{"methodology":"rri-t","personas":["End User"],"scenarios":[{"id":"SC-1","persona":"End User","dimension":"D1","stress_axis":"TIME","requirement_id":"REQ-001","procedure":"Run the helper flow","evidence":"go test ./...","result":"PASS"}]}`
+	scenariosB := strings.Replace(scenariosA, "Run the helper flow", "Run the trimmed flow", 1)
+
+	// Unknown artifact stages stay fail-closed: rejected before any row is written.
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "bogus_stage", scenariosA); !strings.Contains(out, "usage") {
+		t.Fatalf("unknown stage error = %s", out)
+	}
+
+	// Existing planning stages keep their save/approve behavior unchanged.
+	scanArtifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "<scan_report/>"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scanArtifact["id"].(string), "accepted")
+	rriArtifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "<rri_report/>"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", rriArtifact["id"].(string), "approved")
+
+	// Fresh SQLite schema and the artifact-save stage registry accept rri_t_scenarios.
+	saved1 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosA))
+	if saved1["stage"] != "rri_t_scenarios" || saved1["revision"] != float64(1) || saved1["content_hash"] != hashJSON(scenariosA) {
+		t.Fatalf("scenario artifact = %#v", saved1)
+	}
+	// The supplementary rri_t_scenarios stage is reported for owner visibility but
+	// never becomes next_stage: the gated planning workflow still progresses normally.
+	if status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id)); status["next_stage"] != "vision" {
+		t.Fatalf("scenario save gated workflow: %#v", status)
+	}
+
+	// The saved scenario list is owner-visible through the existing show path.
+	shown := asObject(t, runPic(t, bin, root, home, "show", id))
+	scenarioRows := 0
+	for _, raw := range shown["artifacts"].([]any) {
+		row := raw.(map[string]any)
+		if row["stage"] == "rri_t_scenarios" {
+			scenarioRows++
+			if row["content"] != scenariosA || row["content_hash"] != hashJSON(scenariosA) {
+				t.Fatalf("show scenario row = %#v", row)
+			}
+		}
+	}
+	if scenarioRows != 1 {
+		t.Fatalf("show artifacts = %#v", shown["artifacts"])
+	}
+
+	// A later save creates a new immutable revision and cannot mutate the prior one.
+	saved2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosB))
+	if saved2["revision"] != float64(2) {
+		t.Fatalf("second scenario artifact = %#v", saved2)
+	}
+	if out, err := exec.Command("sqlite3", dbPath, `UPDATE work_item_artifacts SET content='mutated' WHERE id='`+saved1["id"].(string)+`';`).CombinedOutput(); err == nil || !strings.Contains(string(out), "immutable") {
+		t.Fatalf("scenario artifact mutation err=%v out=%s", err, out)
+	}
+
+	// Approve the full downstream lineage, then re-save scenarios: only downstream
+	// checkpoints (vision onward) are invalidated; scan/rri stay valid.
+	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES
+		('wia-vision','`+id+`','vision',1,'<vision/>','h-vision'),
+		('wia-blueprint','`+id+`','blueprint',1,'<blueprint/>','h-blueprint'),
+		('wia-contracts','`+id+`','contracts',1,'<contracts/>','h-contracts'),
+		('wia-graph','`+id+`','task_graph',1,'{}','h-graph');
+		INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-vision','`+id+`','vision','wia-vision',1,'h-vision','approved'),
+		('wic-blueprint','`+id+`','blueprint','wia-blueprint',1,'h-blueprint','approved'),
+		('wic-contracts','`+id+`','contracts','wia-contracts',1,'h-contracts','approved'),
+		('wic-graph','`+id+`','task_graph','wia-graph',1,'h-graph','approved')`)
+	if status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id)); status["next_stage"] != "materialize" {
+		t.Fatalf("full lineage status = %#v", status)
+	}
+	_ = asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosB))
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "vision" {
+		t.Fatalf("downstream invalidation status = %#v", status)
+	}
+	checkpoints := status["checkpoints"].(map[string]any)
+	if checkpoints["scan"] != true || checkpoints["rri"] != true || checkpoints["rri_t_scenarios"] == true || checkpoints["vision"] == true || checkpoints["blueprint"] == true || checkpoints["contracts"] == true || checkpoints["task_graph"] == true {
+		t.Fatalf("checkpoint invalidation = %#v", checkpoints)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, stage := range []string{"scan", "rri"} {
+		var count int
+		if err = db.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, id, stage).Scan(&count); err != nil || count != 1 {
+			t.Fatalf("upstream %s checkpoint count=%d err=%v", stage, count, err)
+		}
+	}
+	for _, stage := range []string{"vision", "blueprint", "contracts", "task_graph"} {
+		var count int
+		if err = db.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, id, stage).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("downstream %s checkpoint count=%d err=%v", stage, count, err)
+		}
+	}
+	// Approved artifact history is retained, not deleted or rewritten.
+	var artifacts, scenarioArtifacts int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, id).Scan(&artifacts)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri_t_scenarios'`, id).Scan(&scenarioArtifacts)
+	if artifacts != 9 || scenarioArtifacts != 3 {
+		t.Fatalf("retained artifacts=%d scenario_artifacts=%d", artifacts, scenarioArtifacts)
+	}
+	var originalContent string
+	if err = db.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=?`, saved1["id"].(string)).Scan(&originalContent); err != nil || originalContent != scenariosA {
+		t.Fatalf("revision 1 content = %q err=%v", originalContent, err)
+	}
+}
+
+// TestRriTScenarioArtifactLegacySchemaMigration is the regression guard for the
+// pre-change database path: initDB runs on every command but never rebuilds
+// existing work_item_artifacts/workflow_checkpoints, so a project created
+// before the additive stage still carries the old CHECK constraints. The test
+// recreates those tables exactly as the old schema persisted them (old CHECK
+// list, old lookup indexes, old immutable triggers) with owned planning rows,
+// then verifies that the first rri_t_scenarios save migrates both tables,
+// preserves every pre-existing row and immutable-history trigger, and keeps the
+// existing planning checkpoints gate-compatible.
+func TestRriTScenarioArtifactLegacySchemaMigration(t *testing.T) {
+	t.Setenv("PI_TASK_AGENT_NAME", "")
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Migration Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	// Simulate the pre-change schema: drop the fresh-schema tables and rebuild
+	// them with the original CHECK constraints, triggers, and indexes, seeded
+	// with the owned scan/rri planning history of the created epic.
+	runSQLite(t, dbPath, fmt.Sprintf(`DROP TRIGGER IF EXISTS trg_work_item_artifact_immutable;
+DROP TRIGGER IF EXISTS trg_work_item_artifact_delete_immutable;
+DROP TABLE workflow_checkpoints;
+DROP TABLE work_item_artifacts;
+CREATE TABLE work_item_artifacts (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','vision','blueprint','contracts','task_graph')), revision INTEGER NOT NULL CHECK(revision>0), content TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,revision));
+CREATE TABLE workflow_checkpoints (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','vision','blueprint','contracts','task_graph')), artifact_id TEXT NOT NULL, artifact_revision INTEGER NOT NULL CHECK(artifact_revision>0), content_hash TEXT NOT NULL, decision_type TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,artifact_revision));
+CREATE INDEX idx_work_item_artifacts_item_stage ON work_item_artifacts(work_item_id,stage,revision DESC);
+CREATE INDEX idx_workflow_checkpoints_item_stage ON workflow_checkpoints(work_item_id,stage,artifact_revision DESC);
+CREATE TRIGGER trg_work_item_artifact_immutable BEFORE UPDATE ON work_item_artifacts BEGIN SELECT RAISE(ABORT,'work item artifacts are immutable'); END;
+CREATE TRIGGER trg_work_item_artifact_delete_immutable BEFORE DELETE ON work_item_artifacts WHEN EXISTS(SELECT 1 FROM workflow_checkpoints WHERE artifact_id=OLD.id) BEGIN SELECT RAISE(ABORT,'approved work item artifacts are immutable'); END;
+INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES
+  ('wia-legacy-scan','%s','scan',1,'<scan/>','h-legacy-scan'),
+  ('wia-legacy-rri','%s','rri',1,'<rri/>','h-legacy-rri');
+INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+  ('wic-legacy-scan','%s','scan','wia-legacy-scan',1,'h-legacy-scan','accepted'),
+  ('wic-legacy-rri','%s','rri','wia-legacy-rri',1,'h-legacy-rri','approved');
+DELETE FROM schema_migrations;`, id, id, id, id))
+
+	// The rebuilt tables simulate an older-binary database, so the version
+	// records are cleared and the next pic command re-runs the widening
+	// migration; the rri_t_scenarios save must now succeed.
+	scenariosA := `{"methodology":"rri-t","personas":["End User"],"scenarios":[{"id":"SC-1","persona":"End User","dimension":"D1","stress_axis":"TIME","requirement_id":"REQ-001","procedure":"Run the helper flow","evidence":"go test ./...","result":"PASS"}]}`
+	saved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosA))
+	if saved["stage"] != "rri_t_scenarios" || saved["revision"] != float64(1) {
+		t.Fatalf("scenario artifact after legacy migration = %#v", saved)
+	}
+
+	// Both tables now carry the widened CHECK, every legacy row survived, and
+	// the lookup indexes and immutable triggers were recreated on the fresh
+	// tables rather than left behind on the renamed legacy ones.
+	var artifactsSQL, checkpointsSQL string
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='work_item_artifacts'`).Scan(&artifactsSQL); err != nil {
+		t.Fatal(err)
+	}
+	if err = db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='workflow_checkpoints'`).Scan(&checkpointsSQL); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(artifactsSQL, "rri_t_scenarios") || !strings.Contains(checkpointsSQL, "rri_t_scenarios") {
+		t.Fatalf("CHECK not widened: artifacts=%q checkpoints=%q", artifactsSQL, checkpointsSQL)
+	}
+	for _, expected := range []string{"wia-legacy-scan", "wia-legacy-rri", "wic-legacy-scan", "wic-legacy-rri", saved["id"].(string)} {
+		table := "workflow_checkpoints"
+		if strings.HasPrefix(expected, "wia-") {
+			table = "work_item_artifacts"
+		}
+		var exists int
+		if err = db.QueryRow(`SELECT COUNT(*) FROM "`+table+`" WHERE id=?`, expected).Scan(&exists); err != nil || exists != 1 {
+			t.Fatalf("row %s preserved: count=%d err=%v", expected, exists, err)
+		}
+	}
+	var triggerCount int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name IN ('trg_work_item_artifact_immutable','trg_work_item_artifact_delete_immutable') AND tbl_name='work_item_artifacts'`).Scan(&triggerCount)
+	if triggerCount != 2 {
+		t.Fatalf("immutable triggers on rebuilt table = %d", triggerCount)
+	}
+	for _, index := range []string{"idx_work_item_artifacts_item_stage", "idx_workflow_checkpoints_item_stage"} {
+		var indexCount int
+		_ = db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?`, index, strings.TrimSuffix(strings.TrimPrefix(index, "idx_"), "_item_stage")).Scan(&indexCount)
+		if indexCount != 1 {
+			t.Fatalf("index %s not recreated", index)
+		}
+	}
+
+	// The immutable-history invariants still hold after the migration: UPDATE
+	// and approved DELETE are rejected, the legacy checkpoint lineage is intact.
+	if out, err := exec.Command("sqlite3", dbPath, `UPDATE work_item_artifacts SET content='mutated' WHERE id='`+saved["id"].(string)+`';`).CombinedOutput(); err == nil || !strings.Contains(string(out), "immutable") {
+		t.Fatalf("migrated scenario artifact mutation err=%v out=%s", err, out)
+	}
+	if out, err := exec.Command("sqlite3", dbPath, `DELETE FROM work_item_artifacts WHERE id='wia-legacy-scan';`).CombinedOutput(); err == nil || !strings.Contains(string(out), "immutable") {
+		t.Fatalf("migrated approved artifact delete err=%v out=%s", err, out)
+	}
+
+	// Existing approved scan/rri checkpoints survived the migration and still
+	// gate the planning workflow forward (next_stage vision), never backwards.
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "vision" {
+		t.Fatalf("legacy migration workflow status = %#v", status)
+	}
+	checkpoints := status["checkpoints"].(map[string]any)
+	if checkpoints["scan"] != true || checkpoints["rri"] != true || checkpoints["rri_t_scenarios"] == true {
+		t.Fatalf("legacy migration checkpoints = %#v", checkpoints)
+	}
+	var artifacts, checkpointsCount int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, id).Scan(&artifacts)
+	_ = db.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=?`, id).Scan(&checkpointsCount)
+	if artifacts != 3 || checkpointsCount != 2 {
+		t.Fatalf("legacy retained artifacts=%d checkpoints=%d", artifacts, checkpointsCount)
+	}
+}
+
+// TestRriTScenarioIdentityContract is the end-to-end guard for the RRI-T
+// id-based scenario identity contract: graded scenarios deduplicate on
+// (dimension|stress_axis|requirement_id|id) exactly like the TypeScript grading
+// compiler, so two persisted scenarios that share persona, dimension, stress
+// axis, and requirement but differ in id are distinct outcomes — while a
+// duplicate deferred disposition (the same persisted scenario deferred twice via
+// not_applicable) is rejected and the PASS/ACCEPTABLE/PAINFUL/FAIL result
+// mapping stays unchanged.
+func TestRriTScenarioIdentityContract(t *testing.T) {
+	t.Setenv("PI_TASK_AGENT_NAME", "")
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Identity Epic"))
+	id := epic["id"].(string)
+	child := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Done child", "--parent", id))
+	runPic(t, bin, root, home, "work-item", "status", child["id"].(string), "done")
+	// RRI-T scenarios are requirement-bound: REQ-001 is an approved aggregate requirement.
+	runSQLite(t, filepath.Join(root, ".pi", "tasks.db"), `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria,priority,status) VALUES('req-identity','`+id+`','REQ-001','Identity requirement','Given sc-1 and sc-2 When graded Then both count','tier1','pending')`)
+
+	// Persist two scenarios sharing persona, dimension, stress axis, and
+	// requirement but differing in id; the artifact is owner-visible and retained.
+	scenarios := `{"methodology":"rri-t","personas":["QA / Tester"],"scenarios":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","remediation_hint":"assert inline error"},
+		{"id":"SC-2","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the malformed payload","remediation_hint":"assert rejection"}]}`
+	saved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenarios))
+	if saved["stage"] != "rri_t_scenarios" {
+		t.Fatalf("scenario artifact = %#v", saved)
+	}
+
+	// Both distinct id-based outcomes are accepted by aggregate verification.
+	graded := `{"scenarios":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"go test ./... passed","result":"PASS"},
+		{"id":"SC-2","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the malformed payload","evidence":"go test ./... passed","result":"PASS"}]}`
+	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "identity outcomes verified", "--actor-role", "contractor", "--rri-t-json", graded))
+	if report["status"] != "passed" {
+		t.Fatalf("distinct id-based outcomes rejected: %#v", report)
+	}
+
+	// A repeated graded identity is still rejected as a duplicate.
+	duplicate := `{"scenarios":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"ran","result":"PASS"},
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"ran","result":"PASS"}]}`
+	if out := runPicError(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "duplicate", "--actor-role", "contractor", "--rri-t-json", duplicate); !strings.Contains(out, "duplicate RRI-T scenario") {
+		t.Fatalf("duplicate graded identity err = %s", out)
+	}
+
+	// A duplicate deferred disposition (the same persisted scenario deferred twice
+	// via not_applicable) is rejected, so one scenario can be deferred at most once.
+	deferred := `{"scenarios":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"go test ./... passed","result":"PASS"},
+		{"id":"SC-2","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the malformed payload","evidence":"go test ./... passed","result":"PASS"}],"not_applicable":[
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","reason":"cannot run against the integrated repo"},
+		{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","reason":"cannot run against the integrated repo"}]}`
+	if out := runPicError(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "deferred duplicate", "--actor-role", "contractor", "--rri-t-json", deferred); !strings.Contains(out, "duplicate RRI-T scenario") {
+		t.Fatalf("duplicate deferred disposition err = %s", out)
+	}
+
+	// The result mapping is unchanged: a PAINFUL result still blocks aggregate
+	// passage until remediation or explicit owner deferral, and a FAIL result is
+	// still rejected outright.
+	painful := `{"scenarios":[{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"observed friction","result":"PAINFUL"}]}`
+	if out := runPicError(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "painful", "--actor-role", "contractor", "--rri-t-json", painful); !strings.Contains(out, "remediation or owner deferral") {
+		t.Fatalf("PAINFUL passage err = %s", out)
+	}
+	failed := `{"scenarios":[{"id":"SC-1","persona":"QA / Tester","dimension":"D3","stress_axis":"ERROR","requirement_id":"REQ-001","procedure":"Submit the empty form","evidence":"broken","result":"FAIL"}]}`
+	if out := runPicError(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "failed", "--actor-role", "contractor", "--rri-t-json", failed); !strings.Contains(out, "remediation or owner deferral") {
+		t.Fatalf("FAIL passage err = %s", out)
+	}
+}
+
+func TestWorkflowStatusNextActionsAndCheckpointDecide(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Oracle Epic"))
+	id := epic["id"].(string)
+
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "scan" {
+		t.Fatalf("initial status = %#v", status)
+	}
+	actions, _ := status["next_actions"].([]any)
+	if len(actions) == 0 {
+		t.Fatal("scan next_actions missing")
+	}
+	first := asObject(t, actions[0])
+	if first["id"] != "save_scan_artifact" || first["kind"] != "tool" || first["action"] != "save_work_item_artifact" || first["actor"] != "contractor" || !strings.Contains(fmt.Sprint(first["args"]), "scan") {
+		t.Fatalf("scan first action = %#v", first)
+	}
+	approval := asObject(t, actions[1])
+	if approval["id"] != "approve_scan_artifact" || approval["actor"] != "owner" {
+		t.Fatalf("scan approval action = %#v", approval)
+	}
+
+	artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan content"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", "current", "accepted")
+	_ = artifact
+	for _, stage := range []string{"rri", "vision"} {
+		content := stage + " content"
+		if stage == "vision" {
+			content = validVisionArtifact
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, content)
+	}
+	out := asObject(t, runPic(t, bin, root, home, "work-item", "checkpoint-decide", id, "--decisions", "vision:approved,rri:approved"))
+	decisions := out["decisions"].([]any)
+	if len(decisions) != 2 {
+		t.Fatalf("checkpoint-decide = %#v", out)
+	}
+	if fmt.Sprint(asObject(t, decisions[0])["stage"]) != "rri" || fmt.Sprint(asObject(t, decisions[1])["stage"]) != "vision" {
+		t.Fatalf("decisions must process in planning-profile order: %#v", decisions)
+	}
+	status = asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "blueprint" {
+		t.Fatalf("post-decide status = %#v", status)
+	}
+	actions, _ = status["next_actions"].([]any)
+	if len(actions) == 0 || asObject(t, actions[0])["action"] != "save_blueprint_draft" || asObject(t, actions[len(actions)-1])["actor"] != "owner" {
+		t.Fatalf("blueprint next_actions = %#v", actions)
+	}
+
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", validContractArtifact)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", "current", "approved"); !strings.Contains(out, "Previous stage blueprint is not approved") || !strings.Contains(out, "Next: ") {
+		t.Fatalf("out-of-order approval error = %s", out)
+	}
+	if out := runPicError(t, bin, root, home, "work-item", "checkpoint-decide", id, "--decisions", "contracts:accepted"); !strings.Contains(out, "requires decision approved") {
+		t.Fatalf("bad decision error = %s", out)
+	}
+}
+
+func TestInstructionPackRendersContractInterfaces(t *testing.T) {
+	node := tip.TaskPlanDocumentNode{
+		Key: "T01", Type: "task", Name: "Persist", RequirementKeys: []string{"REQ-001"},
+		Provides: []string{"OBL-001"}, Consumes: []string{"OBL-002"}, EvidenceFor: []string{"OBL-001"}, ObligationKeys: []string{"OBL-001"},
+		Files: []string{"a.go"},
+		Constraints: map[string]any{"scope_roots": []any{"."}},
+		Verification: []any{map[string]any{"command": "go test ./..."}},
+		BusinessRules: []any{"rule"}, ValidationRules: []any{"v"}, ErrorHandling: []any{"e"}, StateTransitions: []any{"s"}, ContractObligations: []any{"o"},
+	}
+	packBytes, _, err := tip.MaterializedInstructionPack(node, 3, map[string]tip.RequirementSnapshot{"REQ-001": {RequirementKey: "REQ-001", Title: "R", AcceptanceCriteria: "Given\nWhen\nThen"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pack := map[string]any{"id": "wip-x", "version": 1, "status": "active", "content_hash": "sha256:x", "content_json": string(packBytes), "work_item_id": "wi-1", "work_item_title": "T", "work_item_type": "task", "priority": "medium"}
+	if err := tip.ExpandCanonicalInstructionPack(pack); err != nil {
+		t.Fatal(err)
+	}
+	rendered := tip.RenderInstructionPack(pack)
+	if !strings.Contains(rendered, "## CONTRACT INTERFACES") || !strings.Contains(rendered, "OBL-001") || !strings.Contains(rendered, "consumes: OBL-002") {
+		t.Fatalf("contract interfaces missing from TIP render: %s", rendered)
+	}
+
+	legacy := map[string]any{"id": "wip-y", "version": 1, "status": "active", "content_hash": "sha256:y", "content_json": `{"content":{"goal":"g","files":["f.go"],"business_rules":["b"],"validation_rules":["v"],"error_handling":["e"],"state_transitions":["s"],"contract_obligations":["o"],"constraints":{"k":"v"},"verification":[{"command":"c"}],"schemaVersion":2},"requirements":[]}`, "work_item_id": "wi-1", "work_item_title": "T", "work_item_type": "task", "priority": "medium"}
+	if err := tip.ExpandCanonicalInstructionPack(legacy); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(tip.RenderInstructionPack(legacy), "## CONTRACT INTERFACES") {
+		t.Fatalf("legacy pack must not render an empty contract interfaces section")
+	}
+}
+
+func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Dry Epic"))
+	id := epic["id"].(string)
+	stages := []string{"scan", "rri", "vision", "blueprint", "contracts", "task_graph"}
+	for _, stage := range stages {
+		content := stage + " content"
+		if stage == "vision" {
+			content = validVisionArtifact
+		}
+		if stage == "blueprint" {
+			content = validBlueprintArtifact
+		}
+		if stage == "contracts" {
+			content = validContractArtifact
+		}
+		if stage == "task_graph" {
+			content = `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]}]}`
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, content)
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, "current", decision)
+	}
+	runPic(t, bin, root, home, "work-item", "materialize", id)
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "authorize" {
+		t.Fatalf("pre-dry-run status = %#v", status)
+	}
+
+	// Seed descendant-owned records: the reset deletes child Work Items, and
+	// foreign-key cascades retire everything they own, so the preview must
+	// enumerate those cascaded targets too.
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	childDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var childID string
+	if err := childDB.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id<>?`, id, id).Scan(&childID); err != nil {
+		t.Fatal(err)
+	}
+	childDB.Close()
+	runSQLite(t, dbPath, `
+		INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-child','`+childID+`','scan',1,'<scan/>','h-child');
+		INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-child','`+childID+`','scan','wia-child',1,'h-child','accepted');
+		INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at) VALUES('pr-child','`+childID+`','worker',1,'failed','lease-child','2026-01-01');
+		INSERT INTO work_item_completion_reports(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,status) VALUES('wicr-child','`+childID+`','pr-child','wip-child',1,'h-child-pack','done');
+		INSERT INTO work_item_verification_reports(id,work_item_id,checkpoint_id,completion_report_id,status,summary,verified_by_role) VALUES('wivr-child','`+childID+`','','wicr-child','passed','child verified','contractor');
+		INSERT INTO work_item_labels(work_item_id,label) VALUES('`+childID+`','area:core');
+		INSERT INTO work_item_dependencies(id,work_item_id,depends_on_work_item_id) VALUES('wid-child','`+childID+`','`+id+`');
+		INSERT INTO work_item_gates(id,work_item_id,gate_work_item_id) VALUES('wig-child','`+childID+`','`+id+`');
+		INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES('wir-child','`+childID+`','blocks','`+id+`');
+		INSERT INTO implementation_authorizations(id,work_item_id,task_graph_checkpoint_id,authorized_by) VALUES('wimpl-child','`+childID+`','wic-child','owner');
+		INSERT INTO work_item_escalations(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,level,status,report_json) VALUES('wiem-child','`+childID+`','pr-child','wip-child',1,'h-child-pack','L2','open','{}');
+		INSERT INTO work_item_owner_decisions(id,work_item_id,completion_report_id,decision) VALUES('wiod-child','`+childID+`','wicr-child','rejected');
+		INSERT INTO work_item_aggregate_owner_decisions(id,work_item_id,verification_report_id,decision) VALUES('waod-child','`+childID+`','wivr-child','accepted');
+		INSERT INTO work_item_delivery_states(work_item_id,integration_mode) VALUES('`+childID+`','branch');
+		INSERT INTO work_item_events(id,work_item_id,event_type,summary) VALUES('wiev-child','`+childID+`','note','seeded');
+		INSERT INTO work_item_profiles(id,work_item_id,profile_name,profile_version,planning_depth,stages_json,content_hash) VALUES('wiprof-child','`+childID+`','qa',99,'full','[]','h-child-profile');
+		INSERT INTO work_items(id,type,title) VALUES('wi-bug-child','bug','Child Bug');
+		INSERT INTO work_item_corrective_bugs(verification_report_id,bug_work_item_id,owner_approval_required) VALUES('wivr-child','wi-bug-child',1);
+		INSERT INTO work_items(id,type,title) VALUES('wi-grandchild','task','Grandchild Task');
+		INSERT INTO work_item_materializations(root_work_item_id,checkpoint_id,node_key,work_item_id) VALUES('`+childID+`','wic-child','G01','wi-grandchild');`)
+
+	// The reset retires every materialization row rooted at the target (its own
+	// cleanup) plus rows rooted at a materialized descendant (nested root,
+	// retired by the work_items cascade). Capture that exact set before the dry
+	// run so the preview can be compared against it.
+	matDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var expectedMaterializationRows int
+	if err := matDB.QueryRow(`SELECT COUNT(*) FROM work_item_materializations
+		WHERE root_work_item_id=?
+		OR root_work_item_id IN (SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND work_item_id<>?)`, id, id, id).Scan(&expectedMaterializationRows); err != nil {
+		t.Fatal(err)
+	}
+	matDB.Close()
+	if expectedMaterializationRows < 2 {
+		t.Fatalf("expected the child and grandchild materialization rows, got %d", expectedMaterializationRows)
+	}
+
+	dry := asObject(t, runPic(t, bin, root, home, "work-item", "planning-reset", id, "owner", "--dry-run"))
+	if dry["dry_run"] != true || dry["retired_materializations"] != float64(1) {
+		t.Fatalf("dry run = %#v", dry)
+	}
+	descendantArtifacts := dry["descendant_artifacts"].([]any)
+	if len(descendantArtifacts) != 1 || asObject(t, descendantArtifacts[0])["id"] != "wia-child" {
+		t.Fatalf("descendant artifacts = %#v", descendantArtifacts)
+	}
+	descendantCheckpoints := dry["descendant_checkpoints"].([]any)
+	if len(descendantCheckpoints) != 1 || asObject(t, descendantCheckpoints[0])["id"] != "wic-child" {
+		t.Fatalf("descendant checkpoints = %#v", descendantCheckpoints)
+	}
+	descendantCompletions := dry["descendant_completion_reports"].([]any)
+	if len(descendantCompletions) != 1 || asObject(t, descendantCompletions[0])["id"] != "wicr-child" {
+		t.Fatalf("descendant completion reports = %#v", descendantCompletions)
+	}
+	descendantVerifications := dry["descendant_verification_reports"].([]any)
+	if len(descendantVerifications) != 1 || asObject(t, descendantVerifications[0])["id"] != "wivr-child" {
+		t.Fatalf("descendant verification reports = %#v", descendantVerifications)
+	}
+	// Every child-owned cascade table the reset retires with the descendants is
+	// previewed by name, each row carrying its owning Work Item.
+	descendantCascadeExpectations := []struct {
+		key, field, value string
+	}{
+		{"descendant_pipeline_runs", "id", "pr-child"},
+		{"descendant_labels", "label", "area:core"},
+		{"descendant_dependencies", "id", "wid-child"},
+		{"descendant_gates", "id", "wig-child"},
+		{"descendant_relations", "id", "wir-child"},
+		{"descendant_authorizations", "id", "wimpl-child"},
+		{"descendant_escalations", "id", "wiem-child"},
+		{"descendant_owner_decisions", "id", "wiod-child"},
+		{"descendant_aggregate_decisions", "id", "waod-child"},
+		{"descendant_delivery_states", "integration_mode", "branch"},
+		{"descendant_events", "id", "wiev-child"},
+		{"descendant_profiles", "profile_name", "qa"},
+	}
+	for _, expected := range descendantCascadeExpectations {
+		entries, ok := dry[expected.key].([]any)
+		if !ok || len(entries) != 1 {
+			t.Fatalf("dry-run %s = %#v", expected.key, dry[expected.key])
+		}
+		entry := asObject(t, entries[0])
+		if fmt.Sprint(entry[expected.field]) != expected.value || fmt.Sprint(entry["work_item_id"]) != childID {
+			t.Fatalf("dry-run %s entry = %#v, want %s=%s owned by %s", expected.key, entry, expected.field, expected.value, childID)
+		}
+	}
+	// Materialization rows: the preview must enumerate exactly the set the reset
+	// retires — the target-rooted rows its own cleanup deletes (including the
+	// target's own node, which the dependents list excludes) plus rows rooted at
+	// a materialized descendant, which die through the work_items cascade.
+	materializationRows, matOK := dry["retired_materialization_rows"].([]any)
+	if !matOK || len(materializationRows) != expectedMaterializationRows {
+		t.Fatalf("retired materialization rows = %#v, want %d", dry["retired_materialization_rows"], expectedMaterializationRows)
+	}
+	epicRooted := false
+	grandchildRooted := false
+	for _, entry := range materializationRows {
+		row := asObject(t, entry)
+		if row["root_work_item_id"] == id && row["work_item_id"] == childID {
+			epicRooted = true
+		}
+		if row["root_work_item_id"] == childID && row["work_item_id"] == "wi-grandchild" && row["node_key"] == "G01" {
+			grandchildRooted = true
+		}
+	}
+	if !epicRooted || !grandchildRooted {
+		t.Fatalf("retired materialization rows missing the seeded targets: %#v", materializationRows)
+	}
+	// Corrective bugs are second-order targets: the seeded row retires with the
+	// child's verification report, while the bug Work Item itself survives.
+	correctiveEntries, ok := dry["descendant_corrective_bugs"].([]any)
+	if !ok || len(correctiveEntries) != 1 {
+		t.Fatalf("descendant corrective bugs = %#v", dry["descendant_corrective_bugs"])
+	}
+	corrective := asObject(t, correctiveEntries[0])
+	if corrective["verification_report_id"] != "wivr-child" || corrective["bug_work_item_id"] != "wi-bug-child" {
+		t.Fatalf("descendant corrective bugs entry = %#v", corrective)
+	}
+	verifyDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var seededChildArtifact int
+	if err := verifyDB.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE id='wia-child'`).Scan(&seededChildArtifact); err != nil || seededChildArtifact != 1 {
+		t.Fatalf("dry run mutated descendant rows: count=%d err=%v", seededChildArtifact, err)
+	}
+	var seededChildRuns int
+	if err := verifyDB.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE id='pr-child'`).Scan(&seededChildRuns); err != nil || seededChildRuns != 1 {
+		t.Fatalf("dry run mutated descendant pipeline runs: count=%d err=%v", seededChildRuns, err)
+	}
+	verifyDB.Close()
+	if dry["checkpoints"] != float64(6) {
+		t.Fatalf("dry run checkpoints = %#v", dry)
+	}
+	// The preview must name the exact invalidation targets, not just counts.
+	artifactStages := map[string]bool{}
+	for _, entry := range dry["artifacts"].([]any) {
+		artifact := asObject(t, entry)
+		artifactStages[fmt.Sprint(artifact["stage"])] = true
+		if artifact["content_hash"] == "" || artifact["revision"] == nil {
+			t.Fatalf("dry-run artifact entry missing revision/hash: %#v", artifact)
+		}
+	}
+	for _, stage := range stages {
+		if !artifactStages[stage] {
+			t.Fatalf("dry-run artifacts missing stage %s: %v", stage, artifactStages)
+		}
+	}
+	checkpointStages := map[string]bool{}
+	for _, entry := range dry["checkpoints_list"].([]any) {
+		checkpointStages[fmt.Sprint(asObject(t, entry)["stage"])] = true
+	}
+	if len(checkpointStages) != len(stages) {
+		t.Fatalf("dry-run checkpoint list = %v", checkpointStages)
+	}
+	var tipCount int
+	for _, entry := range dry["instruction_packs"].([]any) {
+		pack := asObject(t, entry)
+		if pack["content_hash"] == "" || pack["version"] == nil {
+			t.Fatalf("dry-run pack entry missing lineage: %#v", pack)
+		}
+		tipCount++
+	}
+	_ = tipCount
+	var dependentID string
+	for _, entry := range dry["dependents"].([]any) {
+		dependentID = fmt.Sprint(asObject(t, entry)["work_item_id"])
+	}
+	if dependentID == "" {
+		t.Fatalf("dry-run dependents empty: %#v", dry["dependents"])
+	}
+	status = asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "authorize" {
+		t.Fatalf("dry run mutated workflow state: %#v", status)
+	}
+
+	runPic(t, bin, root, home, "work-item", "planning-reset", id, "owner")
+	status = asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "scan" {
+		t.Fatalf("post-reset status = %#v", status)
+	}
+	// The actual reset must retire exactly what the preview named: every seeded
+	// cascade row dies with the child, and the bug Work Item survives (it is not
+	// a materialized descendant).
+	verifyDB, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer verifyDB.Close()
+	resetChecks := []struct{ query string; want int }{
+		{`SELECT COUNT(*) FROM work_items WHERE id='` + childID + `'`, 0},
+		{`SELECT COUNT(*) FROM work_items WHERE id='wi-bug-child'`, 1},
+		{`SELECT COUNT(*) FROM work_items WHERE id='wi-grandchild'`, 1},
+		{`SELECT COUNT(*) FROM pipeline_runs WHERE id='pr-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id='` + id + `'`, 0},
+		{`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id='` + childID + `'`, 0},
+		{`SELECT COUNT(*) FROM work_item_artifacts WHERE id='wia-child'`, 0},
+		{`SELECT COUNT(*) FROM workflow_checkpoints WHERE id='wic-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_completion_reports WHERE id='wicr-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_verification_reports WHERE id='wivr-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_escalations WHERE id='wiem-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_owner_decisions WHERE id='wiod-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_aggregate_owner_decisions WHERE id='waod-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_events WHERE id='wiev-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_profiles WHERE id='wiprof-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_labels WHERE label='area:core'`, 0},
+		{`SELECT COUNT(*) FROM work_item_dependencies WHERE id='wid-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_gates WHERE id='wig-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_relations WHERE id='wir-child'`, 0},
+		{`SELECT COUNT(*) FROM implementation_authorizations WHERE id='wimpl-child'`, 0},
+		{`SELECT COUNT(*) FROM work_item_delivery_states WHERE work_item_id='` + childID + `'`, 0},
+		{`SELECT COUNT(*) FROM work_item_corrective_bugs WHERE verification_report_id='wivr-child'`, 0},
+	}
+	for _, check := range resetChecks {
+		var count int
+		if err := verifyDB.QueryRow(check.query).Scan(&count); err != nil || count != check.want {
+			t.Fatalf("post-reset cascade check failed: %s => %d (want %d) err=%v", check.query, count, check.want, err)
+		}
+	}
+}
+
+func TestSchemaMigrationsVersioned(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	versions := func() []string {
+		t.Helper()
+		rows, err := db.Query(`SELECT name FROM schema_migrations ORDER BY version`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer rows.Close()
+		var names []string
+		for rows.Next() {
+			var name string
+			if err := rows.Scan(&name); err != nil {
+				t.Fatal(err)
+			}
+			names = append(names, name)
+		}
+		return names
+	}
+	fresh := versions()
+	if len(fresh) == 0 {
+		t.Fatal("fresh database recorded no schema migrations")
+	}
+	for _, name := range fresh {
+		if strings.Contains(name, "legacy") {
+			t.Fatalf("fresh database recorded legacy migration %s", name)
+		}
+	}
+	var canonicalBaseline bool
+	for _, name := range fresh {
+		if name == "canonical_baseline" {
+			canonicalBaseline = true
+		}
+	}
+	if !canonicalBaseline {
+		t.Fatalf("fresh database missing canonical_baseline migration: %v", fresh)
+	}
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	if again := versions(); strings.Join(again, ",") != strings.Join(fresh, ",") {
+		t.Fatalf("second open changed recorded migrations: %v -> %v", fresh, again)
+	}
+	db.Close()
+
+	legacyPath := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := openSQLite(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE epics (id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')))`,
+		`CREATE TABLE tasks (id TEXT PRIMARY KEY, epic_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', priority TEXT DEFAULT 'medium', created_at TEXT DEFAULT (datetime('now')))`,
+		`INSERT INTO epics(id,title) VALUES('e-old','Legacy Epic')`,
+		`INSERT INTO tasks(id,epic_id,title) VALUES('t-old','e-old','Legacy Task')`,
+	} {
+		if _, err := legacy.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	legacy.Close()
+	if err := initDB(legacyPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openSQLite(legacyPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var epicRows, taskRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id='e-old' AND type='epic'`).Scan(&epicRows); err != nil || epicRows != 1 {
+		t.Fatalf("legacy epic migrated rows=%d err=%v", epicRows, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id='t-old' AND type='task'`).Scan(&taskRows); err != nil || taskRows != 1 {
+		t.Fatalf("legacy task migrated rows=%d err=%v", taskRows, err)
+	}
+	var legacyRecorded bool
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE name='legacy_schema_bootstrap'`).Scan(&legacyRecorded); err != nil || !legacyRecorded {
+		t.Fatalf("legacy migration not recorded err=%v", err)
+	}
+}
+
+func TestPartialLegacyStateMigrates(t *testing.T) {
+	tasksOnly := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := openSQLite(tasksOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE tasks(id TEXT PRIMARY KEY, epic_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', priority TEXT DEFAULT 'medium', created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO tasks(id,epic_id,title) VALUES('t-part','e-missing','Orphan Task')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := initDB(tasksOnly); err != nil {
+		t.Fatalf("tasks-only database failed to migrate: %v", err)
+	}
+	db, err = openSQLite(tasksOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var taskRows, violations int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id='t-part' AND type='task'`).Scan(&taskRows); err != nil || taskRows != 1 {
+		t.Fatalf("tasks-only migration rows=%d err=%v", taskRows, err)
+	}
+	var parentNull bool
+	if err := db.QueryRow(`SELECT parent_id IS NULL FROM work_items WHERE id='t-part'`).Scan(&parentNull); err != nil || !parentNull {
+		t.Fatalf("orphan task parent must be null: parentNull=%v err=%v", parentNull, err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil || violations != 0 {
+		t.Fatalf("tasks-only migration violations=%d err=%v", violations, err)
+	}
+	db.Close()
+
+	epicsOnly := filepath.Join(t.TempDir(), "epics.db")
+	db, err = openSQLite(epicsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE epics(id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO epics(id,title) VALUES('e-part','Lone Epic')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := initDB(epicsOnly); err != nil {
+		t.Fatalf("epics-only database failed to migrate: %v", err)
+	}
+	db, err = openSQLite(epicsOnly)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var epicRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id='e-part' AND type='epic'`).Scan(&epicRows); err != nil || epicRows != 1 {
+		t.Fatalf("epics-only migration rows=%d err=%v", epicRows, err)
+	}
+}
+
+func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`CREATE TABLE epics(id TEXT PRIMARY KEY, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')));
+		CREATE TABLE tasks(id TEXT PRIMARY KEY, epic_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', priority TEXT DEFAULT 'medium', created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO epics(id,title) VALUES('e-inject','Inject Epic');
+		INSERT INTO tasks(id,epic_id,title) VALUES('t-inject','e-inject','Inject Task')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	// A transactional step that performs REAL migration operations (the
+	// pre-reconcile rebuild and legacy import) and then fails: the version must
+	// stay unrecorded and every operation must roll back, including DDL.
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The runner creates the version table before applying any step.
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')))`); err != nil {
+		t.Fatal(err)
+	}
+	poison := schemaMigration{version: 99, name: "poison_reconcile", apply: func(db schemaDB) error {
+		if err := reconcileLegacySchema(db); err != nil {
+			return err
+		}
+		return errors.New("injected failure after reconcile operations")
+	}}
+	if err := applySchemaMigration(context.Background(), db, poison); err == nil || !strings.Contains(err.Error(), "injected failure") {
+		t.Fatalf("poison step error = %v", err)
+	}
+	var recorded int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=99`).Scan(&recorded); err != nil || recorded != 0 {
+		t.Fatalf("failed step recorded version: count=%d err=%v", recorded, err)
+	}
+	var workItemsTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='work_items'`).Scan(&workItemsTable); err != nil || workItemsTable != 0 {
+		t.Fatalf("reconcile DDL rolled back: work_items tables=%d err=%v", workItemsTable, err)
+	}
+	var epicRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM epics WHERE id='e-inject'`).Scan(&epicRows); err != nil || epicRows != 1 {
+		t.Fatalf("legacy epic row disturbed: rows=%d err=%v", epicRows, err)
+	}
+	db.Close()
+
+	// A DDL-producing step that fails midway: the created table must roll back.
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ddlPoison := schemaMigration{version: 98, name: "poison_ddl", apply: func(db schemaDB) error {
+		if _, err := db.Exec(`CREATE TABLE zz_poison (id TEXT)`); err != nil {
+			return err
+		}
+		return errors.New("injected DDL failure")
+	}}
+	if err := applySchemaMigration(context.Background(), db, ddlPoison); err == nil || !strings.Contains(err.Error(), "injected DDL failure") {
+		t.Fatalf("ddl poison error = %v", err)
+	}
+	var poisonTable int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='zz_poison'`).Scan(&poisonTable); err != nil || poisonTable != 0 {
+		t.Fatalf("DDL did not roll back: zz_poison tables=%d", poisonTable)
+	}
+	db.Close()
+
+	// Retry after the failures: the real migration completes and migrates rows.
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var migratedRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_items WHERE id IN ('e-inject','t-inject')`).Scan(&migratedRows); err != nil || migratedRows != 2 {
+		t.Fatalf("retry after failures migrated rows=%d err=%v", migratedRows, err)
+	}
+	var versions int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations`).Scan(&versions); err != nil || versions == 0 {
+		t.Fatalf("retry recorded no versions: count=%d err=%v", versions, err)
+	}
+}
+
+// Connection affinity constraint: foreign_keys and legacy_alter_table are
+// connection-scoped pragmas, and database/sql gives no affinity between
+// db.Exec and db.Begin. openSQLite's DSN enables foreign_keys on every new
+// connection and the test pools no idle connections, so a pragma sent through
+// the pool can never leak onto the transaction's connection — only a runner
+// that pins one *sql.Conn observes foreign_keys=OFF and legacy_alter_table=ON
+// inside the step's transaction.
+func TestSchemaMigrationPragmasRunOnThePinnedConnection(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The runner creates the version table before applying any step.
+	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')))`); err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxIdleConns(0)
+	var foreignKeys, legacyAlterTable int
+	probe := schemaMigration{version: 97, name: "pragma_affinity_probe", apply: func(db schemaDB) error {
+		if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
+			return err
+		}
+		return db.QueryRow(`PRAGMA legacy_alter_table`).Scan(&legacyAlterTable)
+	}}
+	if err := applySchemaMigration(context.Background(), db, probe); err != nil {
+		t.Fatal(err)
+	}
+	if foreignKeys != 0 {
+		t.Fatalf("migration transaction saw foreign_keys=%d: pragmas did not run on the transaction's connection", foreignKeys)
+	}
+	if legacyAlterTable != 1 {
+		t.Fatalf("migration transaction saw legacy_alter_table=%d: pragmas did not run on the transaction's connection", legacyAlterTable)
+	}
+}
+
+// --- Decomposition Policy v2 fixtures and tests ---
+
+const v2BlueprintArtifact = `{"decomposition_policy_version":2,"project_info":{"project":"Task System","nature":"CLI + pipeline + team","date":"2026-08-29"},"goals":{"primary_goal":"Reliable workflow","target_audience":"Owner and agents","key_message":"Every transition is durable"},"architecture":{"building_blocks":["CLI","Scheduler","SQLite"],"connection_summary":"CLI drives scheduler state","data_flow":"Inputs -> CLI -> SQLite"},"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing","reuse":"go-pic"}],"file_structure":[{"path":"go-pic/cmd/pic","purpose":"Workflow backend"}],"rri_requirements_matrix":[{"blueprint_section":"Lifecycle","requirements":["REQ-001"],"source_questions":["Q1"]},{"blueprint_section":"Delivery","requirements":["REQ-002"],"source_questions":["Q2"]}],"verification_seams":[{"id":"cli-materialize","surface":"pic work-item materialize against a temporary SQLite database","isolates":"materialization atomicity and idempotency","prior_art":"TestWorkItemGraphMaterialization"},{"id":"go-tests","surface":"go test ./... in the repository","isolates":"package-level behavior regressions"}]}`
+
+// v2TaskGraph builds the policy-v2 happy-path graph bound to the given approved
+// Contract lineage via source_contract.
+func v2TaskGraph(contractArtifactID string, contractRevision int, contractContentHash string) string {
+	return fmt.Sprintf(`{"version":3,"execution_policy":"strict_sequential","decomposition_policy_version":2,"source_contract":{"artifact_id":%q,"revision":%d,"content_hash":%q},"nodes":[`+
+		`{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]},`+
+		`{"key":"S01","type":"task","name":"Shared schema","parent_key":"F01","goal":"Widen the schema contract","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"seam":"cli-materialize","obligation_keys":["OB-003"],"command":"go test ./cmd/pic -run TestMaterialize","expected":"shared schema contract holds"}],"skillFamilies":[],"decomposition_mode":"shared_contract","exception_reason":"widens the schema consumed by CLI, scheduler, and dashboard","provides":["OB-003"],"consumes":[],"evidence_for":[],"obligation_keys":["OB-003"]},`+
+		`{"key":"W01","type":"task","name":"Widen","parent_key":"F01","goal":"Expand the covered surface","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["w.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["w.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./cmd/pic -run TestWiden","expected":"expanded surface covered"}],"skillFamilies":[],"decomposition_mode":"wide_refactor","exception_reason":"touches every call site before the contract stabilizes","paired_contract_node":"P01","provides":[],"consumes":[],"evidence_for":[],"obligation_keys":[]},`+
+		`{"key":"T01","type":"task","name":"Implement","parent_key":"F01","goal":"Implement requirement","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./...","expected":"requirement behavior proven"}],"skillFamilies":[],"provides":["OB-001"],"consumes":[],"evidence_for":["OB-001"],"obligation_keys":["OB-001"]},`+
+		`{"key":"T02","type":"bug","name":"Consume","parent_key":"F01","goal":"Consume shared schema","requirement_keys":["REQ-002"],"depends_on":["S01"],"priority":"P0","module":"core","files":["y.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["y.go"]},"verification":[{"seam":"cli-materialize","obligation_keys":["OB-002"],"command":"go test ./cmd/pic -run TestDelivery","expected":"delivery verified"}],"skillFamilies":[],"acceptance":"Given an approved graph\nWhen materialization runs\nThen projections commit atomically","provides":["OB-002"],"consumes":["OB-003"],"evidence_for":["OB-002","OB-003"],"obligation_keys":["OB-002","OB-003"],"depends_on_rationale":{"S01":"consumes the persisted schema contract S01 establishes"}},`+
+		`{"key":"P01","type":"task","name":"Contract cleanup","parent_key":"F01","goal":"Contract the widened surface","requirement_keys":["REQ-001"],"depends_on":["W01"],"priority":"P1","module":"core","files":["w.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["w.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./cmd/pic -run TestCleanup","expected":"cleanup verified"}],"skillFamilies":[],"provides":[],"consumes":[],"evidence_for":[],"obligation_keys":[],"depends_on_rationale":{"W01":"contracts the expansion W01 performs"}},`+
+		`{"key":"G01","type":"gate","name":"Integration gate","goal":"Verify the integrated delivery","requirement_keys":[],"depends_on":[],"decomposition_mode":"integration_gate","exception_reason":"verifies the integrated aggregate at the highest seam","obligation_keys":["OB-002"],"verification":[{"seam":"cli-materialize","obligation_keys":["OB-002"],"command":"go test ./cmd/pic -run TestDelivery","expected":"integrated delivery verified"}]}`+
+		`]}`, contractArtifactID, contractRevision, contractContentHash)
+}
+
+// v2StandaloneGraph is a policy-v1 standalone graph: the standalone planning
+// profile carries no Blueprint/Contract predecessors, so policy v1 applies.
+const v2StandaloneGraph = `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"IMPL","type":"task","name":"Standalone","goal":"Implement standalone","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}],"skillFamilies":[]}]}`
+
+// v2StandaloneGraphV2Policy is a policy-v2 standalone graph with a well-formed
+// but fake source_contract; saving it must fail closed because the standalone
+// planning profile has no approved Contract to bind.
+const v2StandaloneGraphV2Policy = `{"version":3,"execution_policy":"strict_sequential","decomposition_policy_version":2,"source_contract":{"artifact_id":"wia-phantom","revision":1,"content_hash":"sha256:phantom"},"nodes":[{"key":"IMPL","type":"task","name":"Standalone","goal":"Implement standalone","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./...","expected":"behavior proven"}],"skillFamilies":[]}]}`
+
+func v2ContractArtifact(artifactID string, revision int, contentHash string) string {
+	return fmt.Sprintf(`{"decomposition_policy_version":2,"obligation_schema_version":2,"project_name":"Task System","source_blueprint":{"artifact_id":%q,"revision":%d,"content_hash":%q},"deliverables":[{"item":"Lifecycle","details":"Persisted workflow","requirements":["REQ-001"]},{"item":"Delivery","details":"Verified delivery","requirements":["REQ-002"]}],"obligations":[{"id":"OB-001","requirement_keys":["REQ-001"],"behavior":"Persist workflow state","acceptance":"Given a valid workflow\nWhen it is persisted\nThen the state is queryable","class":"data_invariant","seam":"cli-materialize"},{"id":"OB-002","requirement_keys":["REQ-002"],"behavior":"Verify delivery","acceptance":"Given verified work\nWhen the owner reviews it\nThen the decision is recorded","class":"user_behavior","seam":"cli-materialize"},{"id":"OB-003","requirement_keys":["REQ-001"],"behavior":"Shared schema contract","acceptance":"Given a consumer node\nWhen it consumes the shared schema\nThen the provider contract holds","class":"interface_contract","seam":"cli-materialize"}],"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing stack"}],"task_graph_summary":{"tip_count":6,"estimated_minutes":240},"not_included":["Legacy migration"]}`, artifactID, revision, contentHash)
+}
+
+// approveV2Blueprint drives a full-depth Work Item through scan, rri, vision,
+// and a policy-v2 Blueprint approval, returning the approved Blueprint row.
+func approveV2Blueprint(t *testing.T, bin, root, home, id string) map[string]any {
+	t.Helper()
+	for _, stage := range []string{"scan", "rri", "vision"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	blueprint := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", v2BlueprintArtifact))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprint["id"].(string), "approved")
+	return blueprint
+}
+
+// seedV2Requirements adds the two Gherkin-backed requirements the v2 fixtures
+// reference, directly in the store like the other graph tests.
+func seedV2Requirements(t *testing.T, dbPath, epicID string) {
+	t.Helper()
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-v2a-`+epicID+`','`+epicID+`','REQ-001','Required','Given valid context
+When work runs
+Then it completes')`)
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-v2b-`+epicID+`','`+epicID+`','REQ-002','Delivery','Given verified work
+When the owner reviews it
+Then the decision is recorded')`)
+}
+
+func TestBlueprintArtifactPolicySchemas(t *testing.T) {
+	if err := validateBlueprintReport(validBlueprintArtifact); err != nil {
+		t.Fatalf("v1 blueprint fixture must validate unchanged: %v", err)
+	}
+	if err := validateBlueprintReport(v2BlueprintArtifact); err != nil {
+		t.Fatalf("v2 blueprint fixture must validate: %v", err)
+	}
+	noSeams := strings.Replace(v2BlueprintArtifact, `"verification_seams"`, `"declared_seams"`, 1)
+	if err := validateBlueprintReport(noSeams); err == nil || !strings.Contains(err.Error(), "at least one verification seam") {
+		t.Fatalf("v2 blueprint without seams = %v", err)
+	}
+	duplicate := strings.Replace(v2BlueprintArtifact, `{"id":"go-tests"`, `{"id":"cli-materialize"`, 1)
+	if err := validateBlueprintReport(duplicate); err == nil || !strings.Contains(err.Error(), "unique non-empty ids") {
+		t.Fatalf("v2 blueprint duplicate seam = %v", err)
+	}
+	emptySurface := strings.Replace(v2BlueprintArtifact, `"surface":"go test ./... in the repository"`, `"surface":""`, 1)
+	if err := validateBlueprintReport(emptySurface); err == nil || !strings.Contains(err.Error(), "surface and isolates") {
+		t.Fatalf("v2 blueprint empty seam surface = %v", err)
+	}
+	v1WithoutPreview := strings.Replace(validBlueprintArtifact, `"task_decomposition_preview"`, `"retired_preview"`, 1)
+	if err := validateBlueprintReport(v1WithoutPreview); err == nil || !strings.Contains(err.Error(), "task preview") {
+		t.Fatalf("v1 blueprint without preview = %v", err)
+	}
+	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":3`, 1)); err == nil || !strings.Contains(err.Error(), "unsupported decomposition_policy_version 3") {
+		t.Fatalf("unsupported policy version = %v", err)
+	}
+}
+
+func TestContractArtifactPolicySchemas(t *testing.T) {
+	if err := validateContractReport(validContractArtifact); err != nil {
+		t.Fatalf("v1 contract fixture must validate unchanged: %v", err)
+	}
+	if err := validateContractReport(v2ContractArtifact("wia-x", 1, "sha256:abc")); err != nil {
+		t.Fatalf("v2 contract fixture must validate: %v", err)
+	}
+	badClass := strings.Replace(v2ContractArtifact("wia-x", 1, "sha256:abc"), `"class":"data_invariant"`, `"class":"performance"`, 1)
+	if err := validateContractReport(badClass); err == nil || !strings.Contains(err.Error(), "decomposition class") {
+		t.Fatalf("v2 contract bad class = %v", err)
+	}
+	missingSeam := strings.Replace(v2ContractArtifact("wia-x", 1, "sha256:abc"), `"seam":"cli-materialize"`, `"seam":""`, 1)
+	if err := validateContractReport(missingSeam); err == nil || !strings.Contains(err.Error(), "requires a verification seam") {
+		t.Fatalf("v2 contract missing seam = %v", err)
+	}
+	unbound := strings.Replace(v2ContractArtifact("wia-x", 1, "sha256:abc"), `"source_blueprint":{"artifact_id":"wia-x","revision":1,"content_hash":"sha256:abc"},`, ``, 1)
+	if err := validateContractReport(unbound); err == nil || !strings.Contains(err.Error(), "source_blueprint") {
+		t.Fatalf("v2 contract without blueprint binding = %v", err)
+	}
+	if err := validateContractReport(strings.Replace(v2ContractArtifact("wia-x", 1, "sha256:abc"), `"decomposition_policy_version":2`, `"decomposition_policy_version":3`, 1)); err == nil || !strings.Contains(err.Error(), "unsupported decomposition_policy_version 3") {
+		t.Fatalf("unsupported policy version = %v", err)
+	}
+}
+
+func TestDecompositionPolicyApprovalChain(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Policy v2 Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	seedV2Requirements(t, dbPath, id)
+	blueprint := approveV2Blueprint(t, bin, root, home, id)
+	contractContent := v2ContractArtifact(blueprint["id"].(string), int(blueprint["revision"].(float64)), blueprint["content_hash"].(string))
+	contract := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contractContent))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", contract["id"].(string), "approved")
+
+	graphJSON := v2TaskGraph(contract["id"].(string), int(contract["revision"].(float64)), contract["content_hash"].(string))
+	graph := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graphJSON))
+	validated := asObject(t, runPic(t, bin, root, home, "work-item", "graph-validate", id))
+	if validated["valid"] != true || validated["decomposition_policy_version"] != float64(2) {
+		t.Fatalf("v2 graph validation = %#v", validated)
+	}
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", graph["id"].(string), "approved")
+
+	reject := func(name, graph, needle string) {
+		t.Helper()
+		runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graph)
+		if out := runPicError(t, bin, root, home, "work-item", "graph-validate", id); !strings.Contains(out, needle) {
+			t.Fatalf("%s: error = %s, want substring %q", name, out, needle)
+		}
+	}
+	// Missing edge rationale.
+	bad := strings.Replace(graphJSON, `"depends_on_rationale":{"S01":"consumes the persisted schema contract S01 establishes"}`, `"depends_on_rationale":{"S01":""}`, 1)
+	reject("empty edge rationale", bad, "requires a non-empty depends_on_rationale")
+	// Verification gate without a seam.
+	bad = strings.Replace(graphJSON, `"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./..."`, `"requirement_keys":["REQ-001"],"command":"go test ./..."`, 1)
+	reject("gate without seam", bad, "requires a seam")
+	// Verification gate seam the Blueprint does not declare.
+	bad = strings.Replace(graphJSON, `"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./..."`, `"seam":"e2e-browser","requirement_keys":["REQ-001"],"command":"go test ./..."`, 1)
+	reject("undeclared seam", bad, "which the approved Blueprint does not declare")
+	// Verification gate without requirement or obligation keys.
+	bad = strings.Replace(graphJSON, `"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./..."`, `"seam":"go-tests","command":"go test ./..."`, 1)
+	reject("gate without keys", bad, "at least one requirement or obligation key")
+	// Verification gate without expected evidence.
+	bad = strings.Replace(graphJSON, `"command":"go test ./...","expected":"requirement behavior proven"`, `"command":"go test ./..."`, 1)
+	reject("gate without expected", bad, "executable command and expected evidence")
+	// Verification gate referencing an unknown Contract obligation.
+	bad = strings.Replace(graphJSON, `"seam":"cli-materialize","obligation_keys":["OB-003"]`, `"seam":"cli-materialize","obligation_keys":["OB-404"]`, 1)
+	reject("unknown obligation", bad, "unknown Contract obligation OB-404")
+	// A second provider node for the same obligation makes provenance ambiguous.
+	bad = strings.Replace(graphJSON, `"provides":["OB-001"]`, `"provides":["OB-001","OB-002"]`, 1)
+	reject("duplicate obligation provider", bad, "must have exactly one provider node, found 2")
+	// An integration-gate node of any type must carry a verification entry.
+	bad = strings.Replace(graphJSON, `"verification":[{"seam":"cli-materialize","obligation_keys":["OB-002"],"command":"go test ./cmd/pic -run TestDelivery","expected":"integrated delivery verified"}]`, `"verification":[]`, 1)
+	reject("integration gate without verification", bad, "G01 requires at least one seam-bound verification entry")
+	// Shared-contract node without a downstream consumer (the consumer drops both
+	// the dependency and the consume so the Contract obligation graph stays valid).
+	bad = strings.Replace(graphJSON, `"depends_on":["S01"],"priority":"P0"`, `"depends_on":[],"priority":"P0"`, 1)
+	bad = strings.Replace(bad, `"depends_on_rationale":{"S01":"consumes the persisted schema contract S01 establishes"},`, ``, 1)
+	bad = strings.Replace(bad, `"consumes":["OB-003"]`, `"consumes":[]`, 1)
+	reject("shared contract without consumer", bad, "no downstream consumer depending on it")
+	// Wide refactor without a paired contract node.
+	bad = strings.Replace(graphJSON, `"paired_contract_node":"P01",`, ``, 1)
+	reject("wide refactor without pair", bad, "wide_refactor requires paired_contract_node")
+	// Wide refactor whose declaring node is outside the paired node's closure.
+	bad = strings.Replace(graphJSON, `"depends_on":["W01"],"priority":"P1","module":"core","files":["w.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["w.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./cmd/pic -run TestCleanup","expected":"cleanup verified"}],"skillFamilies":[],"provides":[],"consumes":[],"evidence_for":[],"obligation_keys":[],"depends_on_rationale":{"W01":"contracts the expansion W01 performs"}`, `"depends_on":[],"priority":"P1","module":"core","files":["w.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["w.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./cmd/pic -run TestCleanup","expected":"cleanup verified"}],"skillFamilies":[],"provides":[],"consumes":[],"evidence_for":[],"obligation_keys":[]`, 1)
+	reject("wide refactor closure", bad, "depends_on closure of its paired contract node P01")
+	// Integration gate on a node without obligation or requirement coverage.
+	bad = strings.Replace(graphJSON, `"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]`, `"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[],"decomposition_mode":"integration_gate","exception_reason":"aggregate verification gate"`, 1)
+	reject("integration gate without coverage", bad, "must list the obligations or requirements it verifies")
+	// Unknown mode.
+	bad = strings.Replace(graphJSON, `"decomposition_mode":"shared_contract"`, `"decomposition_mode":"horizontal"`, 1)
+	reject("unknown mode", bad, "unknown decomposition_mode")
+	// Exception mode without a reason.
+	bad = strings.Replace(graphJSON, `"exception_reason":"widens the schema consumed by CLI, scheduler, and dashboard"`, `"exception_reason":""`, 1)
+	reject("missing exception reason", bad, "without exception_reason")
+	// Multi-requirement node without node-level acceptance.
+	multiRequirement := strings.Replace(graphJSON, `"requirement_keys":["REQ-002"],"depends_on":["S01"]`, `"requirement_keys":["REQ-001","REQ-002"],"depends_on":["S01"]`, 1)
+	bad = strings.Replace(multiRequirement, `"acceptance":"Given an approved graph\nWhen materialization runs\nThen projections commit atomically",`, ``, 1)
+	reject("composed node without acceptance", bad, "requires node-level acceptance")
+	// Node-authored acceptance must be Gherkin.
+	bad = strings.Replace(graphJSON, `"acceptance":"Given an approved graph\nWhen materialization runs\nThen projections commit atomically"`, `"acceptance":"projections commit atomically"`, 1)
+	reject("non-gherkin acceptance", bad, "acceptance require Given, When, and Then steps")
+	// Unsupported policy version on a graph.
+	bad = strings.Replace(graphJSON, `"decomposition_policy_version":2`, `"decomposition_policy_version":3`, 1)
+	reject("unsupported policy version", bad, "unsupported decomposition_policy_version 3")
+
+	// The graph binds the exact approved Contract lineage: a stale hash or a
+	// wrong predecessor id fails closed at save time.
+	bad = strings.Replace(graphJSON, contract["content_hash"].(string), "sha256:stale", 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", bad); !strings.Contains(out, "must bind the approved Contract") {
+		t.Fatalf("stale contract binding = %s", out)
+	}
+	bad = strings.Replace(graphJSON, `"source_contract":{"artifact_id":"`+contract["id"].(string)+`"`, `"source_contract":{"artifact_id":"wia-wrong-lineage"`, 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", bad); !strings.Contains(out, "must bind the approved Contract") {
+		t.Fatalf("wrong-lineage contract binding = %s", out)
+	}
+	bad = strings.Replace(graphJSON, `"source_contract":{"artifact_id":"`+contract["id"].(string)+`","revision":`+fmt.Sprint(int(contract["revision"].(float64)))+`,"content_hash":"`+contract["content_hash"].(string)+`"},`, ``, 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", bad); !strings.Contains(out, "source_contract") {
+		t.Fatalf("missing source_contract = %s", out)
+	}
+
+	// Contract binding is re-checked against the approved Blueprint at save time.
+	unbound := strings.Replace(contractContent, blueprint["content_hash"].(string), "sha256:stale", 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "contracts", unbound); !strings.Contains(out, "must bind the approved Blueprint") {
+		t.Fatalf("stale blueprint binding = %s", out)
+	}
+	unbound = strings.Replace(contractContent, `"class":"user_behavior","seam":"cli-materialize"`, `"class":"user_behavior","seam":"e2e-browser"`, 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "contracts", unbound); !strings.Contains(out, "does not declare") {
+		t.Fatalf("undeclared obligation seam = %s", out)
+	}
+	// A v2 Contract without any approved Blueprint fails closed at save time.
+	fresh := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Unbound Contract Epic"))
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", fresh["id"].(string), "contracts", v2ContractArtifact("wia-x", 1, "sha256:abc")); !strings.Contains(out, "requires an approved Blueprint on the same planning lineage") {
+		t.Fatalf("v2 contract without blueprint = %s", out)
+	}
+	// A v1 Contract chain keeps validating under v1 rules.
+	runPic(t, bin, root, home, "work-item", "artifact-save", fresh["id"].(string), "contracts", validContractArtifact)
+
+	// A policy-v2 graph on a Work Item without Blueprint/Contract predecessors
+	// (standalone profile) is rejected instead of skipping seam authority.
+	standalone := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "No Seam Authority"))
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,task_id,requirement_key,title,acceptance_criteria) VALUES('req-nsa','`+standalone["id"].(string)+`','REQ-S1','Required','Given valid context
+When work runs
+Then it completes')`)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", standalone["id"].(string), "task_graph", v2StandaloneGraphV2Policy); !strings.Contains(out, "requires an approved Contract on the same planning lineage") {
+		t.Fatalf("standalone v2 graph without seam authority = %s", out)
+	}
+}
+
+func TestDecompositionPolicyV1Unchanged(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Policy v1 Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-v1','`+id+`','REQ-001','Required','Given valid context
+When work runs
+Then it completes')`)
+	for _, stage := range []string{"scan", "rri", "vision", "blueprint", "contracts"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	// The v1 graph has no decomposition fields at all and must still approve.
+	graph := `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]},{"key":"T01","type":"task","name":"Implement","parent_key":"F01","goal":"Implement requirement","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}],"skillFamilies":[]}]}`
+	artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graph))
+	validated := asObject(t, runPic(t, bin, root, home, "work-item", "graph-validate", id))
+	if validated["valid"] != true || validated["decomposition_policy_version"] != float64(0) {
+		t.Fatalf("v1 graph validation = %#v", validated)
+	}
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", artifact["id"].(string), "approved")
+	materialized := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id))
+	if materialized["created"] != float64(2) {
+		t.Fatalf("v1 materialization = %#v", materialized)
+	}
+}
+
+func TestDecompositionProjectionMaterialization(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Projection Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	seedV2Requirements(t, dbPath, id)
+	blueprint := approveV2Blueprint(t, bin, root, home, id)
+	contractContent := v2ContractArtifact(blueprint["id"].(string), int(blueprint["revision"].(float64)), blueprint["content_hash"].(string))
+	contract := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contractContent))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", contract["id"].(string), "approved")
+	graphJSON := v2TaskGraph(contract["id"].(string), int(contract["revision"].(float64)), contract["content_hash"].(string))
+	graph := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graphJSON))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", graph["id"].(string), "approved")
+	materialized := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id))
+	if materialized["created"] != float64(7) {
+		t.Fatalf("v2 materialization = %#v", materialized)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The aggregate root epic is not a projection; each node row is, and every
+	// one carries the exact source graph lineage.
+	nodeProjection := func(key string) (string, string, string, string, int, string) {
+		t.Helper()
+		var mode, reason, paired, artifactID, contentHash string
+		var revision int
+		if err := db.QueryRow(`SELECT wi.decomposition_mode,wi.decomposition_reason,wi.paired_contract_node,wi.source_graph_artifact_id,wi.source_graph_revision,wi.source_graph_content_hash FROM work_items wi JOIN work_item_materializations m ON m.work_item_id=wi.id WHERE m.root_work_item_id=? AND m.node_key=?`, id, key).Scan(&mode, &reason, &paired, &artifactID, &revision, &contentHash); err != nil {
+			t.Fatal(err)
+		}
+		return mode, reason, paired, artifactID, revision, contentHash
+	}
+	var epicMode string
+	if err := db.QueryRow(`SELECT decomposition_mode FROM work_items WHERE id=?`, id).Scan(&epicMode); err != nil || epicMode != "vertical" {
+		t.Fatalf("aggregate root carries the column default mode=%q err=%v", epicMode, err)
+	}
+	featureMode, _, _, lineageArtifact, lineageRevision, lineageHash := nodeProjection("F01")
+	if featureMode != "vertical" {
+		t.Fatalf("feature projection mode = %q, want normalized vertical", featureMode)
+	}
+	// An omitted v2 mode is normalized to vertical before persistence.
+	t01Mode, _, _, _, _, _ := nodeProjection("T01")
+	if t01Mode != "vertical" {
+		t.Fatalf("omitted v2 mode persisted as %q, want vertical", t01Mode)
+	}
+	gateMode, _, _, _, _, _ := nodeProjection("G01")
+	if gateMode != "integration_gate" {
+		t.Fatalf("integration gate projection mode = %q", gateMode)
+	}
+	widenedMode, widenedReason, widenedPaired, _, _, _ := nodeProjection("W01")
+	if widenedMode != "wide_refactor" || widenedPaired != "P01" || !strings.Contains(widenedReason, "call site") {
+		t.Fatalf("wide refactor projection = %q/%q/%q", widenedMode, widenedReason, widenedPaired)
+	}
+	sharedMode, sharedReason, _, _, _, _ := nodeProjection("S01")
+	if sharedMode != "shared_contract" || !strings.Contains(sharedReason, "schema consumed by") {
+		t.Fatalf("shared contract projection = %q/%q", sharedMode, sharedReason)
+	}
+	var rationale, relatedID string
+	if err := db.QueryRow(`SELECT r.rationale,r.related_work_item_id FROM work_item_relations r JOIN work_item_materializations m ON m.work_item_id=r.work_item_id WHERE m.root_work_item_id=? AND m.node_key='T02' AND r.relation_type='blocks'`, id).Scan(&rationale, &relatedID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rationale, "consumes the persisted schema contract") {
+		t.Fatalf("edge rationale = %q", rationale)
+	}
+	var providerNode string
+	if err := db.QueryRow(`SELECT node_key FROM work_item_materializations WHERE work_item_id=? AND root_work_item_id=?`, relatedID, id).Scan(&providerNode); err != nil || providerNode != "S01" {
+		t.Fatalf("rationale target node = %q err=%v", providerNode, err)
+	}
+	if lineageArtifact != graph["id"].(string) || lineageRevision != int(graph["revision"].(float64)) || lineageHash != graph["content_hash"].(string) {
+		t.Fatalf("source lineage = %s@%d (%s), want %s@%v (%s)", lineageArtifact, lineageRevision, lineageHash, graph["id"], graph["revision"], graph["content_hash"])
+	}
+	var t02ID, w01ID string
+	if err := db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='T02'`, id).Scan(&t02ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='W01'`, id).Scan(&w01ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// pic show exposes the projection metadata and edge rationale.
+	shown := asObject(t, runPic(t, bin, root, home, "show", w01ID))
+	item := shown["work_item"].(map[string]any)
+	if item["decomposition_mode"] != "wide_refactor" || item["paired_contract_node"] != "P01" || item["source_graph_artifact_id"] != graph["id"].(string) {
+		t.Fatalf("pic show work_item projection = %#v", item)
+	}
+	shownConsumer := asObject(t, runPic(t, bin, root, home, "show", t02ID))
+	dependencies := shownConsumer["dependencies"].([]any)
+	foundRationale := false
+	for _, entry := range dependencies {
+		dependency := entry.(map[string]any)
+		if dependency["rationale"] != nil && strings.Contains(fmt.Sprint(dependency["rationale"]), "consumes the persisted schema contract") {
+			foundRationale = true
+		}
+	}
+	if !foundRationale {
+		t.Fatalf("pic show dependencies missing rationale: %#v", dependencies)
+	}
+
+	// Standalone Work Items (no blueprint stage) keep v2 rules without seam
+	// binding and record their own projection.
+	task := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Standalone v2"))
+	taskID := task["id"].(string)
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,task_id,requirement_key,title,acceptance_criteria) VALUES('req-standalone','`+taskID+`','REQ-001','Required','Given valid context
+When work runs
+Then it completes')`)
+	for _, stage := range []string{"scan", "rri"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", taskID, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", taskID, stage, artifact["id"].(string), decision)
+	}
+	standalone := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", taskID, "task_graph", v2StandaloneGraph))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", taskID, "task_graph", standalone["id"].(string), "approved")
+	if out := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", taskID)); out["total"] != float64(1) {
+		t.Fatalf("standalone materialization = %#v", out)
+	}
+	// The standalone projection is the Work Item itself.
+	var taskMode, taskArtifact string
+	var taskRevision int
+	if err := db.QueryRow(`SELECT decomposition_mode,source_graph_artifact_id,source_graph_revision FROM work_items WHERE id=?`, taskID).Scan(&taskMode, &taskArtifact, &taskRevision); err != nil {
+		t.Fatal(err)
+	}
+	if taskMode != "vertical" || taskArtifact != standalone["id"].(string) || taskRevision != 1 {
+		t.Fatalf("standalone projection = mode %q lineage %s@%d", taskMode, taskArtifact, taskRevision)
+	}
+
+	// The frozen TIP resolves a single-requirement node's acceptance explicitly:
+	// T01 authored no acceptance, so content.acceptance carries REQ-001's criteria.
+	runPic(t, bin, root, home, "work-item", "authorize", id, "owner")
+	var t01ID string
+	if err := db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='T01'`, id).Scan(&t01ID); err != nil {
+		t.Fatal(err)
+	}
+	runPic(t, bin, root, home, "workflow", "pipeline-claim", t01ID, "worker")
+	var frozenAcceptance string
+	if err := db.QueryRow(`SELECT json_extract(content_json,'$.content.acceptance') FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, t01ID).Scan(&frozenAcceptance); err != nil {
+		t.Fatal(err)
+	}
+	if frozenAcceptance != "Given valid context\nWhen work runs\nThen it completes" {
+		t.Fatalf("frozen TIP acceptance = %q, want the resolved requirement acceptance", frozenAcceptance)
+	}
+}
+
+func TestDecompositionProjectionMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a database already migrated to the pre-v8 baseline: versions 1-4
+	// and 6 recorded, legacy steps never carried, old-shape core tables.
+	if _, err = db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')));
+		CREATE TABLE work_items (id TEXT PRIMARY KEY, type TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', priority TEXT DEFAULT 'medium', status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')));
+		CREATE TABLE work_item_relations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL, relation_type TEXT NOT NULL, related_work_item_id TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO work_items(id,type,title) VALUES('wi-old','epic','Old Epic');
+		INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES('wir-old','wi-old','blocks','wi-old');
+		INSERT INTO schema_migrations(version,name) VALUES(1,'pre_reconcile_schema'),(2,'artifact_stage_widening'),(3,'pipeline_columns_reconcile'),(4,'canonical_baseline'),(6,'canonical_backfills')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := initDB(dbPath); err != nil {
+		t.Fatalf("pre-v8 database failed to migrate: %v", err)
+	}
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var recorded int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=8`).Scan(&recorded); err != nil || recorded != 1 {
+		t.Fatalf("migration 8 recorded=%d err=%v", recorded, err)
+	}
+	var mode, rationale string
+	if err := db.QueryRow(`SELECT decomposition_mode FROM work_items WHERE id='wi-old'`).Scan(&mode); err != nil || mode != "vertical" {
+		t.Fatalf("projection default mode=%q, want vertical: err=%v", mode, err)
+	}
+	if err := db.QueryRow(`SELECT rationale FROM work_item_relations WHERE id='wir-old'`).Scan(&rationale); err != nil || rationale != "" {
+		t.Fatalf("rationale default=%q err=%v", rationale, err)
+	}
+	var revision int
+	if err := db.QueryRow(`SELECT source_graph_revision FROM work_items WHERE id='wi-old'`).Scan(&revision); err != nil || revision != 0 {
+		t.Fatalf("source revision default=%d err=%v", revision, err)
+	}
+	db.Close()
+	// Once-semantics: a second open must not re-apply the additive columns.
+	if err := initDB(dbPath); err != nil {
+		t.Fatalf("second open re-applied migration 8: %v", err)
+	}
+}
+
+func TestTaskGraphApprovalCheckpointQuestions(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Approval Questions"))
+	id := epic["id"].(string)
+	runSQLite(t, filepath.Join(root, ".pi", "tasks.db"), `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-q','`+id+`','REQ-001','Required','Given valid context
+When work runs
+Then it completes')`)
+	for _, stage := range []string{"scan", "rri", "vision", "blueprint", "contracts"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "task_graph" {
+		t.Fatalf("next_stage = %#v, want task_graph", status["next_stage"])
+	}
+	questions, ok := status["checkpoint_questions"].([]any)
+	if !ok || len(questions) != 5 {
+		t.Fatalf("checkpoint_questions = %#v", status["checkpoint_questions"])
+	}
+	for _, question := range []string{"too coarse or too fine", "independently meaningful verification", "genuinely gate execution", "horizontal exceptions justified", "merge or split"} {
+		found := false
+		for _, entry := range questions {
+			if strings.Contains(fmt.Sprint(entry), question) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("checkpoint_questions missing %q: %#v", question, questions)
+		}
+	}
+	// Other stages do not carry the Task Graph granularity questions.
+	early := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Early Stage"))
+	if status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", early["id"].(string))); status["next_stage"] == "task_graph" {
+		t.Fatalf("early stage unexpectedly at task_graph: %#v", status)
+	} else if status["checkpoint_questions"] != nil {
+		t.Fatalf("non-task_graph stage carries checkpoint_questions: %#v", status["checkpoint_questions"])
+	}
+}
+
+func TestRejectedCheckpointsDoNotSupplyPlanningAuthority(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Rejected Authority"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	seedV2Requirements(t, dbPath, id)
+	blueprint := approveV2Blueprint(t, bin, root, home, id)
+	contractContent := v2ContractArtifact(blueprint["id"].(string), int(blueprint["revision"].(float64)), blueprint["content_hash"].(string))
+	contract := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contractContent))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", contract["id"].(string), "approved")
+
+	// A newer REJECTED Contract revision never supplies obligation or lineage
+	// authority: re-seed the approved revision-1 checkpoint next to a rejected
+	// revision-2 checkpoint and the graph must keep binding revision 1.
+	contract2 := strings.Replace(contractContent, "Persist workflow state", "Rewritten behavior", 1)
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contract2)
+	runSQLite(t, dbPath, `INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-c1-reapproved','`+id+`','contracts','`+contract["id"].(string)+`',1,'`+contract["content_hash"].(string)+`','approved'),
+		('wic-c2-rejected','`+id+`','contracts','wia-c2',2,'sha256:rejected','rejected')`)
+	graphJSON := v2TaskGraph(contract["id"].(string), 1, contract["content_hash"].(string))
+	graph := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graphJSON))
+	if validated := asObject(t, runPic(t, bin, root, home, "work-item", "graph-validate", id)); validated["valid"] != true {
+		t.Fatalf("graph must bind the last approved contract: %#v", validated)
+	}
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", graph["id"].(string), "approved")
+	if materialized := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id)); materialized["created"] != float64(7) {
+		t.Fatalf("materialization against the approved lineage = %#v", materialized)
+	}
+
+	// A rejected NEWER Task Graph checkpoint takes no authority either: saving
+	// revision 2 leaves the approved revision-1 checkpoint in place (materiali-
+	// zations block its deletion), so re-materialization reuses revision 1.
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graphJSON)
+	runSQLite(t, dbPath, `INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-g2-rejected','`+id+`','task_graph','`+graph["id"].(string)+`',2,'`+graph["content_hash"].(string)+`','rejected')`)
+	if again := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id)); again["created"] != float64(0) || again["total"] != float64(7) {
+		t.Fatalf("rejected graph checkpoint must not re-materialize: %#v", again)
+	}
+	rejectedDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rejectedMappings int
+	if err := rejectedDB.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE checkpoint_id='wic-g2-rejected'`).Scan(&rejectedMappings); err != nil {
+		t.Fatal(err)
+	}
+	rejectedDB.Close()
+	if rejectedMappings != 0 {
+		t.Fatalf("rejected checkpoint gained %d materialization mappings", rejectedMappings)
+	}
+
+	// Fail closed: with ONLY a rejected Blueprint checkpoint, a policy-v2
+	// Contract cannot save and the contracts stage cannot clear its
+	// predecessor gate.
+	other := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Rejected Only"))
+	otherID := other["id"].(string)
+	seedV2Requirements(t, dbPath, otherID)
+	rejectedBlueprint := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", otherID, "blueprint", v2BlueprintArtifact))
+	runSQLite(t, dbPath, `INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-b-rejected','`+otherID+`','blueprint','`+rejectedBlueprint["id"].(string)+`',1,'`+rejectedBlueprint["content_hash"].(string)+`','rejected')`)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", otherID, "contracts", v2ContractArtifact("wia-x", 1, "sha256:abc")); !strings.Contains(out, "requires an approved Blueprint on the same planning lineage") {
+		t.Fatalf("rejected blueprint must not authorize a v2 contract: %s", out)
+	}
+	// A v1 contract can still save, but the predecessor gate refuses approval
+	// because the blueprint stage holds only a rejected checkpoint.
+	runPic(t, bin, root, home, "work-item", "artifact-save", otherID, "contracts", validContractArtifact)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", otherID, "contracts", "current", "approved"); !strings.Contains(out, "Previous stage blueprint is not approved") {
+		t.Fatalf("rejected blueprint must not clear the predecessor gate: %s", out)
+	}
+
+	// Predecessor fallback: the last APPROVED checkpoint clears the gate even
+	// when a newer revision of the same stage was rejected.
+	fallback := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Predecessor Fallback"))
+	fallbackID := fallback["id"].(string)
+	seedV2Requirements(t, dbPath, fallbackID)
+	for _, stage := range []string{"scan", "rri", "vision"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", fallbackID, stage, artifact["id"].(string), decision)
+	}
+	bp1 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, "blueprint", v2BlueprintArtifact))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", fallbackID, "blueprint", bp1["id"].(string), "approved")
+	revised := strings.Replace(v2BlueprintArtifact, "Reliable workflow", "Revised reliable workflow", 1)
+	bp2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, "blueprint", revised))
+	runSQLite(t, dbPath, `INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-fb1-approved','`+fallbackID+`','blueprint','`+bp1["id"].(string)+`',1,'`+bp1["content_hash"].(string)+`','approved'),
+		('wic-fb2-rejected','`+fallbackID+`','blueprint','`+bp2["id"].(string)+`',2,'`+bp2["content_hash"].(string)+`','rejected')`)
+	runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, "contracts", validContractArtifact)
+	runPic(t, bin, root, home, "work-item", "artifact-approve", fallbackID, "contracts", "current", "approved")
 }

@@ -165,13 +165,6 @@ func addEventWithModel(db workflowExecer, workItemID, eventType, role, model, su
 	return err
 }
 
-func requireTask(db databaseQueryer, id string) error {
-	if _, err := workItemByID(db.(*sql.DB), id); err != nil {
-		return fmt.Errorf("Work Item %s not found", id)
-	}
-	return nil
-}
-
 func verificationText(value any) string {
 	if value == nil {
 		return ""

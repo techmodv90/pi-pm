@@ -42,7 +42,7 @@ func cmdShow(args []string) error {
 			return err
 		}
 		children, _ := queryMaps(db, `SELECT `+workItemColumns+` FROM work_items WHERE parent_id=? ORDER BY created_at,id`, id)
-		dependencies, _ := queryMaps(db, `SELECT r.id,r.work_item_id,r.related_work_item_id AS depends_on_work_item_id,blocker.title,blocker.type,blocker.status,blocker.review_status FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=? AND r.relation_type='blocks'`, id)
+		dependencies, _ := queryMaps(db, `SELECT r.id,r.work_item_id,r.related_work_item_id AS depends_on_work_item_id,r.rationale,blocker.title,blocker.type,blocker.status,blocker.review_status FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=? AND r.relation_type='blocks'`, id)
 		relations, _ := queryMaps(db, `SELECT r.*,related.title,related.type,related.status FROM work_item_relations r JOIN work_items related ON related.id=r.related_work_item_id WHERE r.work_item_id=? ORDER BY r.created_at,r.id`, id)
 		artifacts, _ := queryMaps(db, `SELECT * FROM work_item_artifacts WHERE work_item_id=? ORDER BY stage,revision DESC`, id)
 		checkpoints, _ := queryMaps(db, `SELECT * FROM workflow_checkpoints WHERE work_item_id=? ORDER BY created_at`, id)

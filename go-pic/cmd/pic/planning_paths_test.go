@@ -1,6 +1,7 @@
 package main
 
 import (
+	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -256,8 +257,8 @@ Then it completes')`)
 		t.Fatal(err)
 	}
 	var envelope struct {
-		Content      instructionPackContent `json:"content"`
-		Requirements []requirementSnapshot  `json:"requirements"`
+		Content      tip.InstructionPackContent `json:"content"`
+		Requirements []tip.RequirementSnapshot  `json:"requirements"`
 	}
 	if err := json.Unmarshal([]byte(contentJSON), &envelope); err != nil {
 		t.Fatalf("frozen pack content not canonical: %v", err)
