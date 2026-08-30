@@ -22,17 +22,28 @@ test("parsePicShow normalizes a canonical show document and defaults absent coll
 
 test("parsePicShow preserves present collections and scalar flags", () => {
   const artifact = { id: "war-1", stage: "scan", revision: 1, content_hash: "sha256:x" };
+  const executionState = {
+    active_instruction_pack_id: "",
+    candidate_run_id: "",
+    review_status: "",
+    owner_approval_required: false,
+    completion_report_id: "",
+    verification_status: "",
+    owner_decision: "",
+    next_stage: "instruction_pack",
+    pipeline_stage: "",
+  };
   const parsed = parsePicShow({
     work_item: { ...workItem, review_status: "pending" },
     artifacts: [artifact],
     ready: true,
     canonical: true,
-    execution_state: "instruction_pack",
+    execution_state: executionState,
   });
   assert.deepEqual(parsed.artifacts, [artifact]);
   assert.equal(parsed.ready, true);
   assert.equal(parsed.canonical, true);
-  assert.equal(parsed.execution_state, "instruction_pack");
+  assert.deepEqual(parsed.execution_state, executionState);
 });
 
 test("parsePicShow fails closed naming the malformed field", () => {
@@ -44,6 +55,7 @@ test("parsePicShow fails closed naming the malformed field", () => {
   assert.throws(() => parsePicShow({ work_item: { id: "wi-1", type: "task", title: "x" }, artifacts: "nope" }), /artifacts must be an array/);
   assert.throws(() => parsePicShow({ work_item: workItem, checkpoints: 7 }), /checkpoints must be an array/);
   assert.throws(() => parsePicShow({ work_item: workItem, ready: "yes" }), /ready must be a boolean/);
+  assert.throws(() => parsePicShow({ work_item: workItem, execution_state: "instruction_pack" }), /execution_state object/);
 });
 
 test("parsePicShow rejects malformed collection entries naming the index", () => {

@@ -149,6 +149,18 @@ export interface PicProfile {
   content_hash?: string;
 }
 
+export interface PicExecutionState {
+  active_instruction_pack_id: string;
+  candidate_run_id: string;
+  review_status: string;
+  owner_approval_required: boolean;
+  completion_report_id: string;
+  verification_status: string;
+  owner_decision: string;
+  next_stage: string;
+  pipeline_stage: string;
+}
+
 export interface PicShowDocument {
   work_item: PicWorkItem;
   project?: PicProject;
@@ -167,7 +179,7 @@ export interface PicShowDocument {
   profiles: PicProfile[];
   ready?: boolean;
   canonical?: boolean;
-  execution_state?: string;
+  execution_state?: PicExecutionState;
   current_review?: Record<string, unknown>;
   error?: string;
 }
@@ -236,8 +248,12 @@ export function parsePicShow(raw: unknown): PicShowDocument {
   if (doc.ready !== undefined) parsed.ready = optionalFlag(doc.ready, "ready");
   if (doc.canonical !== undefined) parsed.canonical = optionalFlag(doc.canonical, "canonical");
   if (doc.execution_state !== undefined) {
-    if (typeof doc.execution_state !== "string") throw new Error("pic show execution_state must be a string");
-    parsed.execution_state = doc.execution_state;
+    const state = requireObject(doc.execution_state, "execution_state object");
+    for (const key of ["active_instruction_pack_id", "candidate_run_id", "review_status", "completion_report_id", "verification_status", "owner_decision", "next_stage", "pipeline_stage"] as const) {
+      if (typeof state[key] !== "string") throw new Error(`pic show execution_state.${key} must be a string`);
+    }
+    if (typeof state.owner_approval_required !== "boolean") throw new Error("pic show execution_state.owner_approval_required must be a boolean");
+    parsed.execution_state = state as unknown as PicExecutionState;
   }
   if (doc.current_review !== undefined) {
     parsed.current_review = requireObject(doc.current_review, "current_review object");
