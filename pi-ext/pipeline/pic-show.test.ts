@@ -58,6 +58,11 @@ test("parsePicShow fails closed naming the malformed field", () => {
   assert.throws(() => parsePicShow({ work_item: workItem, execution_state: "instruction_pack" }), /execution_state object/);
 });
 
+test("parsePicShow treats null execution_state as absent for aggregates", () => {
+  const parsed = parsePicShow({ work_item: { id: "wi-2", type: "epic", title: "Aggregate" }, execution_state: null });
+  assert.equal(parsed.execution_state, undefined);
+});
+
 test("parsePicShow rejects malformed collection entries naming the index", () => {
 	const workItem = { id: "wi-1", type: "task", title: "Leaf" };
 	assert.throws(() => parsePicShow({ work_item: workItem, artifacts: [null] }), /pic show artifacts\[0\] must be an object/);

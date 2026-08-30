@@ -247,7 +247,7 @@ export function parsePicShow(raw: unknown): PicShowDocument {
   }
   if (doc.ready !== undefined) parsed.ready = optionalFlag(doc.ready, "ready");
   if (doc.canonical !== undefined) parsed.canonical = optionalFlag(doc.canonical, "canonical");
-  if (doc.execution_state !== undefined) {
+  if (doc.execution_state !== undefined && doc.execution_state !== null) {
     const state = requireObject(doc.execution_state, "execution_state object");
     for (const key of ["active_instruction_pack_id", "candidate_run_id", "review_status", "completion_report_id", "verification_status", "owner_decision", "next_stage", "pipeline_stage"] as const) {
       if (typeof state[key] !== "string") throw new Error(`pic show execution_state.${key} must be a string`);
