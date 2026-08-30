@@ -12,7 +12,7 @@ import (
 	"strings"
 )
 
-const workItemColumns = `id,type,parent_id,title,description,status,priority,deferred,claimed_at,claimed_by,review_status,review_notes,planning_depth,created_at`
+const workItemColumns = `id,type,parent_id,title,description,status,priority,deferred,claimed_at,claimed_by,review_status,review_notes,planning_depth,created_at,decomposition_mode,decomposition_reason,paired_contract_node,source_graph_artifact_id,source_graph_revision,source_graph_content_hash`
 
 var workItemLabelPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9._:/-]{0,254}$`)
 
@@ -988,7 +988,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		subjectColumn = "epic_id"
 	}
 	var scanApproved, finalized, revision int
-	if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage='scan'`, args[0]).Scan(&scanApproved); err != nil || scanApproved != 1 {
+	if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage='scan' AND decision_type='accepted'`, args[0]).Scan(&scanApproved); err != nil || scanApproved != 1 {
 		return errors.New("RRI finalization requires one approved Scan checkpoint")
 	}
 	if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_events finalized
@@ -1002,7 +1002,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 	}
 	if finalized != 0 {
 		var approved int
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&approved); err != nil {
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage='rri' AND decision_type='approved'`, args[0]).Scan(&approved); err != nil {
 			return err
 		}
 		if approved != 0 {
@@ -1099,6 +1099,11 @@ func workItemArtifactSave(db *sql.DB, args []string) error {
 			return err
 		}
 	}
+	if args[1] == "blueprint" {
+		if err := validateBlueprintReport(args[2]); err != nil {
+			return err
+		}
+	}
 	if args[1] == "contracts" {
 		if err := validateContractReport(args[2]); err != nil {
 			return err
@@ -1111,6 +1116,21 @@ func workItemArtifactSave(db *sql.DB, args []string) error {
 	defer tx.Rollback()
 	if _, err = workItemByIDTx(tx, args[0]); err != nil {
 		return err
+	}
+	if args[1] == "contracts" {
+		// Cross-artifact seam binding needs the approved Blueprint, so it runs
+		// inside the transaction instead of the pure pre-flight above.
+		if err = validateContractPolicyBinding(tx, args[0], args[2]); err != nil {
+			return err
+		}
+	}
+	if args[1] == "task_graph" {
+		// The Task Graph's own predecessor binding is checked at save so a
+		// stale or wrong-lineage source_contract fails immediately; full graph
+		// validation stays at validate/approve to preserve the draft flow.
+		if err = validateTaskGraphSourceContractBindingJSON(tx, args[0], args[2]); err != nil {
+			return err
+		}
 	}
 	var revision int
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage=?`, args[0], args[1]).Scan(&revision); err != nil {
@@ -1234,6 +1254,10 @@ func validateVisionReport(content string) error {
 	return nil
 }
 
+// obligationClasses is the primary-class enum for decomposition policy v2
+// Contract obligations. Hybrids pick the dominant class.
+var obligationClasses = []string{"user_behavior", "data_invariant", "interface_contract", "security", "migration_rule", "operational_rule", "integration_gate"}
+
 func validateContractReport(content string) error {
 	var report struct {
 		ProjectName  string `json:"project_name"`
@@ -1247,11 +1271,20 @@ func validateContractReport(content string) error {
 			Tips    int `json:"tip_count"`
 			Minutes int `json:"estimated_minutes"`
 		} `json:"task_graph_summary"`
-		NotIncluded []string             `json:"not_included"`
+		NotIncluded []string                 `json:"not_included"`
 		Obligations []tip.ContractObligation `json:"obligations"`
+		SourceBlueprint struct {
+			ArtifactID  string `json:"artifact_id"`
+			Revision    int    `json:"revision"`
+			ContentHash string `json:"content_hash"`
+		} `json:"source_blueprint"`
+		DecompositionPolicyVersion int `json:"decomposition_policy_version"`
 	}
 	if err := json.Unmarshal([]byte(content), &report); err != nil || report.ProjectName == "" || len(report.Deliverables) == 0 || len(report.TechStack) == 0 || len(report.NotIncluded) == 0 || report.Summary.Tips < 1 || report.Summary.Minutes < 1 {
 		return errors.New("Contract artifact must contain valid project, deliverables, stack, task graph summary, and exclusions")
+	}
+	if report.DecompositionPolicyVersion < 0 || report.DecompositionPolicyVersion > 2 {
+		return fmt.Errorf("unsupported decomposition_policy_version %d", report.DecompositionPolicyVersion)
 	}
 	for _, item := range report.Deliverables {
 		if item.Item == "" || item.Details == "" || len(item.Requirements) == 0 {
@@ -1270,6 +1303,110 @@ func validateContractReport(content string) error {
 		if err := validateGherkinSteps(obligation.Acceptance); err != nil {
 			return fmt.Errorf("Contract obligation %s acceptance %w", obligation.ID, err)
 		}
+		if report.DecompositionPolicyVersion == 2 {
+			if !contains(obligationClasses, obligation.Class) {
+				return fmt.Errorf("Contract obligation %s requires a decomposition class from %s", obligation.ID, strings.Join(obligationClasses, "|"))
+			}
+			if strings.TrimSpace(obligation.Seam) == "" {
+				return fmt.Errorf("Contract obligation %s requires a verification seam", obligation.ID)
+			}
+		}
+	}
+	if report.DecompositionPolicyVersion == 2 && (report.SourceBlueprint.ArtifactID == "" || report.SourceBlueprint.Revision < 1 || report.SourceBlueprint.ContentHash == "") {
+		return errors.New("Contract policy v2 must bind the approved Blueprint artifact id, revision, and content hash in source_blueprint")
+	}
+	return nil
+}
+
+// validateContractPolicyBinding fails a decomposition-policy-v2 Contract closed
+// unless it binds the exact approved Blueprint on the same planning lineage and
+// every obligation seam references a Blueprint-declared verification seam. It
+// runs inside the caller's transaction at both the Contract save and approve
+// paths; policy v1 content passes through unchanged.
+func validateContractPolicyBinding(db databaseQueryer, workItemID, content string) error {
+	var report struct {
+		DecompositionPolicyVersion int `json:"decomposition_policy_version"`
+		SourceBlueprint            struct {
+			ArtifactID  string `json:"artifact_id"`
+			Revision    int    `json:"revision"`
+			ContentHash string `json:"content_hash"`
+		} `json:"source_blueprint"`
+		Obligations []tip.ContractObligation `json:"obligations"`
+	}
+	if err := json.Unmarshal([]byte(content), &report); err != nil {
+		return nil // invalid JSON is rejected by validateContractReport
+	}
+	if report.DecompositionPolicyVersion != 2 {
+		return nil
+	}
+	var artifactID, contentHash, blueprintContent string
+	var revision int
+	if err := db.QueryRow(`SELECT c.artifact_id,c.artifact_revision,c.content_hash,a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='blueprint' AND c.decision_type='approved' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&artifactID, &revision, &contentHash, &blueprintContent); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("Contract policy v2 requires an approved Blueprint on the same planning lineage")
+		}
+		return err
+	}
+	if report.SourceBlueprint.ArtifactID != artifactID || report.SourceBlueprint.Revision != revision || report.SourceBlueprint.ContentHash != contentHash {
+		return fmt.Errorf("Contract policy v2 must bind the approved Blueprint %s@%d (%s), got %s@%d (%s)", artifactID, revision, contentHash, report.SourceBlueprint.ArtifactID, report.SourceBlueprint.Revision, report.SourceBlueprint.ContentHash)
+	}
+	seams, err := blueprintSeamSet(blueprintContent)
+	if err != nil {
+		return err
+	}
+	for _, obligation := range report.Obligations {
+		if !seams[obligation.Seam] {
+			return fmt.Errorf("Contract obligation %s references seam %q which the approved Blueprint does not declare", obligation.ID, obligation.Seam)
+		}
+	}
+	return nil
+}
+
+// verificationSeam mirrors the Blueprint verification_seams entries of
+// decomposition policy v2. The full schema lives in internal/tip; this local
+// shape keeps artifact validation independent of the TIP pack domain.
+type verificationSeam struct {
+	ID       string `json:"id"`
+	Surface  string `json:"surface"`
+	Isolates string `json:"isolates"`
+	PriorArt string `json:"prior_art"`
+}
+
+// blueprintSeamSet parses the declared verification seams of a policy-v2
+// Blueprint content blob.
+func blueprintSeamSet(content string) (map[string]bool, error) {
+	var blueprint struct {
+		DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
+		VerificationSeams          []verificationSeam `json:"verification_seams"`
+	}
+	if err := json.Unmarshal([]byte(content), &blueprint); err != nil || blueprint.DecompositionPolicyVersion != 2 {
+		return nil, errors.New("approved Blueprint is not decomposition policy v2 with verification seams")
+	}
+	seams := map[string]bool{}
+	for _, seam := range blueprint.VerificationSeams {
+		if seam.ID != "" {
+			seams[seam.ID] = true
+		}
+	}
+	if len(seams) == 0 {
+		return nil, errors.New("approved Blueprint policy v2 declares no verification seams")
+	}
+	return seams, nil
+}
+
+func validateVerificationSeams(seams []verificationSeam) error {
+	if len(seams) == 0 {
+		return errors.New("Blueprint policy v2 requires at least one verification seam")
+	}
+	seen := map[string]bool{}
+	for _, seam := range seams {
+		if seam.ID == "" || seen[seam.ID] {
+			return errors.New("Blueprint verification seams require unique non-empty ids")
+		}
+		if strings.TrimSpace(seam.Surface) == "" || strings.TrimSpace(seam.Isolates) == "" {
+			return fmt.Errorf("Blueprint verification seam %s requires surface and isolates", seam.ID)
+		}
+		seen[seam.ID] = true
 	}
 	return nil
 }
@@ -1287,17 +1424,44 @@ func validateBlueprintReport(content string) error {
 			Tasks           []any `json:"tasks"`
 			EstimatedEffort int   `json:"estimated_effort_minutes"`
 		} `json:"task_decomposition_preview"`
+		DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
+		VerificationSeams          []verificationSeam `json:"verification_seams"`
 	}
 	if err := json.Unmarshal([]byte(content), &report); err != nil {
 		return errors.New("Blueprint artifact must be valid JSON")
 	}
+	if report.DecompositionPolicyVersion < 0 || report.DecompositionPolicyVersion > 2 {
+		return fmt.Errorf("unsupported decomposition_policy_version %d", report.DecompositionPolicyVersion)
+	}
 	if len(report.ProjectInfo) == 0 || len(report.Goals) == 0 || len(report.Architecture) == 0 {
 		return errors.New("Blueprint requires project_info, goals, and architecture")
 	}
-	if len(report.TechStack) == 0 || len(report.FileStructure) == 0 || len(report.Requirements) == 0 || len(report.Preview.Tasks) == 0 || report.Preview.EstimatedTasks != len(report.Preview.Tasks) || report.Preview.EstimatedEffort < 1 {
+	if len(report.TechStack) == 0 || len(report.FileStructure) == 0 || len(report.Requirements) == 0 {
+		return errors.New("Blueprint requires complete stack, file structure, and RRI matrix")
+	}
+	if report.DecompositionPolicyVersion == 2 {
+		// Policy v2 is the solution spec plus owner-approved verification seams;
+		// the task_decomposition_preview is retired (Contract's task_graph_summary
+		// keeps the early cost signal).
+		return validateVerificationSeams(report.VerificationSeams)
+	}
+	if len(report.Preview.Tasks) == 0 || report.Preview.EstimatedTasks != len(report.Preview.Tasks) || report.Preview.EstimatedEffort < 1 {
 		return errors.New("Blueprint requires complete stack, file structure, RRI matrix, and task preview")
 	}
 	return nil
+}
+
+// approvedCheckpointDecision names the owner decision that makes a checkpoint
+// the planning authority for a stage: Scan is owner-accepted, every other
+// planning stage is owner-approved. Authority-selection queries must filter on
+// this decision so a newer rejected checkpoint can never supply seams,
+// obligations, lineage, or predecessor clearance — the newest APPROVED
+// checkpoint of the stage wins.
+func approvedCheckpointDecision(stage string) string {
+	if stage == "scan" {
+		return "accepted"
+	}
+	return "approved"
 }
 
 func workItemPlanningReset(db *sql.DB, args []string) error {
@@ -2030,7 +2194,9 @@ func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decis
 	}
 	if stageIndex > 0 {
 		var previous int
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, workItemID, stages[stageIndex-1]).Scan(&previous); err != nil || previous != 1 {
+		// The predecessor counts as approved only with its owner decision
+		// recorded; a rejected newer checkpoint never clears the gate.
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id=? AND stage=? AND decision_type=?`, workItemID, stages[stageIndex-1], approvedCheckpointDecision(stages[stageIndex-1])).Scan(&previous); err != nil || previous != 1 {
 			return "", 0, "", fmt.Errorf("Previous stage %s is not approved; %s", stages[stageIndex-1], nextActionHint(stages[stageIndex-1]))
 		}
 	}
@@ -2041,6 +2207,17 @@ func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decis
 		}
 		if _, err = validateTaskGraphArtifact(tx, workItemID, graphContent); err != nil {
 			return "", 0, "", fmt.Errorf("task graph validation failed: %w", err)
+		}
+	}
+	if stage == "contracts" {
+		// Re-bind at approval: a Blueprint re-approval between Contract save and
+		// approval must not leave the Contract bound to a retired lineage.
+		var contractContent string
+		if err = tx.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=? AND work_item_id=?`, artifactID, workItemID).Scan(&contractContent); err != nil {
+			return "", 0, "", err
+		}
+		if err = validateContractPolicyBinding(tx, workItemID, contractContent); err != nil {
+			return "", 0, "", err
 		}
 	}
 	if _, err = tx.Exec(`INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES(?,?,?,?,?,?,?)`, "wic-"+shortID(), workItemID, stage, artifactID, revision, contentHash, decision); err != nil {
@@ -2092,7 +2269,7 @@ func workItemWorkflowStatus(db *sql.DB, args []string) error {
 	checkpoints := map[string]any{}
 	next := "materialize"
 	for _, stage := range workItemStages {
-		approved, err := rowExists(db, `SELECT 1 FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage=? AND a.revision=(SELECT MAX(revision) FROM work_item_artifacts WHERE work_item_id=? AND stage=?)`, args[0], stage, args[0], stage)
+		approved, err := rowExists(db, `SELECT 1 FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage=? AND c.decision_type='`+approvedCheckpointDecision(stage)+`' AND a.revision=(SELECT MAX(revision) FROM work_item_artifacts WHERE work_item_id=? AND stage=?)`, args[0], stage, args[0], stage)
 		if err != nil {
 			return err
 		}
@@ -2108,7 +2285,7 @@ func workItemWorkflowStatus(db *sql.DB, args []string) error {
 	}
 	if next == "materialize" {
 		var checkpointID string
-		_ = db.QueryRow(`SELECT id FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' ORDER BY artifact_revision DESC LIMIT 1`, args[0]).Scan(&checkpointID)
+		_ = db.QueryRow(`SELECT id FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' AND decision_type='approved' ORDER BY artifact_revision DESC LIMIT 1`, args[0]).Scan(&checkpointID)
 		var materialized, active int
 		_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE root_work_item_id=? AND checkpoint_id=?`, args[0], checkpointID).Scan(&materialized)
 		_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE checkpoint_id=? AND status='active'`, checkpointID).Scan(&active)
@@ -2141,7 +2318,7 @@ func workItemStandalonePlanningStatus(db *sql.DB, id string) error {
 	next := "materialize"
 	checkpoints := map[string]any{}
 	for _, stage := range []string{"scan", "rri", "task_graph"} {
-		approved, err := rowExists(db, `SELECT 1 FROM workflow_checkpoints WHERE work_item_id=? AND stage=?`, id, stage)
+		approved, err := rowExists(db, `SELECT 1 FROM workflow_checkpoints WHERE work_item_id=? AND stage=? AND decision_type='`+approvedCheckpointDecision(stage)+`'`, id, stage)
 		if err != nil {
 			return err
 		}
@@ -2330,7 +2507,7 @@ func workItemAggregateVerify(db *sql.DB, args []string) error {
 		return err
 	}
 	checkpointID := ""
-	_ = tx.QueryRow(`SELECT id FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' ORDER BY artifact_revision DESC LIMIT 1`, args[0]).Scan(&checkpointID)
+	_ = tx.QueryRow(`SELECT id FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' AND decision_type='approved' ORDER BY artifact_revision DESC LIMIT 1`, args[0]).Scan(&checkpointID)
 	id := "wivr-" + shortID()
 	if _, err = tx.Exec(`INSERT INTO work_item_verification_reports(id,work_item_id,checkpoint_id,status,summary,verified_by_role,rri_t_json) VALUES(?,?,?,?,?,?,?)`, id, args[0], checkpointID, args[1], args[2], opts["actor-role"], rriTJSON); err != nil {
 		return err
@@ -2466,7 +2643,7 @@ func workItemAggregateAccept(db *sql.DB, args []string) error {
 	if err = tx.QueryRow(`SELECT id,status,checkpoint_id FROM work_item_verification_reports WHERE work_item_id=? ORDER BY datetime(created_at) DESC,rowid DESC LIMIT 1`, args[0]).Scan(&reportID, &reportStatus, &reportCheckpoint); err != nil || reportID != args[1] || reportStatus != "passed" {
 		return errors.New("aggregate acceptance requires the current passed aggregate verification")
 	}
-	_ = tx.QueryRow(`SELECT id FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' ORDER BY artifact_revision DESC LIMIT 1`, args[0]).Scan(&currentCheckpoint)
+	_ = tx.QueryRow(`SELECT id FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' AND decision_type='approved' ORDER BY artifact_revision DESC LIMIT 1`, args[0]).Scan(&currentCheckpoint)
 	if reportCheckpoint != currentCheckpoint {
 		return errors.New("aggregate verification is stale for the current task graph")
 	}
@@ -2558,7 +2735,7 @@ func workItemAggregateClose(db *sql.DB, args []string) error {
 	if err = tx.QueryRow(`SELECT checkpoint_id,status FROM work_item_verification_reports WHERE work_item_id=? ORDER BY datetime(created_at) DESC,rowid DESC LIMIT 1`, args[0]).Scan(&reportCheckpoint, &reportStatus); err != nil || reportStatus != "passed" {
 		return errors.New("current passed aggregate verification required")
 	}
-	_ = tx.QueryRow(`SELECT id FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' ORDER BY artifact_revision DESC LIMIT 1`, args[0]).Scan(&currentCheckpoint)
+	_ = tx.QueryRow(`SELECT id FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' AND decision_type='approved' ORDER BY artifact_revision DESC LIMIT 1`, args[0]).Scan(&currentCheckpoint)
 	if reportCheckpoint != currentCheckpoint {
 		return errors.New("aggregate verification is stale")
 	}
@@ -2642,7 +2819,7 @@ func workItemGraphValidate(db *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"valid": true, "work_item_id": args[0], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "node_count": len(plan.Nodes)})
+	writeJSON(os.Stdout, map[string]any{"valid": true, "work_item_id": args[0], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "node_count": len(plan.Nodes), "decomposition_policy_version": plan.DecompositionPolicyVersion})
 	return nil
 }
 
@@ -2651,10 +2828,14 @@ func validateTaskGraphArtifact(db databaseQueryer, workItemID, content string) (
 	if err != nil {
 		return tip.TaskPlanDocument{}, err
 	}
-	if _, err = validateTaskGraphRequirementCoverage(db, workItemID, plan); err != nil {
+	coverage, err := validateTaskGraphRequirementCoverage(db, workItemID, plan)
+	if err != nil {
 		return tip.TaskPlanDocument{}, err
 	}
 	if err := validateTaskGraphObligations(db, workItemID, plan); err != nil {
+		return tip.TaskPlanDocument{}, err
+	}
+	if err := validateTaskGraphDecompositionPolicy(db, workItemID, plan, coverage); err != nil {
 		return tip.TaskPlanDocument{}, err
 	}
 	var kind, parentID string
@@ -2669,7 +2850,7 @@ func validateTaskGraphArtifact(db databaseQueryer, workItemID, content string) (
 
 func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan tip.TaskPlanDocument) error {
 	var contractContent string
-	if err := db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='contracts' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&contractContent); err != nil {
+	if err := db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='contracts' AND c.decision_type='approved' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&contractContent); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil
 		}
@@ -2750,14 +2931,269 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ti
 		}
 	}
 	for key := range obligations {
-		if len(providers[key]) == 0 {
-			return fmt.Errorf("Contract obligation %s has no provider node", key)
+		// Provenance constraint: exactly one node produces each Contract
+		// obligation. Zero providers leave the obligation unimplemented and
+		// multiple providers make dependency and evidence provenance ambiguous.
+		if len(providers[key]) != 1 {
+			return fmt.Errorf("Contract obligation %s must have exactly one provider node, found %d", key, len(providers[key]))
 		}
 		if len(evidence[key]) == 0 {
 			return fmt.Errorf("Contract obligation %s has no evidence node", key)
 		}
 	}
 	return nil
+}
+
+// decompositionModes is the decomposition policy v2 node-mode enum. Absent mode
+// means vertical; every other mode is an explicit, justified exception.
+var decompositionModes = []string{"vertical", "shared_contract", "wide_refactor", "integration_gate"}
+
+// decompositionModeOf resolves the persisted projection mode: policy default
+// for an absent mode is vertical, so an omitted v2 mode never persists as an
+// empty value.
+func decompositionModeOf(mode string) string {
+	if strings.TrimSpace(mode) == "" {
+		return "vertical"
+	}
+	return mode
+}
+
+// validateTaskGraphDecompositionPolicy enforces the decomposition policy the
+// task graph declares. Policy 0/1 documents run the v1 rules unchanged; policy
+// 2 adds the vertical-by-default, edge-rationale, effective-acceptance, and
+// seam-bound verification rules. Unsupported versions fail closed.
+func validateTaskGraphDecompositionPolicy(db databaseQueryer, workItemID string, plan tip.TaskPlanDocument, requirements map[string]tip.RequirementSnapshot) error {
+	if plan.DecompositionPolicyVersion > 2 {
+		return fmt.Errorf("unsupported decomposition_policy_version %d", plan.DecompositionPolicyVersion)
+	}
+	if plan.DecompositionPolicyVersion != 2 {
+		return nil
+	}
+	return validateTaskGraphPolicyV2(db, workItemID, plan, requirements)
+}
+
+func validateTaskGraphPolicyV2(db databaseQueryer, workItemID string, plan tip.TaskPlanDocument, requirements map[string]tip.RequirementSnapshot) error {
+	nodes := map[string]tip.TaskPlanDocumentNode{}
+	for _, node := range plan.Nodes {
+		nodes[node.Key] = node
+	}
+	// dependsClosure returns every node transitively reachable through DependsOn.
+	dependsClosure := func(key string) map[string]bool {
+		closure := map[string]bool{}
+		var visit func(string)
+		visit = func(current string) {
+			for _, dependency := range nodes[current].DependsOn {
+				if !closure[dependency] {
+					closure[dependency] = true
+					visit(dependency)
+				}
+			}
+		}
+		visit(key)
+		return closure
+	}
+	// Seam and obligation authority: policy v2 chains require approved Blueprint
+	// and Contract predecessors, so the planning profile must carry both stages.
+	// Profiles without them (quick/standard, standalone) have no seam authority
+	// to bind against — a v2 graph there is rejected instead of silently
+	// skipping cross-artifact binding; those graphs stay on policy v1.
+	stages, err := planningStagesForWorkItem(db, workItemID)
+	if err != nil {
+		return err
+	}
+	missingStages := []string{}
+	if !contains(stages, "blueprint") {
+		missingStages = append(missingStages, "blueprint")
+	}
+	if !contains(stages, "contracts") {
+		missingStages = append(missingStages, "contracts")
+	}
+	if len(missingStages) > 0 {
+		return fmt.Errorf("Task Graph policy v2 requires approved Blueprint and Contract predecessors, but this Work Item's planning profile has no %s stage; keep the graph on policy v1 or re-plan with a deeper profile", strings.Join(missingStages, " and "))
+	}
+	// Seam binding applies only when the planning profile carries a Blueprint
+	// stage; profiles without one have no seam authority to bind against.
+	seams, err := approvedBlueprintSeams(db, workItemID)
+	if err != nil {
+		return err
+	}
+	// Exact predecessor lineage: the graph must bind the approved Contract.
+	if err := validateTaskGraphSourceContractBinding(db, workItemID, plan.DecompositionPolicyVersion, plan.SourceContract); err != nil {
+		return err
+	}
+	obligationIDs := map[string]bool{}
+	var contractContent string
+	if err := db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='contracts' AND c.decision_type='approved' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&contractContent); err == nil {
+		var contract tip.ContractDocument
+		if json.Unmarshal([]byte(contractContent), &contract) == nil {
+			for _, obligation := range contract.Obligations {
+				obligationIDs[obligation.ID] = true
+			}
+		}
+	}
+	for _, node := range plan.Nodes {
+		mode := node.DecompositionMode
+		if mode == "" {
+			mode = "vertical"
+		}
+		if !contains(decompositionModes, mode) {
+			return fmt.Errorf("%s has unknown decomposition_mode %s (expected one of %s)", node.Key, node.DecompositionMode, strings.Join(decompositionModes, "|"))
+		}
+		if mode != "vertical" && strings.TrimSpace(node.ExceptionReason) == "" {
+			return fmt.Errorf("%s uses decomposition_mode %s without exception_reason", node.Key, mode)
+		}
+		switch mode {
+		case "wide_refactor":
+			if node.PairedContractNode == "" {
+				return fmt.Errorf("%s wide_refactor requires paired_contract_node", node.Key)
+			}
+			if _, ok := nodes[node.PairedContractNode]; !ok {
+				return fmt.Errorf("%s wide_refactor references unknown paired_contract_node %s", node.Key, node.PairedContractNode)
+			}
+			if !dependsClosure(node.PairedContractNode)[node.Key] {
+				return fmt.Errorf("%s must be in the depends_on closure of its paired contract node %s", node.Key, node.PairedContractNode)
+			}
+		case "shared_contract":
+			if len(node.Provides) == 0 {
+				return fmt.Errorf("%s shared_contract must provide the shared contract keys", node.Key)
+			}
+			consumer := false
+			for _, other := range plan.Nodes {
+				if other.Key != node.Key && contains(other.DependsOn, node.Key) {
+					consumer = true
+					break
+				}
+			}
+			if !consumer {
+				return fmt.Errorf("%s shared_contract has no downstream consumer depending on it", node.Key)
+			}
+		case "integration_gate":
+			if len(node.ObligationKeys) == 0 && len(node.RequirementKeys) == 0 {
+				return fmt.Errorf("%s integration_gate must list the obligations or requirements it verifies", node.Key)
+			}
+		}
+		for _, dependency := range node.DependsOn {
+			if strings.TrimSpace(node.DependsOnRationale[dependency]) == "" {
+				return fmt.Errorf("%s depends_on %s requires a non-empty depends_on_rationale entry", node.Key, dependency)
+			}
+		}
+		// Acceptance and seam-bound verification rules bind executable leaves;
+		// untyped nodes default to executable tasks (same default as materialization).
+		kind := node.Type
+		if kind == "" {
+			kind = "task"
+		}
+		executable := contains([]string{"task", "bug", "chore"}, kind)
+		// integration_gate is a verification-only node regardless of Work Item
+		// type: it must carry valid seam-bound verification entries even though
+		// it is not an executable leaf. Other non-executable nodes are skipped.
+		if !executable && mode != "integration_gate" {
+			continue
+		}
+		if executable && strings.TrimSpace(node.Acceptance) != "" {
+			if err := validateGherkinSteps(node.Acceptance); err != nil {
+				return fmt.Errorf("%s acceptance %w", node.Key, err)
+			}
+		} else if executable && len(node.RequirementKeys) != 1 {
+			return fmt.Errorf("%s composes %d requirements and requires node-level acceptance with Given, When, and Then steps; a single-requirement node resolves its acceptance from that requirement", node.Key, len(node.RequirementKeys))
+		}
+		if len(node.Verification) == 0 {
+			return fmt.Errorf("%s requires at least one seam-bound verification entry", node.Key)
+		}
+		for index, raw := range node.Verification {
+			gate, ok := tip.ParseVerificationGate(raw)
+			if !ok {
+				return fmt.Errorf("%s verification gate %d must be an object", node.Key, index+1)
+			}
+			if strings.TrimSpace(gate.Seam) == "" {
+				return fmt.Errorf("%s verification gate %d requires a seam", node.Key, index+1)
+			}
+			if len(gate.RequirementKeys) == 0 && len(gate.ObligationKeys) == 0 {
+				return fmt.Errorf("%s verification gate %d requires at least one requirement or obligation key", node.Key, index+1)
+			}
+			if strings.TrimSpace(gate.Command) == "" || strings.TrimSpace(gate.Expected) == "" {
+				return fmt.Errorf("%s verification gate %d requires an executable command and expected evidence", node.Key, index+1)
+			}
+			for _, key := range gate.RequirementKeys {
+				if _, ok := requirements[strings.ToUpper(key)]; !ok {
+					return fmt.Errorf("%s verification gate %d references unknown requirement %s", node.Key, index+1, key)
+				}
+			}
+			for _, key := range gate.ObligationKeys {
+				if len(obligationIDs) == 0 {
+					return fmt.Errorf("%s verification gate %d references obligation %s but no approved Contract exists on this Work Item", node.Key, index+1, key)
+				}
+				if !obligationIDs[key] {
+					return fmt.Errorf("%s verification gate %d references unknown Contract obligation %s", node.Key, index+1, key)
+				}
+			}
+			if seams != nil && !seams[gate.Seam] {
+				return fmt.Errorf("%s verification gate %d references seam %q which the approved Blueprint does not declare", node.Key, index+1, gate.Seam)
+			}
+		}
+	}
+	return nil
+}
+
+// approvedBlueprintSeams returns the declared verification seams of the
+// approved Blueprint on the same planning lineage. The caller gates on the
+// planning profile carrying a Blueprint stage; reaching this function without
+// one fails closed on the missing approval.
+func approvedBlueprintSeams(db databaseQueryer, workItemID string) (map[string]bool, error) {
+	stages, err := planningStagesForWorkItem(db, workItemID)
+	if err != nil {
+		return nil, err
+	}
+	if !contains(stages, "blueprint") {
+		return nil, errors.New("Task Graph policy v2 requires an approved Blueprint with verification seams")
+	}
+	var content string
+	if err := db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='blueprint' AND c.decision_type='approved' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&content); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, errors.New("Task Graph policy v2 requires an approved Blueprint with verification seams")
+		}
+		return nil, err
+	}
+	return blueprintSeamSet(content)
+}
+
+// validateTaskGraphSourceContractBinding fails a decomposition-policy-v2 Task
+// Graph closed unless it binds the exact approved Contract lineage — artifact
+// id, revision, and content hash — mirroring the Contract's source_blueprint
+// binding. v1 graphs pass through unchanged.
+func validateTaskGraphSourceContractBinding(db databaseQueryer, workItemID string, policyVersion int, binding *tip.ArtifactLineage) error {
+	if policyVersion != 2 {
+		return nil
+	}
+	if binding == nil || binding.ArtifactID == "" || binding.Revision < 1 || binding.ContentHash == "" {
+		return errors.New("Task Graph policy v2 must bind the approved Contract artifact id, revision, and content hash in source_contract")
+	}
+	var artifactID, contentHash string
+	var revision int
+	if err := db.QueryRow(`SELECT c.artifact_id,c.artifact_revision,c.content_hash FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='contracts' AND c.decision_type='approved' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&artifactID, &revision, &contentHash); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("Task Graph policy v2 requires an approved Contract on the same planning lineage")
+		}
+		return err
+	}
+	if binding.ArtifactID != artifactID || binding.Revision != revision || binding.ContentHash != contentHash {
+		return fmt.Errorf("Task Graph policy v2 must bind the approved Contract %s@%d (%s), got %s@%d (%s)", artifactID, revision, contentHash, binding.ArtifactID, binding.Revision, binding.ContentHash)
+	}
+	return nil
+}
+
+// validateTaskGraphSourceContractBindingJSON parses the minimal binding fields
+// from a raw task-graph artifact for the save path, which validates lineage
+// without running full graph validation (drafts may still be incomplete).
+func validateTaskGraphSourceContractBindingJSON(db databaseQueryer, workItemID, content string) error {
+	var document struct {
+		DecompositionPolicyVersion int                  `json:"decomposition_policy_version"`
+		SourceContract             *tip.ArtifactLineage `json:"source_contract"`
+	}
+	if err := json.Unmarshal([]byte(content), &document); err != nil {
+		return nil // malformed JSON is rejected by full graph validation
+	}
+	return validateTaskGraphSourceContractBinding(db, workItemID, document.DecompositionPolicyVersion, document.SourceContract)
 }
 
 func validateTaskGraphRequirementCoverage(db databaseQueryer, workItemID string, plan tip.TaskPlanDocument) (map[string]tip.RequirementSnapshot, error) {
@@ -2810,18 +3246,18 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 		return err
 	}
 	defer tx.Rollback()
-	var checkpointID, content string
-	if err = tx.QueryRow(`SELECT c.id,a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='task_graph' ORDER BY c.artifact_revision DESC LIMIT 1`, args[0]).Scan(&checkpointID, &content); err != nil {
+	var checkpointID, graphArtifactID, graphContentHash, content string
+	var graphRevision int
+	if err = tx.QueryRow(`SELECT c.id,c.artifact_id,c.artifact_revision,c.content_hash,a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='task_graph' AND c.decision_type='approved' ORDER BY c.artifact_revision DESC LIMIT 1`, args[0]).Scan(&checkpointID, &graphArtifactID, &graphRevision, &graphContentHash, &content); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("current task graph is not approved")
 		}
 		return err
 	}
-	plan, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + content + "\n```")
-	if err != nil {
-		return err
-	}
-	_, err = validateTaskGraphRequirementCoverage(tx, args[0], plan)
+	// Materialization re-runs the full approval-time validation — including the
+	// decomposition policy rules — so a graph can never materialize under rules
+	// it was not approved against.
+	plan, err := validateTaskGraphArtifact(tx, args[0], content)
 	if err != nil {
 		return err
 	}
@@ -2839,6 +3275,11 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 			if _, err = tx.Exec(`INSERT INTO work_item_materializations(root_work_item_id,checkpoint_id,node_key,work_item_id) VALUES(?,?,?,?)`, args[0], checkpointID, plan.Nodes[0].Key, args[0]); err != nil {
 				return err
 			}
+		}
+		// The standalone projection is the Work Item itself; refresh its source
+		// lineage whenever this checkpoint materializes (idempotent per revision).
+		if _, err = tx.Exec(`UPDATE work_items SET decomposition_mode=?,decomposition_reason=?,paired_contract_node=?,source_graph_artifact_id=?,source_graph_revision=?,source_graph_content_hash=? WHERE id=?`, decompositionModeOf(plan.Nodes[0].DecompositionMode), plan.Nodes[0].ExceptionReason, plan.Nodes[0].PairedContractNode, graphArtifactID, graphRevision, graphContentHash, args[0]); err != nil {
+			return err
 		}
 		if err = tx.Commit(); err != nil {
 			return err
@@ -2883,7 +3324,7 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 			priority = "medium"
 		}
 		workItemID := "wi-" + shortID()
-		if _, err = tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority) VALUES(?,?,?,?,?,?)`, workItemID, kind, parentID, node.Name, node.Goal, priority); err != nil {
+		if _, err = tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority,decomposition_mode,decomposition_reason,paired_contract_node,source_graph_artifact_id,source_graph_revision,source_graph_content_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`, workItemID, kind, parentID, node.Name, node.Goal, priority, decompositionModeOf(node.DecompositionMode), node.ExceptionReason, node.PairedContractNode, graphArtifactID, graphRevision, graphContentHash); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(`INSERT INTO work_item_materializations(root_work_item_id,checkpoint_id,node_key,work_item_id) VALUES(?,?,?,?)`, args[0], checkpointID, node.Key, workItemID); err != nil {
@@ -2893,7 +3334,7 @@ func workItemMaterialize(db *sql.DB, args []string) error {
 	}
 	for _, node := range plan.Nodes {
 		for _, dependency := range node.DependsOn {
-			if _, err = tx.Exec(`INSERT OR IGNORE INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES(?,?,'blocks',?)`, "wir-"+shortID(), ids[node.Key], ids[dependency]); err != nil {
+			if _, err = tx.Exec(`INSERT OR IGNORE INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id,rationale) VALUES(?,?,'blocks',?,?)`, "wir-"+shortID(), ids[node.Key], ids[dependency], node.DependsOnRationale[dependency]); err != nil {
 				return err
 			}
 		}
@@ -2922,7 +3363,7 @@ func workItemAuthorize(db *sql.DB, args []string) error {
 	}
 	defer tx.Rollback()
 	var checkpointID, content string
-	if err = tx.QueryRow(`SELECT c.id,a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='task_graph' ORDER BY c.artifact_revision DESC LIMIT 1`, args[0]).Scan(&checkpointID, &content); err != nil {
+	if err = tx.QueryRow(`SELECT c.id,a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='task_graph' AND c.decision_type='approved' ORDER BY c.artifact_revision DESC LIMIT 1`, args[0]).Scan(&checkpointID, &content); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return errors.New("current task graph is not approved")
 		}

@@ -188,7 +188,67 @@ func schemaMigrationSteps() []schemaMigration {
 			}
 			return applyLegacyPackBackfills(db)
 		}},
+		{version: 8, name: "decomposition_policy_projection", apply: applyDecompositionProjectionColumns},
 	}
+}
+
+// applyDecompositionProjectionColumns adds the decomposition policy v2
+// projection surface: edge rationales on the canonical blocking-edge table and
+// per-Work-Item decomposition/provenance columns recorded by materialization.
+// decomposition_mode defaults to 'vertical' — the policy's absent-mode default —
+// so every Work Item row carries an explicit mode. All statements are additive
+// with constant defaults, so v1 lineage keeps its exact behavior with empty
+// auxiliary values. Each ALTER is guarded by a column-exists check so a re-run
+// against an already-widened table (the older-binary simulation path clears
+// version records) stays idempotent.
+// Note: the rationale lands on work_item_relations — the canonical blocking-edge
+// table materialization and `pic show` read — not on the legacy
+// work_item_dependencies table retired by the canonical backfills.
+func applyDecompositionProjectionColumns(db schemaDB) error {
+	projections := []struct{ table, column, ddl string }{
+		{"work_item_relations", "rationale", `ALTER TABLE work_item_relations ADD COLUMN rationale TEXT NOT NULL DEFAULT ''`},
+		{"work_items", "decomposition_mode", `ALTER TABLE work_items ADD COLUMN decomposition_mode TEXT NOT NULL DEFAULT 'vertical'`},
+		{"work_items", "decomposition_reason", `ALTER TABLE work_items ADD COLUMN decomposition_reason TEXT NOT NULL DEFAULT ''`},
+		{"work_items", "paired_contract_node", `ALTER TABLE work_items ADD COLUMN paired_contract_node TEXT NOT NULL DEFAULT ''`},
+		{"work_items", "source_graph_artifact_id", `ALTER TABLE work_items ADD COLUMN source_graph_artifact_id TEXT NOT NULL DEFAULT ''`},
+		{"work_items", "source_graph_revision", `ALTER TABLE work_items ADD COLUMN source_graph_revision INTEGER NOT NULL DEFAULT 0`},
+		{"work_items", "source_graph_content_hash", `ALTER TABLE work_items ADD COLUMN source_graph_content_hash TEXT NOT NULL DEFAULT ''`},
+	}
+	for _, projection := range projections {
+		present, err := columnExists(db, projection.table, projection.column)
+		if err != nil {
+			return err
+		}
+		if present {
+			continue
+		}
+		if _, err := db.Exec(projection.ddl); err != nil {
+			return fmt.Errorf("decomposition projection migration: %w", err)
+		}
+	}
+	return nil
+}
+
+func columnExists(db schemaDB, table, column string) (bool, error) {
+	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, columnType string
+		var notNull int
+		var defaultValue any
+		var primaryKey int
+		if err := rows.Scan(&cid, &name, &columnType, &notNull, &defaultValue, &primaryKey); err != nil {
+			return false, err
+		}
+		if name == column {
+			return true, nil
+		}
+	}
+	return false, rows.Err()
 }
 
 func reconcileLegacySchema(db schemaDB) error {

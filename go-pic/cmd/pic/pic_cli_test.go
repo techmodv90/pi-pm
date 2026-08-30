@@ -1250,7 +1250,7 @@ func TestPipelineClaimAcceptsCurrentPlanningStageWithoutTIP(t *testing.T) {
 	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "rri"); !strings.Contains(out, "current planning stage is scan") {
 		t.Fatalf("out-of-order RRI claim was not rejected: %s", out)
 	}
-	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-scan','`+id+`','scan',1,'<scan_report/>','scan-hash'); INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-scan','`+id+`','scan','wia-scan',1,'scan-hash','approved');`)
+	runSQLite(t, dbPath, `INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-scan','`+id+`','scan',1,'<scan_report/>','scan-hash'); INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES('wic-scan','`+id+`','scan','wia-scan',1,'scan-hash','accepted');`)
 
 	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "rri"))
 	if claim["stage"] != "rri" || claim["instruction_pack_id"] != "" {
@@ -3229,4 +3229,607 @@ func TestSchemaMigrationPragmasRunOnThePinnedConnection(t *testing.T) {
 	if legacyAlterTable != 1 {
 		t.Fatalf("migration transaction saw legacy_alter_table=%d: pragmas did not run on the transaction's connection", legacyAlterTable)
 	}
+}
+
+// --- Decomposition Policy v2 fixtures and tests ---
+
+const v2BlueprintArtifact = `{"decomposition_policy_version":2,"project_info":{"project":"Task System","nature":"CLI + pipeline + team","date":"2026-08-29"},"goals":{"primary_goal":"Reliable workflow","target_audience":"Owner and agents","key_message":"Every transition is durable"},"architecture":{"building_blocks":["CLI","Scheduler","SQLite"],"connection_summary":"CLI drives scheduler state","data_flow":"Inputs -> CLI -> SQLite"},"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing","reuse":"go-pic"}],"file_structure":[{"path":"go-pic/cmd/pic","purpose":"Workflow backend"}],"rri_requirements_matrix":[{"blueprint_section":"Lifecycle","requirements":["REQ-001"],"source_questions":["Q1"]},{"blueprint_section":"Delivery","requirements":["REQ-002"],"source_questions":["Q2"]}],"verification_seams":[{"id":"cli-materialize","surface":"pic work-item materialize against a temporary SQLite database","isolates":"materialization atomicity and idempotency","prior_art":"TestWorkItemGraphMaterialization"},{"id":"go-tests","surface":"go test ./... in the repository","isolates":"package-level behavior regressions"}]}`
+
+// v2TaskGraph builds the policy-v2 happy-path graph bound to the given approved
+// Contract lineage via source_contract.
+func v2TaskGraph(contractArtifactID string, contractRevision int, contractContentHash string) string {
+	return fmt.Sprintf(`{"version":3,"execution_policy":"strict_sequential","decomposition_policy_version":2,"source_contract":{"artifact_id":%q,"revision":%d,"content_hash":%q},"nodes":[`+
+		`{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]},`+
+		`{"key":"S01","type":"task","name":"Shared schema","parent_key":"F01","goal":"Widen the schema contract","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"seam":"cli-materialize","obligation_keys":["OB-003"],"command":"go test ./cmd/pic -run TestMaterialize","expected":"shared schema contract holds"}],"skillFamilies":[],"decomposition_mode":"shared_contract","exception_reason":"widens the schema consumed by CLI, scheduler, and dashboard","provides":["OB-003"],"consumes":[],"evidence_for":[],"obligation_keys":["OB-003"]},`+
+		`{"key":"W01","type":"task","name":"Widen","parent_key":"F01","goal":"Expand the covered surface","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["w.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["w.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./cmd/pic -run TestWiden","expected":"expanded surface covered"}],"skillFamilies":[],"decomposition_mode":"wide_refactor","exception_reason":"touches every call site before the contract stabilizes","paired_contract_node":"P01","provides":[],"consumes":[],"evidence_for":[],"obligation_keys":[]},`+
+		`{"key":"T01","type":"task","name":"Implement","parent_key":"F01","goal":"Implement requirement","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./...","expected":"requirement behavior proven"}],"skillFamilies":[],"provides":["OB-001"],"consumes":[],"evidence_for":["OB-001"],"obligation_keys":["OB-001"]},`+
+		`{"key":"T02","type":"bug","name":"Consume","parent_key":"F01","goal":"Consume shared schema","requirement_keys":["REQ-002"],"depends_on":["S01"],"priority":"P0","module":"core","files":["y.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["y.go"]},"verification":[{"seam":"cli-materialize","obligation_keys":["OB-002"],"command":"go test ./cmd/pic -run TestDelivery","expected":"delivery verified"}],"skillFamilies":[],"acceptance":"Given an approved graph\nWhen materialization runs\nThen projections commit atomically","provides":["OB-002"],"consumes":["OB-003"],"evidence_for":["OB-002","OB-003"],"obligation_keys":["OB-002","OB-003"],"depends_on_rationale":{"S01":"consumes the persisted schema contract S01 establishes"}},`+
+		`{"key":"P01","type":"task","name":"Contract cleanup","parent_key":"F01","goal":"Contract the widened surface","requirement_keys":["REQ-001"],"depends_on":["W01"],"priority":"P1","module":"core","files":["w.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["w.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./cmd/pic -run TestCleanup","expected":"cleanup verified"}],"skillFamilies":[],"provides":[],"consumes":[],"evidence_for":[],"obligation_keys":[],"depends_on_rationale":{"W01":"contracts the expansion W01 performs"}},`+
+		`{"key":"G01","type":"gate","name":"Integration gate","goal":"Verify the integrated delivery","requirement_keys":[],"depends_on":[],"decomposition_mode":"integration_gate","exception_reason":"verifies the integrated aggregate at the highest seam","obligation_keys":["OB-002"],"verification":[{"seam":"cli-materialize","obligation_keys":["OB-002"],"command":"go test ./cmd/pic -run TestDelivery","expected":"integrated delivery verified"}]}`+
+		`]}`, contractArtifactID, contractRevision, contractContentHash)
+}
+
+// v2StandaloneGraph is a policy-v1 standalone graph: the standalone planning
+// profile carries no Blueprint/Contract predecessors, so policy v1 applies.
+const v2StandaloneGraph = `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"IMPL","type":"task","name":"Standalone","goal":"Implement standalone","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}],"skillFamilies":[]}]}`
+
+// v2StandaloneGraphV2Policy is a policy-v2 standalone graph with a well-formed
+// but fake source_contract; saving it must fail closed because the standalone
+// planning profile has no approved Contract to bind.
+const v2StandaloneGraphV2Policy = `{"version":3,"execution_policy":"strict_sequential","decomposition_policy_version":2,"source_contract":{"artifact_id":"wia-phantom","revision":1,"content_hash":"sha256:phantom"},"nodes":[{"key":"IMPL","type":"task","name":"Standalone","goal":"Implement standalone","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./...","expected":"behavior proven"}],"skillFamilies":[]}]}`
+
+func v2ContractArtifact(artifactID string, revision int, contentHash string) string {
+	return fmt.Sprintf(`{"decomposition_policy_version":2,"obligation_schema_version":2,"project_name":"Task System","source_blueprint":{"artifact_id":%q,"revision":%d,"content_hash":%q},"deliverables":[{"item":"Lifecycle","details":"Persisted workflow","requirements":["REQ-001"]},{"item":"Delivery","details":"Verified delivery","requirements":["REQ-002"]}],"obligations":[{"id":"OB-001","requirement_keys":["REQ-001"],"behavior":"Persist workflow state","acceptance":"Given a valid workflow\nWhen it is persisted\nThen the state is queryable","class":"data_invariant","seam":"cli-materialize"},{"id":"OB-002","requirement_keys":["REQ-002"],"behavior":"Verify delivery","acceptance":"Given verified work\nWhen the owner reviews it\nThen the decision is recorded","class":"user_behavior","seam":"cli-materialize"},{"id":"OB-003","requirement_keys":["REQ-001"],"behavior":"Shared schema contract","acceptance":"Given a consumer node\nWhen it consumes the shared schema\nThen the provider contract holds","class":"interface_contract","seam":"cli-materialize"}],"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing stack"}],"task_graph_summary":{"tip_count":6,"estimated_minutes":240},"not_included":["Legacy migration"]}`, artifactID, revision, contentHash)
+}
+
+// approveV2Blueprint drives a full-depth Work Item through scan, rri, vision,
+// and a policy-v2 Blueprint approval, returning the approved Blueprint row.
+func approveV2Blueprint(t *testing.T, bin, root, home, id string) map[string]any {
+	t.Helper()
+	for _, stage := range []string{"scan", "rri", "vision"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	blueprint := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", v2BlueprintArtifact))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprint["id"].(string), "approved")
+	return blueprint
+}
+
+// seedV2Requirements adds the two Gherkin-backed requirements the v2 fixtures
+// reference, directly in the store like the other graph tests.
+func seedV2Requirements(t *testing.T, dbPath, epicID string) {
+	t.Helper()
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-v2a-`+epicID+`','`+epicID+`','REQ-001','Required','Given valid context
+When work runs
+Then it completes')`)
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-v2b-`+epicID+`','`+epicID+`','REQ-002','Delivery','Given verified work
+When the owner reviews it
+Then the decision is recorded')`)
+}
+
+func TestBlueprintArtifactPolicySchemas(t *testing.T) {
+	if err := validateBlueprintReport(validBlueprintArtifact); err != nil {
+		t.Fatalf("v1 blueprint fixture must validate unchanged: %v", err)
+	}
+	if err := validateBlueprintReport(v2BlueprintArtifact); err != nil {
+		t.Fatalf("v2 blueprint fixture must validate: %v", err)
+	}
+	noSeams := strings.Replace(v2BlueprintArtifact, `"verification_seams"`, `"declared_seams"`, 1)
+	if err := validateBlueprintReport(noSeams); err == nil || !strings.Contains(err.Error(), "at least one verification seam") {
+		t.Fatalf("v2 blueprint without seams = %v", err)
+	}
+	duplicate := strings.Replace(v2BlueprintArtifact, `{"id":"go-tests"`, `{"id":"cli-materialize"`, 1)
+	if err := validateBlueprintReport(duplicate); err == nil || !strings.Contains(err.Error(), "unique non-empty ids") {
+		t.Fatalf("v2 blueprint duplicate seam = %v", err)
+	}
+	emptySurface := strings.Replace(v2BlueprintArtifact, `"surface":"go test ./... in the repository"`, `"surface":""`, 1)
+	if err := validateBlueprintReport(emptySurface); err == nil || !strings.Contains(err.Error(), "surface and isolates") {
+		t.Fatalf("v2 blueprint empty seam surface = %v", err)
+	}
+	v1WithoutPreview := strings.Replace(validBlueprintArtifact, `"task_decomposition_preview"`, `"retired_preview"`, 1)
+	if err := validateBlueprintReport(v1WithoutPreview); err == nil || !strings.Contains(err.Error(), "task preview") {
+		t.Fatalf("v1 blueprint without preview = %v", err)
+	}
+	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":3`, 1)); err == nil || !strings.Contains(err.Error(), "unsupported decomposition_policy_version 3") {
+		t.Fatalf("unsupported policy version = %v", err)
+	}
+}
+
+func TestContractArtifactPolicySchemas(t *testing.T) {
+	if err := validateContractReport(validContractArtifact); err != nil {
+		t.Fatalf("v1 contract fixture must validate unchanged: %v", err)
+	}
+	if err := validateContractReport(v2ContractArtifact("wia-x", 1, "sha256:abc")); err != nil {
+		t.Fatalf("v2 contract fixture must validate: %v", err)
+	}
+	badClass := strings.Replace(v2ContractArtifact("wia-x", 1, "sha256:abc"), `"class":"data_invariant"`, `"class":"performance"`, 1)
+	if err := validateContractReport(badClass); err == nil || !strings.Contains(err.Error(), "decomposition class") {
+		t.Fatalf("v2 contract bad class = %v", err)
+	}
+	missingSeam := strings.Replace(v2ContractArtifact("wia-x", 1, "sha256:abc"), `"seam":"cli-materialize"`, `"seam":""`, 1)
+	if err := validateContractReport(missingSeam); err == nil || !strings.Contains(err.Error(), "requires a verification seam") {
+		t.Fatalf("v2 contract missing seam = %v", err)
+	}
+	unbound := strings.Replace(v2ContractArtifact("wia-x", 1, "sha256:abc"), `"source_blueprint":{"artifact_id":"wia-x","revision":1,"content_hash":"sha256:abc"},`, ``, 1)
+	if err := validateContractReport(unbound); err == nil || !strings.Contains(err.Error(), "source_blueprint") {
+		t.Fatalf("v2 contract without blueprint binding = %v", err)
+	}
+	if err := validateContractReport(strings.Replace(v2ContractArtifact("wia-x", 1, "sha256:abc"), `"decomposition_policy_version":2`, `"decomposition_policy_version":3`, 1)); err == nil || !strings.Contains(err.Error(), "unsupported decomposition_policy_version 3") {
+		t.Fatalf("unsupported policy version = %v", err)
+	}
+}
+
+func TestDecompositionPolicyApprovalChain(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Policy v2 Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	seedV2Requirements(t, dbPath, id)
+	blueprint := approveV2Blueprint(t, bin, root, home, id)
+	contractContent := v2ContractArtifact(blueprint["id"].(string), int(blueprint["revision"].(float64)), blueprint["content_hash"].(string))
+	contract := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contractContent))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", contract["id"].(string), "approved")
+
+	graphJSON := v2TaskGraph(contract["id"].(string), int(contract["revision"].(float64)), contract["content_hash"].(string))
+	graph := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graphJSON))
+	validated := asObject(t, runPic(t, bin, root, home, "work-item", "graph-validate", id))
+	if validated["valid"] != true || validated["decomposition_policy_version"] != float64(2) {
+		t.Fatalf("v2 graph validation = %#v", validated)
+	}
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", graph["id"].(string), "approved")
+
+	reject := func(name, graph, needle string) {
+		t.Helper()
+		runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graph)
+		if out := runPicError(t, bin, root, home, "work-item", "graph-validate", id); !strings.Contains(out, needle) {
+			t.Fatalf("%s: error = %s, want substring %q", name, out, needle)
+		}
+	}
+	// Missing edge rationale.
+	bad := strings.Replace(graphJSON, `"depends_on_rationale":{"S01":"consumes the persisted schema contract S01 establishes"}`, `"depends_on_rationale":{"S01":""}`, 1)
+	reject("empty edge rationale", bad, "requires a non-empty depends_on_rationale")
+	// Verification gate without a seam.
+	bad = strings.Replace(graphJSON, `"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./..."`, `"requirement_keys":["REQ-001"],"command":"go test ./..."`, 1)
+	reject("gate without seam", bad, "requires a seam")
+	// Verification gate seam the Blueprint does not declare.
+	bad = strings.Replace(graphJSON, `"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./..."`, `"seam":"e2e-browser","requirement_keys":["REQ-001"],"command":"go test ./..."`, 1)
+	reject("undeclared seam", bad, "which the approved Blueprint does not declare")
+	// Verification gate without requirement or obligation keys.
+	bad = strings.Replace(graphJSON, `"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./..."`, `"seam":"go-tests","command":"go test ./..."`, 1)
+	reject("gate without keys", bad, "at least one requirement or obligation key")
+	// Verification gate without expected evidence.
+	bad = strings.Replace(graphJSON, `"command":"go test ./...","expected":"requirement behavior proven"`, `"command":"go test ./..."`, 1)
+	reject("gate without expected", bad, "executable command and expected evidence")
+	// Verification gate referencing an unknown Contract obligation.
+	bad = strings.Replace(graphJSON, `"seam":"cli-materialize","obligation_keys":["OB-003"]`, `"seam":"cli-materialize","obligation_keys":["OB-404"]`, 1)
+	reject("unknown obligation", bad, "unknown Contract obligation OB-404")
+	// A second provider node for the same obligation makes provenance ambiguous.
+	bad = strings.Replace(graphJSON, `"provides":["OB-001"]`, `"provides":["OB-001","OB-002"]`, 1)
+	reject("duplicate obligation provider", bad, "must have exactly one provider node, found 2")
+	// An integration-gate node of any type must carry a verification entry.
+	bad = strings.Replace(graphJSON, `"verification":[{"seam":"cli-materialize","obligation_keys":["OB-002"],"command":"go test ./cmd/pic -run TestDelivery","expected":"integrated delivery verified"}]`, `"verification":[]`, 1)
+	reject("integration gate without verification", bad, "G01 requires at least one seam-bound verification entry")
+	// Shared-contract node without a downstream consumer (the consumer drops both
+	// the dependency and the consume so the Contract obligation graph stays valid).
+	bad = strings.Replace(graphJSON, `"depends_on":["S01"],"priority":"P0"`, `"depends_on":[],"priority":"P0"`, 1)
+	bad = strings.Replace(bad, `"depends_on_rationale":{"S01":"consumes the persisted schema contract S01 establishes"},`, ``, 1)
+	bad = strings.Replace(bad, `"consumes":["OB-003"]`, `"consumes":[]`, 1)
+	reject("shared contract without consumer", bad, "no downstream consumer depending on it")
+	// Wide refactor without a paired contract node.
+	bad = strings.Replace(graphJSON, `"paired_contract_node":"P01",`, ``, 1)
+	reject("wide refactor without pair", bad, "wide_refactor requires paired_contract_node")
+	// Wide refactor whose declaring node is outside the paired node's closure.
+	bad = strings.Replace(graphJSON, `"depends_on":["W01"],"priority":"P1","module":"core","files":["w.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["w.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./cmd/pic -run TestCleanup","expected":"cleanup verified"}],"skillFamilies":[],"provides":[],"consumes":[],"evidence_for":[],"obligation_keys":[],"depends_on_rationale":{"W01":"contracts the expansion W01 performs"}`, `"depends_on":[],"priority":"P1","module":"core","files":["w.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["w.go"]},"verification":[{"seam":"go-tests","requirement_keys":["REQ-001"],"command":"go test ./cmd/pic -run TestCleanup","expected":"cleanup verified"}],"skillFamilies":[],"provides":[],"consumes":[],"evidence_for":[],"obligation_keys":[]`, 1)
+	reject("wide refactor closure", bad, "depends_on closure of its paired contract node P01")
+	// Integration gate on a node without obligation or requirement coverage.
+	bad = strings.Replace(graphJSON, `"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]`, `"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[],"decomposition_mode":"integration_gate","exception_reason":"aggregate verification gate"`, 1)
+	reject("integration gate without coverage", bad, "must list the obligations or requirements it verifies")
+	// Unknown mode.
+	bad = strings.Replace(graphJSON, `"decomposition_mode":"shared_contract"`, `"decomposition_mode":"horizontal"`, 1)
+	reject("unknown mode", bad, "unknown decomposition_mode")
+	// Exception mode without a reason.
+	bad = strings.Replace(graphJSON, `"exception_reason":"widens the schema consumed by CLI, scheduler, and dashboard"`, `"exception_reason":""`, 1)
+	reject("missing exception reason", bad, "without exception_reason")
+	// Multi-requirement node without node-level acceptance.
+	multiRequirement := strings.Replace(graphJSON, `"requirement_keys":["REQ-002"],"depends_on":["S01"]`, `"requirement_keys":["REQ-001","REQ-002"],"depends_on":["S01"]`, 1)
+	bad = strings.Replace(multiRequirement, `"acceptance":"Given an approved graph\nWhen materialization runs\nThen projections commit atomically",`, ``, 1)
+	reject("composed node without acceptance", bad, "requires node-level acceptance")
+	// Node-authored acceptance must be Gherkin.
+	bad = strings.Replace(graphJSON, `"acceptance":"Given an approved graph\nWhen materialization runs\nThen projections commit atomically"`, `"acceptance":"projections commit atomically"`, 1)
+	reject("non-gherkin acceptance", bad, "acceptance require Given, When, and Then steps")
+	// Unsupported policy version on a graph.
+	bad = strings.Replace(graphJSON, `"decomposition_policy_version":2`, `"decomposition_policy_version":3`, 1)
+	reject("unsupported policy version", bad, "unsupported decomposition_policy_version 3")
+
+	// The graph binds the exact approved Contract lineage: a stale hash or a
+	// wrong predecessor id fails closed at save time.
+	bad = strings.Replace(graphJSON, contract["content_hash"].(string), "sha256:stale", 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", bad); !strings.Contains(out, "must bind the approved Contract") {
+		t.Fatalf("stale contract binding = %s", out)
+	}
+	bad = strings.Replace(graphJSON, `"source_contract":{"artifact_id":"`+contract["id"].(string)+`"`, `"source_contract":{"artifact_id":"wia-wrong-lineage"`, 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", bad); !strings.Contains(out, "must bind the approved Contract") {
+		t.Fatalf("wrong-lineage contract binding = %s", out)
+	}
+	bad = strings.Replace(graphJSON, `"source_contract":{"artifact_id":"`+contract["id"].(string)+`","revision":`+fmt.Sprint(int(contract["revision"].(float64)))+`,"content_hash":"`+contract["content_hash"].(string)+`"},`, ``, 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", bad); !strings.Contains(out, "source_contract") {
+		t.Fatalf("missing source_contract = %s", out)
+	}
+
+	// Contract binding is re-checked against the approved Blueprint at save time.
+	unbound := strings.Replace(contractContent, blueprint["content_hash"].(string), "sha256:stale", 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "contracts", unbound); !strings.Contains(out, "must bind the approved Blueprint") {
+		t.Fatalf("stale blueprint binding = %s", out)
+	}
+	unbound = strings.Replace(contractContent, `"class":"user_behavior","seam":"cli-materialize"`, `"class":"user_behavior","seam":"e2e-browser"`, 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "contracts", unbound); !strings.Contains(out, "does not declare") {
+		t.Fatalf("undeclared obligation seam = %s", out)
+	}
+	// A v2 Contract without any approved Blueprint fails closed at save time.
+	fresh := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Unbound Contract Epic"))
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", fresh["id"].(string), "contracts", v2ContractArtifact("wia-x", 1, "sha256:abc")); !strings.Contains(out, "requires an approved Blueprint on the same planning lineage") {
+		t.Fatalf("v2 contract without blueprint = %s", out)
+	}
+	// A v1 Contract chain keeps validating under v1 rules.
+	runPic(t, bin, root, home, "work-item", "artifact-save", fresh["id"].(string), "contracts", validContractArtifact)
+
+	// A policy-v2 graph on a Work Item without Blueprint/Contract predecessors
+	// (standalone profile) is rejected instead of skipping seam authority.
+	standalone := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "No Seam Authority"))
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,task_id,requirement_key,title,acceptance_criteria) VALUES('req-nsa','`+standalone["id"].(string)+`','REQ-S1','Required','Given valid context
+When work runs
+Then it completes')`)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", standalone["id"].(string), "task_graph", v2StandaloneGraphV2Policy); !strings.Contains(out, "requires an approved Contract on the same planning lineage") {
+		t.Fatalf("standalone v2 graph without seam authority = %s", out)
+	}
+}
+
+func TestDecompositionPolicyV1Unchanged(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Policy v1 Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-v1','`+id+`','REQ-001','Required','Given valid context
+When work runs
+Then it completes')`)
+	for _, stage := range []string{"scan", "rri", "vision", "blueprint", "contracts"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	// The v1 graph has no decomposition fields at all and must still approve.
+	graph := `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]},{"key":"T01","type":"task","name":"Implement","parent_key":"F01","goal":"Implement requirement","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"core","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"go test ./...","required":true}],"skillFamilies":[]}]}`
+	artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graph))
+	validated := asObject(t, runPic(t, bin, root, home, "work-item", "graph-validate", id))
+	if validated["valid"] != true || validated["decomposition_policy_version"] != float64(0) {
+		t.Fatalf("v1 graph validation = %#v", validated)
+	}
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", artifact["id"].(string), "approved")
+	materialized := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id))
+	if materialized["created"] != float64(2) {
+		t.Fatalf("v1 materialization = %#v", materialized)
+	}
+}
+
+func TestDecompositionProjectionMaterialization(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Projection Epic"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	seedV2Requirements(t, dbPath, id)
+	blueprint := approveV2Blueprint(t, bin, root, home, id)
+	contractContent := v2ContractArtifact(blueprint["id"].(string), int(blueprint["revision"].(float64)), blueprint["content_hash"].(string))
+	contract := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contractContent))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", contract["id"].(string), "approved")
+	graphJSON := v2TaskGraph(contract["id"].(string), int(contract["revision"].(float64)), contract["content_hash"].(string))
+	graph := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graphJSON))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", graph["id"].(string), "approved")
+	materialized := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id))
+	if materialized["created"] != float64(7) {
+		t.Fatalf("v2 materialization = %#v", materialized)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	// The aggregate root epic is not a projection; each node row is, and every
+	// one carries the exact source graph lineage.
+	nodeProjection := func(key string) (string, string, string, string, int, string) {
+		t.Helper()
+		var mode, reason, paired, artifactID, contentHash string
+		var revision int
+		if err := db.QueryRow(`SELECT wi.decomposition_mode,wi.decomposition_reason,wi.paired_contract_node,wi.source_graph_artifact_id,wi.source_graph_revision,wi.source_graph_content_hash FROM work_items wi JOIN work_item_materializations m ON m.work_item_id=wi.id WHERE m.root_work_item_id=? AND m.node_key=?`, id, key).Scan(&mode, &reason, &paired, &artifactID, &revision, &contentHash); err != nil {
+			t.Fatal(err)
+		}
+		return mode, reason, paired, artifactID, revision, contentHash
+	}
+	var epicMode string
+	if err := db.QueryRow(`SELECT decomposition_mode FROM work_items WHERE id=?`, id).Scan(&epicMode); err != nil || epicMode != "vertical" {
+		t.Fatalf("aggregate root carries the column default mode=%q err=%v", epicMode, err)
+	}
+	featureMode, _, _, lineageArtifact, lineageRevision, lineageHash := nodeProjection("F01")
+	if featureMode != "vertical" {
+		t.Fatalf("feature projection mode = %q, want normalized vertical", featureMode)
+	}
+	// An omitted v2 mode is normalized to vertical before persistence.
+	t01Mode, _, _, _, _, _ := nodeProjection("T01")
+	if t01Mode != "vertical" {
+		t.Fatalf("omitted v2 mode persisted as %q, want vertical", t01Mode)
+	}
+	gateMode, _, _, _, _, _ := nodeProjection("G01")
+	if gateMode != "integration_gate" {
+		t.Fatalf("integration gate projection mode = %q", gateMode)
+	}
+	widenedMode, widenedReason, widenedPaired, _, _, _ := nodeProjection("W01")
+	if widenedMode != "wide_refactor" || widenedPaired != "P01" || !strings.Contains(widenedReason, "call site") {
+		t.Fatalf("wide refactor projection = %q/%q/%q", widenedMode, widenedReason, widenedPaired)
+	}
+	sharedMode, sharedReason, _, _, _, _ := nodeProjection("S01")
+	if sharedMode != "shared_contract" || !strings.Contains(sharedReason, "schema consumed by") {
+		t.Fatalf("shared contract projection = %q/%q", sharedMode, sharedReason)
+	}
+	var rationale, relatedID string
+	if err := db.QueryRow(`SELECT r.rationale,r.related_work_item_id FROM work_item_relations r JOIN work_item_materializations m ON m.work_item_id=r.work_item_id WHERE m.root_work_item_id=? AND m.node_key='T02' AND r.relation_type='blocks'`, id).Scan(&rationale, &relatedID); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rationale, "consumes the persisted schema contract") {
+		t.Fatalf("edge rationale = %q", rationale)
+	}
+	var providerNode string
+	if err := db.QueryRow(`SELECT node_key FROM work_item_materializations WHERE work_item_id=? AND root_work_item_id=?`, relatedID, id).Scan(&providerNode); err != nil || providerNode != "S01" {
+		t.Fatalf("rationale target node = %q err=%v", providerNode, err)
+	}
+	if lineageArtifact != graph["id"].(string) || lineageRevision != int(graph["revision"].(float64)) || lineageHash != graph["content_hash"].(string) {
+		t.Fatalf("source lineage = %s@%d (%s), want %s@%v (%s)", lineageArtifact, lineageRevision, lineageHash, graph["id"], graph["revision"], graph["content_hash"])
+	}
+	var t02ID, w01ID string
+	if err := db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='T02'`, id).Scan(&t02ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='W01'`, id).Scan(&w01ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// pic show exposes the projection metadata and edge rationale.
+	shown := asObject(t, runPic(t, bin, root, home, "show", w01ID))
+	item := shown["work_item"].(map[string]any)
+	if item["decomposition_mode"] != "wide_refactor" || item["paired_contract_node"] != "P01" || item["source_graph_artifact_id"] != graph["id"].(string) {
+		t.Fatalf("pic show work_item projection = %#v", item)
+	}
+	shownConsumer := asObject(t, runPic(t, bin, root, home, "show", t02ID))
+	dependencies := shownConsumer["dependencies"].([]any)
+	foundRationale := false
+	for _, entry := range dependencies {
+		dependency := entry.(map[string]any)
+		if dependency["rationale"] != nil && strings.Contains(fmt.Sprint(dependency["rationale"]), "consumes the persisted schema contract") {
+			foundRationale = true
+		}
+	}
+	if !foundRationale {
+		t.Fatalf("pic show dependencies missing rationale: %#v", dependencies)
+	}
+
+	// Standalone Work Items (no blueprint stage) keep v2 rules without seam
+	// binding and record their own projection.
+	task := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Standalone v2"))
+	taskID := task["id"].(string)
+	runSQLite(t, dbPath, `INSERT INTO requirements(id,task_id,requirement_key,title,acceptance_criteria) VALUES('req-standalone','`+taskID+`','REQ-001','Required','Given valid context
+When work runs
+Then it completes')`)
+	for _, stage := range []string{"scan", "rri"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", taskID, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", taskID, stage, artifact["id"].(string), decision)
+	}
+	standalone := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", taskID, "task_graph", v2StandaloneGraph))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", taskID, "task_graph", standalone["id"].(string), "approved")
+	if out := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", taskID)); out["total"] != float64(1) {
+		t.Fatalf("standalone materialization = %#v", out)
+	}
+	// The standalone projection is the Work Item itself.
+	var taskMode, taskArtifact string
+	var taskRevision int
+	if err := db.QueryRow(`SELECT decomposition_mode,source_graph_artifact_id,source_graph_revision FROM work_items WHERE id=?`, taskID).Scan(&taskMode, &taskArtifact, &taskRevision); err != nil {
+		t.Fatal(err)
+	}
+	if taskMode != "vertical" || taskArtifact != standalone["id"].(string) || taskRevision != 1 {
+		t.Fatalf("standalone projection = mode %q lineage %s@%d", taskMode, taskArtifact, taskRevision)
+	}
+
+	// The frozen TIP resolves a single-requirement node's acceptance explicitly:
+	// T01 authored no acceptance, so content.acceptance carries REQ-001's criteria.
+	runPic(t, bin, root, home, "work-item", "authorize", id, "owner")
+	var t01ID string
+	if err := db.QueryRow(`SELECT work_item_id FROM work_item_materializations WHERE root_work_item_id=? AND node_key='T01'`, id).Scan(&t01ID); err != nil {
+		t.Fatal(err)
+	}
+	runPic(t, bin, root, home, "workflow", "pipeline-claim", t01ID, "worker")
+	var frozenAcceptance string
+	if err := db.QueryRow(`SELECT json_extract(content_json,'$.content.acceptance') FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, t01ID).Scan(&frozenAcceptance); err != nil {
+		t.Fatal(err)
+	}
+	if frozenAcceptance != "Given valid context\nWhen work runs\nThen it completes" {
+		t.Fatalf("frozen TIP acceptance = %q, want the resolved requirement acceptance", frozenAcceptance)
+	}
+}
+
+func TestDecompositionProjectionMigration(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a database already migrated to the pre-v8 baseline: versions 1-4
+	// and 6 recorded, legacy steps never carried, old-shape core tables.
+	if _, err = db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')));
+		CREATE TABLE work_items (id TEXT PRIMARY KEY, type TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', priority TEXT DEFAULT 'medium', status TEXT DEFAULT 'open', created_at TEXT DEFAULT (datetime('now')));
+		CREATE TABLE work_item_relations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL, relation_type TEXT NOT NULL, related_work_item_id TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO work_items(id,type,title) VALUES('wi-old','epic','Old Epic');
+		INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES('wir-old','wi-old','blocks','wi-old');
+		INSERT INTO schema_migrations(version,name) VALUES(1,'pre_reconcile_schema'),(2,'artifact_stage_widening'),(3,'pipeline_columns_reconcile'),(4,'canonical_baseline'),(6,'canonical_backfills')`); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := initDB(dbPath); err != nil {
+		t.Fatalf("pre-v8 database failed to migrate: %v", err)
+	}
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var recorded int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=8`).Scan(&recorded); err != nil || recorded != 1 {
+		t.Fatalf("migration 8 recorded=%d err=%v", recorded, err)
+	}
+	var mode, rationale string
+	if err := db.QueryRow(`SELECT decomposition_mode FROM work_items WHERE id='wi-old'`).Scan(&mode); err != nil || mode != "vertical" {
+		t.Fatalf("projection default mode=%q, want vertical: err=%v", mode, err)
+	}
+	if err := db.QueryRow(`SELECT rationale FROM work_item_relations WHERE id='wir-old'`).Scan(&rationale); err != nil || rationale != "" {
+		t.Fatalf("rationale default=%q err=%v", rationale, err)
+	}
+	var revision int
+	if err := db.QueryRow(`SELECT source_graph_revision FROM work_items WHERE id='wi-old'`).Scan(&revision); err != nil || revision != 0 {
+		t.Fatalf("source revision default=%d err=%v", revision, err)
+	}
+	db.Close()
+	// Once-semantics: a second open must not re-apply the additive columns.
+	if err := initDB(dbPath); err != nil {
+		t.Fatalf("second open re-applied migration 8: %v", err)
+	}
+}
+
+func TestTaskGraphApprovalCheckpointQuestions(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Approval Questions"))
+	id := epic["id"].(string)
+	runSQLite(t, filepath.Join(root, ".pi", "tasks.db"), `INSERT INTO requirements(id,epic_id,requirement_key,title,acceptance_criteria) VALUES('req-q','`+id+`','REQ-001','Required','Given valid context
+When work runs
+Then it completes')`)
+	for _, stage := range []string{"scan", "rri", "vision", "blueprint", "contracts"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", id))
+	if status["next_stage"] != "task_graph" {
+		t.Fatalf("next_stage = %#v, want task_graph", status["next_stage"])
+	}
+	questions, ok := status["checkpoint_questions"].([]any)
+	if !ok || len(questions) != 5 {
+		t.Fatalf("checkpoint_questions = %#v", status["checkpoint_questions"])
+	}
+	for _, question := range []string{"too coarse or too fine", "independently meaningful verification", "genuinely gate execution", "horizontal exceptions justified", "merge or split"} {
+		found := false
+		for _, entry := range questions {
+			if strings.Contains(fmt.Sprint(entry), question) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("checkpoint_questions missing %q: %#v", question, questions)
+		}
+	}
+	// Other stages do not carry the Task Graph granularity questions.
+	early := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Early Stage"))
+	if status := asObject(t, runPic(t, bin, root, home, "work-item", "workflow-status", early["id"].(string))); status["next_stage"] == "task_graph" {
+		t.Fatalf("early stage unexpectedly at task_graph: %#v", status)
+	} else if status["checkpoint_questions"] != nil {
+		t.Fatalf("non-task_graph stage carries checkpoint_questions: %#v", status["checkpoint_questions"])
+	}
+}
+
+func TestRejectedCheckpointsDoNotSupplyPlanningAuthority(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Rejected Authority"))
+	id := epic["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	seedV2Requirements(t, dbPath, id)
+	blueprint := approveV2Blueprint(t, bin, root, home, id)
+	contractContent := v2ContractArtifact(blueprint["id"].(string), int(blueprint["revision"].(float64)), blueprint["content_hash"].(string))
+	contract := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contractContent))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "contracts", contract["id"].(string), "approved")
+
+	// A newer REJECTED Contract revision never supplies obligation or lineage
+	// authority: re-seed the approved revision-1 checkpoint next to a rejected
+	// revision-2 checkpoint and the graph must keep binding revision 1.
+	contract2 := strings.Replace(contractContent, "Persist workflow state", "Rewritten behavior", 1)
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "contracts", contract2)
+	runSQLite(t, dbPath, `INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-c1-reapproved','`+id+`','contracts','`+contract["id"].(string)+`',1,'`+contract["content_hash"].(string)+`','approved'),
+		('wic-c2-rejected','`+id+`','contracts','wia-c2',2,'sha256:rejected','rejected')`)
+	graphJSON := v2TaskGraph(contract["id"].(string), 1, contract["content_hash"].(string))
+	graph := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graphJSON))
+	if validated := asObject(t, runPic(t, bin, root, home, "work-item", "graph-validate", id)); validated["valid"] != true {
+		t.Fatalf("graph must bind the last approved contract: %#v", validated)
+	}
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "task_graph", graph["id"].(string), "approved")
+	if materialized := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id)); materialized["created"] != float64(7) {
+		t.Fatalf("materialization against the approved lineage = %#v", materialized)
+	}
+
+	// A rejected NEWER Task Graph checkpoint takes no authority either: saving
+	// revision 2 leaves the approved revision-1 checkpoint in place (materiali-
+	// zations block its deletion), so re-materialization reuses revision 1.
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "task_graph", graphJSON)
+	runSQLite(t, dbPath, `INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-g2-rejected','`+id+`','task_graph','`+graph["id"].(string)+`',2,'`+graph["content_hash"].(string)+`','rejected')`)
+	if again := asObject(t, runPic(t, bin, root, home, "work-item", "materialize", id)); again["created"] != float64(0) || again["total"] != float64(7) {
+		t.Fatalf("rejected graph checkpoint must not re-materialize: %#v", again)
+	}
+	rejectedDB, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rejectedMappings int
+	if err := rejectedDB.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE checkpoint_id='wic-g2-rejected'`).Scan(&rejectedMappings); err != nil {
+		t.Fatal(err)
+	}
+	rejectedDB.Close()
+	if rejectedMappings != 0 {
+		t.Fatalf("rejected checkpoint gained %d materialization mappings", rejectedMappings)
+	}
+
+	// Fail closed: with ONLY a rejected Blueprint checkpoint, a policy-v2
+	// Contract cannot save and the contracts stage cannot clear its
+	// predecessor gate.
+	other := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Rejected Only"))
+	otherID := other["id"].(string)
+	seedV2Requirements(t, dbPath, otherID)
+	rejectedBlueprint := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", otherID, "blueprint", v2BlueprintArtifact))
+	runSQLite(t, dbPath, `INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-b-rejected','`+otherID+`','blueprint','`+rejectedBlueprint["id"].(string)+`',1,'`+rejectedBlueprint["content_hash"].(string)+`','rejected')`)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", otherID, "contracts", v2ContractArtifact("wia-x", 1, "sha256:abc")); !strings.Contains(out, "requires an approved Blueprint on the same planning lineage") {
+		t.Fatalf("rejected blueprint must not authorize a v2 contract: %s", out)
+	}
+	// A v1 contract can still save, but the predecessor gate refuses approval
+	// because the blueprint stage holds only a rejected checkpoint.
+	runPic(t, bin, root, home, "work-item", "artifact-save", otherID, "contracts", validContractArtifact)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", otherID, "contracts", "current", "approved"); !strings.Contains(out, "Previous stage blueprint is not approved") {
+		t.Fatalf("rejected blueprint must not clear the predecessor gate: %s", out)
+	}
+
+	// Predecessor fallback: the last APPROVED checkpoint clears the gate even
+	// when a newer revision of the same stage was rejected.
+	fallback := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Predecessor Fallback"))
+	fallbackID := fallback["id"].(string)
+	seedV2Requirements(t, dbPath, fallbackID)
+	for _, stage := range []string{"scan", "rri", "vision"} {
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, stage, planningArtifactContent(stage)))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", fallbackID, stage, artifact["id"].(string), decision)
+	}
+	bp1 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, "blueprint", v2BlueprintArtifact))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", fallbackID, "blueprint", bp1["id"].(string), "approved")
+	revised := strings.Replace(v2BlueprintArtifact, "Reliable workflow", "Revised reliable workflow", 1)
+	bp2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, "blueprint", revised))
+	runSQLite(t, dbPath, `INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES
+		('wic-fb1-approved','`+fallbackID+`','blueprint','`+bp1["id"].(string)+`',1,'`+bp1["content_hash"].(string)+`','approved'),
+		('wic-fb2-rejected','`+fallbackID+`','blueprint','`+bp2["id"].(string)+`',2,'`+bp2["content_hash"].(string)+`','rejected')`)
+	runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, "contracts", validContractArtifact)
+	runPic(t, bin, root, home, "work-item", "artifact-approve", fallbackID, "contracts", "current", "approved")
 }

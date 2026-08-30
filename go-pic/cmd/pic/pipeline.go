@@ -175,7 +175,9 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 		if planningIndex > 0 {
 			for index, requiredStage := range planStages {
 				var approved int
-				if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_checkpoints WHERE work_item_id=? AND stage=?)`, taskID, requiredStage).Scan(&approved); err != nil {
+				// Claim gating reads only owner-decided checkpoints: a rejected
+				// newer revision never clears (or blocks as) an approval.
+				if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_checkpoints WHERE work_item_id=? AND stage=? AND decision_type=?)`, taskID, requiredStage, approvedCheckpointDecision(requiredStage)).Scan(&approved); err != nil {
 					return err
 				}
 				if index < planningIndex && approved == 0 {

@@ -311,7 +311,7 @@ func workItemDetailForWeb(db *sql.DB, id string) (map[string]any, bool) {
 	) SELECT `+workItemColumns+`,tree.depth FROM work_items JOIN tree USING(id) ORDER BY tree.depth,created_at,id`, id)
 	_ = attachWorkItemLabels(db, children)
 	_ = attachWorkItemLabels(db, descendants)
-	dependencies, _ := queryMaps(db, `SELECT r.id,r.work_item_id,r.related_work_item_id AS depends_on_work_item_id,blocker.title,blocker.type,blocker.status FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=? AND r.relation_type='blocks'`, id)
+	dependencies, _ := queryMaps(db, `SELECT r.id,r.work_item_id,r.related_work_item_id AS depends_on_work_item_id,r.rationale,blocker.title,blocker.type,blocker.status FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=? AND r.relation_type='blocks'`, id)
 	gates, _ := queryMaps(db, `SELECT r.id,r.work_item_id,r.related_work_item_id AS gate_work_item_id,gate_item.title,gate_item.status FROM work_item_relations r JOIN work_items gate_item ON gate_item.id=r.related_work_item_id WHERE r.work_item_id=? AND r.relation_type='gates'`, id)
 	artifacts, _ := queryMaps(db, `SELECT * FROM work_item_artifacts WHERE work_item_id=? ORDER BY stage,revision DESC`, id)
 	checkpoints, _ := queryMaps(db, `SELECT * FROM workflow_checkpoints WHERE work_item_id=? ORDER BY created_at`, id)

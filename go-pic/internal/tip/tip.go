@@ -70,12 +70,27 @@ type InstructionPackContent struct {
 	Provides            []string         `json:"provides"`
 	Consumes            []string         `json:"consumes"`
 	EvidenceFor         []string         `json:"evidence_for"`
+	Acceptance          string           `json:"acceptance,omitempty"`
+}
+
+// ArtifactLineage binds a downstream artifact to the exact approved predecessor
+// artifact revision: id, revision, and content hash.
+type ArtifactLineage struct {
+	ArtifactID  string `json:"artifact_id"`
+	Revision    int    `json:"revision"`
+	ContentHash string `json:"content_hash"`
 }
 
 type TaskPlanDocument struct {
 	Version         int                    `json:"version"`
 	ExecutionPolicy string                 `json:"execution_policy"`
 	Nodes           []TaskPlanDocumentNode `json:"nodes"`
+	// Decomposition policy marker; 0/1 means v1 rules, 2 the vertical-by-default
+	// policy with seam-bound verification. Unsupported values fail closed.
+	DecompositionPolicyVersion int `json:"decomposition_policy_version,omitempty"`
+	// SourceContract binds a policy-v2 graph to the exact approved Contract
+	// lineage, mirroring the Contract's source_blueprint binding.
+	SourceContract *ArtifactLineage `json:"source_contract,omitempty"`
 }
 
 type ContractObligation struct {
@@ -83,11 +98,24 @@ type ContractObligation struct {
 	RequirementKeys []string `json:"requirement_keys"`
 	Behavior        string   `json:"behavior"`
 	Acceptance      string   `json:"acceptance"`
+	Class           string   `json:"class,omitempty"`
+	Seam            string   `json:"seam,omitempty"`
 }
 
 type ContractDocument struct {
 	ObligationSchemaVersion int                  `json:"obligation_schema_version"`
 	Obligations             []ContractObligation `json:"obligations"`
+}
+
+// VerificationSeam is one owner-approved place where behavior is proven,
+// declared on a decomposition-policy-v2 Blueprint before its approval. The
+// highest seam that isolates the requirement under test wins; the aggregate
+// itself is always the highest seam.
+type VerificationSeam struct {
+	ID       string `json:"id"`
+	Surface  string `json:"surface"`
+	Isolates string `json:"isolates"`
+	PriorArt string `json:"prior_art,omitempty"`
 }
 
 type TaskPlanDocumentNode struct {
@@ -115,6 +143,13 @@ type TaskPlanDocumentNode struct {
 	Consumes            []string         `json:"consumes"`
 	EvidenceFor         []string         `json:"evidence_for"`
 	ObligationKeys      []string         `json:"obligation_keys"`
+	// Decomposition policy v2 fields. An absent decomposition_mode on a v2
+	// document means vertical; v1 documents never carry these fields.
+	DecompositionMode  string            `json:"decomposition_mode,omitempty"`
+	ExceptionReason    string            `json:"exception_reason,omitempty"`
+	PairedContractNode string            `json:"paired_contract_node,omitempty"`
+	Acceptance         string            `json:"acceptance,omitempty"`
+	DependsOnRationale map[string]string `json:"depends_on_rationale,omitempty"`
 }
 func ParseTaskPlanJSON(blueprint string) (TaskPlanDocument, error) {
 	match := regexp.MustCompile("(?s)```task-plan-json\\s*(.*?)```").FindStringSubmatch(blueprint)
@@ -269,6 +304,7 @@ func ExpandCanonicalInstructionPack(pack map[string]any) error {
 	pack["consumes_json"] = encode(envelope.Content.Consumes)
 	pack["evidence_for_json"] = encode(envelope.Content.EvidenceFor)
 	pack["obligation_keys_json"] = encode(envelope.Content.ObligationKeys)
+	pack["acceptance"] = envelope.Content.Acceptance
 	return nil
 }
 func ValidateInstructionPackContent(content InstructionPackContent) error {
@@ -392,6 +428,12 @@ func RenderInstructionPack(pack map[string]any) string {
 	if len(provides)+len(consumes)+len(evidenceFor)+len(obligationKeys) > 0 {
 		fmt.Fprintf(&b, "\n## CONTRACT INTERFACES\n- provides: %s\n- consumes: %s\n- evidence for: %s\n- obligation keys: %s\n", strings.Join(provides, ", "), strings.Join(consumes, ", "), strings.Join(evidenceFor, ", "), strings.Join(obligationKeys, ", "))
 	}
+	// Effective acceptance freeze: a node-authored acceptance (required when the
+	// node composes several requirements) travels into the TIP verbatim; a
+	// single-requirement node resolves its acceptance from the snapshot below.
+	if acceptance, _ := pack["acceptance"].(string); strings.TrimSpace(acceptance) != "" {
+		fmt.Fprintf(&b, "\n## EFFECTIVE ACCEPTANCE\n%s\n", acceptance)
+	}
 	b.WriteString("## ACCEPTANCE CRITERIA\n")
 	for _, snapshot := range snapshots {
 		fmt.Fprintf(&b, "\n### %s — %s\n%s\n", snapshot.RequirementKey, snapshot.Title, snapshot.AcceptanceCriteria)
@@ -433,7 +475,14 @@ func skillFamilies(values *[]string) []string {
 	return *values
 }
 func MaterializedInstructionPack(node TaskPlanDocumentNode, schemaVersion int, requirements map[string]RequirementSnapshot) ([]byte, string, error) {
-	content := InstructionPackContent{Goal: node.Goal, Module: node.Module, EstimatedEffort: node.EstimatedEffort, Files: node.Files, Patterns: node.Patterns, BusinessRules: node.BusinessRules, ValidationRules: node.ValidationRules, ErrorHandling: node.ErrorHandling, StateTransitions: node.StateTransitions, ContractObligations: node.ContractObligations, Constraints: node.Constraints, Verification: node.Verification, SchemaVersion: schemaVersion, SkillFamilies: node.SkillFamilies, ObligationKeys: node.ObligationKeys, Provides: node.Provides, Consumes: node.Consumes, EvidenceFor: node.EvidenceFor}
+	// Effective acceptance freeze: a node-authored acceptance travels verbatim;
+	// a single-requirement node without one resolves that requirement's
+	// acceptance criteria so the TIP carries the effective contract explicitly.
+	acceptance := node.Acceptance
+	if strings.TrimSpace(acceptance) == "" && len(node.RequirementKeys) == 1 {
+		acceptance = requirements[strings.ToUpper(node.RequirementKeys[0])].AcceptanceCriteria
+	}
+	content := InstructionPackContent{Goal: node.Goal, Module: node.Module, EstimatedEffort: node.EstimatedEffort, Files: node.Files, Patterns: node.Patterns, BusinessRules: node.BusinessRules, ValidationRules: node.ValidationRules, ErrorHandling: node.ErrorHandling, StateTransitions: node.StateTransitions, ContractObligations: node.ContractObligations, Constraints: node.Constraints, Verification: node.Verification, SchemaVersion: schemaVersion, SkillFamilies: node.SkillFamilies, ObligationKeys: node.ObligationKeys, Provides: node.Provides, Consumes: node.Consumes, EvidenceFor: node.EvidenceFor, Acceptance: acceptance}
 	snapshots := make([]RequirementSnapshot, 0, len(node.RequirementKeys))
 	for _, key := range node.RequirementKeys {
 		snapshots = append(snapshots, requirements[strings.ToUpper(key)])
@@ -500,7 +549,7 @@ func SaveInstructionPack(db *sql.DB, workItemID string, input SaveInput) (map[st
 	defer tx.Rollback()
 	var checkpointID string
 	if err = tx.QueryRow(`SELECT checkpoint_id FROM (
-		SELECT id AS checkpoint_id,artifact_revision FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph'
+		SELECT id AS checkpoint_id,artifact_revision FROM workflow_checkpoints WHERE work_item_id=? AND stage='task_graph' AND decision_type='approved'
 		UNION ALL
 		SELECT m.checkpoint_id,c.artifact_revision FROM work_item_materializations m JOIN workflow_checkpoints c ON c.id=m.checkpoint_id WHERE m.work_item_id=? AND c.stage='task_graph'
 	) ORDER BY artifact_revision DESC LIMIT 1`, workItemID, workItemID).Scan(&checkpointID); err != nil {
@@ -530,6 +579,40 @@ func SaveInstructionPack(db *sql.DB, workItemID string, input SaveInput) (map[st
 }
 
 // queryOneMap loads one row as a stringified map, matching the CLI's row shape.
+// TaskVerificationGate is the parsed, seam-bound form of one node verification
+// entry under decomposition policy v2: it names the seam where behavior is
+// proven, at least one requirement or obligation key it evidences, an
+// executable command, and the expected evidence statement.
+type TaskVerificationGate struct {
+	Seam            string
+	RequirementKeys []string
+	ObligationKeys  []string
+	Command         string
+	Expected        string
+}
+
+// ParseVerificationGate reads one raw node verification entry. ok is false when
+// the entry is not a JSON object, so validation can fail closed on malformed
+// gates instead of silently skipping them.
+func ParseVerificationGate(raw any) (gate TaskVerificationGate, ok bool) {
+	entry, ok := raw.(map[string]any)
+	if !ok {
+		return TaskVerificationGate{}, false
+	}
+	text := func(key string) string { value, _ := entry[key].(string); return value }
+	keys := func(key string) []string {
+		values, _ := entry[key].([]any)
+		parsed := make([]string, 0, len(values))
+		for _, value := range values {
+			if text, ok := value.(string); ok {
+				parsed = append(parsed, text)
+			}
+		}
+		return parsed
+	}
+	return TaskVerificationGate{Seam: text("seam"), RequirementKeys: keys("requirement_keys"), ObligationKeys: keys("obligation_keys"), Command: text("command"), Expected: text("expected")}, true
+}
+
 func queryOneMap(db *sql.DB, query string, args ...any) (map[string]any, error) {
 	rows, err := db.Query(query, args...)
 	if err != nil {

@@ -93,6 +93,7 @@ The scheduler input is an XML `<blueprint_handoff>` with schema version 2. It co
 
 ```json
 {
+  "decomposition_policy_version": 2,
   "project_info": { "project": "...", "nature": "...", "date": "YYYY-MM-DD" },
   "goals": { "primary_goal": "...", "target_audience": "...", "key_message": "..." },
   "architecture": { "building_blocks": ["..."], "connection_summary": "...", "data_flow": "..." },
@@ -100,29 +101,36 @@ The scheduler input is an XML `<blueprint_handoff>` with schema version 2. It co
   "tech_stack": [{ "layer": "...", "choice": "...", "rationale": "...", "reuse": "..." }],
   "file_structure": [{ "path": "...", "purpose": "..." }],
   "rri_requirements_matrix": [{ "blueprint_section": "...", "requirements": ["REQ-001"], "source_questions": ["Q1"] }],
-  "task_decomposition_preview": { "estimated_tasks": 1, "tasks": [{ "tip_id": "TIP-001", "title": "...", "goal": "..." }], "estimated_effort_minutes": 1 }
+  "verification_seams": [{ "id": "cli-materialize", "surface": "pic materialize against a temporary SQLite database", "isolates": "materialization atomicity and idempotency", "prior_art": "TestWorkItemGraphMaterialization" }]
 }
 ```
 
-`design_system` is required for UI projects and omitted for non-UI projects. Use authoritative RRI requirement keys; do not invent them. The preview is illustrative only, not the executable Task Graph.
+`design_system` is required for UI projects and omitted for non-UI projects. Use authoritative RRI requirement keys; do not invent them. There is no `task_decomposition_preview`: ticket boundaries are decided at the Task Graph stage. `verification_seams` is a nonempty array of owner-approved places where behavior is proven, ordered from highest to lowest seam — unique non-empty `id`, a `surface` naming where the test runs, an `isolates` naming the behavior it proves, and optional `prior_art` citing an existing test that probes the seam. Declare the highest seam that isolates each requirement under test; the aggregate itself is always the highest seam.
 
 Call `save_blueprint_draft` with `stage="blueprint"` and the JSON object as `content`. This is temporary and must not create a canonical artifact or approval checkpoint. The Contractor may request revisions by saving a replacement temporary draft. After Contractor review passes, the owner uses `approve_blueprint_draft` with the returned reviewed draft ID; that action performs the one canonical save and approval. Never return a Markdown planning report instead of saving the temporary draft.
 
 ## Task Graph Run
 
-The scheduler input is an XML `<task_graph_handoff>` with schema version 2. It contains only Work Item identity, project root, and approved predecessor artifact IDs, revisions, and hashes. Before planning, call `load_planning_artifact` for `scan`, `rri`, `vision`, `blueprint`, and `contracts`; verify each returned ID, revision, and content hash matches the handoff. Do not use historical revisions. Save exactly one structured Task Graph JSON artifact with `stage="task_graph"`. It must use schema version 3 and contain `execution_policy` plus `nodes`. Every node must define `key`, `name`, `goal`, `requirement_keys`, `depends_on`, `priority`, `module`, `skillFamilies` (use `[]` when none apply), `estimated_effort_minutes`, `files`, `patterns`, detailed `business_rules`, `validation_rules`, `error_handling`, `state_transitions`, scoped `contract_obligations`, `constraints`, executable `verification`, `obligation_keys`, `provides`, `consumes`, and `evidence_for`. For every Contract obligation, assign exactly one provider, make every consumer depend on its provider, and assign at least one evidence node. Do not emit a Markdown task plan or generic summary in place of the JSON artifact.
+The scheduler input is an XML `<task_graph_handoff>` with schema version 2. It contains only Work Item identity, project root, and approved predecessor artifact IDs, revisions, and hashes. Before planning, call `load_planning_artifact` for `scan`, `rri`, `vision`, `blueprint`, and `contracts`; verify each returned ID, revision, and content hash matches the handoff. Do not use historical revisions. Save exactly one structured Task Graph JSON artifact with `stage="task_graph"`. It must use schema version 3, set `"decomposition_policy_version": 2`, and bind `"source_contract"` to the exact approved Contract lineage returned by `load_planning_artifact` (`artifact_id`, `revision`, `content_hash`) — a stale or wrong-lineage binding is rejected. The graph contains `execution_policy` plus `nodes`. Every node must define `key`, `name`, `goal`, `requirement_keys`, `depends_on`, `priority`, `module`, `skillFamilies` (use `[]` when none apply), `estimated_effort_minutes`, `files`, `patterns`, detailed `business_rules`, `validation_rules`, `error_handling`, `state_transitions`, scoped `contract_obligations`, `constraints`, executable `verification`, `obligation_keys`, `provides`, `consumes`, and `evidence_for`. For every Contract obligation, assign exactly one provider, make every consumer depend on its provider, and assign at least one evidence node. Do not emit a Markdown task plan or generic summary in place of the JSON artifact.
+
+Decomposition policy v2 rules (validation rejects the graph otherwise):
+
+- Nodes are vertical by default: `"decomposition_mode"` is omitted or `"vertical"` for one requirement-keyed, independently verifiable slice. Any other mode is an explicit exception with a non-empty `"exception_reason"`.
+- `"shared_contract"` must provide the shared contract keys and keep at least one downstream consumer node depending on it. `"wide_refactor"` must name `"paired_contract_node"`, and the declaring node must sit in that node's `depends_on` closure. `"integration_gate"` is a verification-only node that lists the obligations or requirements it verifies and carries at least one valid seam-bound verification entry regardless of its node type.
+- Every `depends_on` edge must be a genuine blocker and carry a matching non-empty `"depends_on_rationale"` entry for that dependency key.
+- Every executable node carries an effective acceptance contract: a node composing two `requirement_keys` must author its own `"acceptance"` with literal Given/When/Then steps; a single-requirement node resolves that requirement's acceptance (reference it, never restate it).
+- Every `verification` entry is seam-bound: `{"seam": ..., "requirement_keys": [...] or "obligation_keys": [...], "command": ..., "expected": ...}` where `seam` is declared by the approved Blueprint, the keys name what is proven, `command` is executable, and `expected` states the evidence.
 
 Rules:
 
 - Keep behavior and its tests in the same node.
 - Split nodes that combine unrelated modules, independently testable outcomes, or schema/backend/UI/integration work.
-- If dependency-ready nodes own overlapping files, add an ordering edge or combine them.
-- Prefer natural parallel lanes after shared scaffolding: Data Layer, Core Logic, Interface, and Secondary work may be siblings only when their file ownership is disjoint.
-- Integration depends on every lane it consumes. Polish + Test depends on Integration. VERIFY is the terminal node and depends on all delivery work.
+- Default to vertical tracer-bullet slices: prefer the smallest node that delivers one requirement-keyed, independently verifiable outcome end to end over horizontal layer buckets. Introduce a horizontal mode only under the exception rules above, and contract every `wide_refactor` with its paired node.
+- Keep blocking edges minimal and direct: add an edge only when the dependency genuinely gates execution (shared contract consumption, paired cleanup, an integration gate's verified obligations). Never add informational or containment edges.
+- If dependency-ready nodes own overlapping files, add a rationale-carrying ordering edge or combine them.
 - Do not target or cap the number of nodes. Determine scope from the parent Feature or Epic's approved vertical-slice boundary, observable outcome, Requirements, Contract obligations, ownership boundaries, dependencies, and independently verifiable behavior. Split until each node is bite-sized and independently reviewable; stop before producing mechanical fragments without meaningful evidence.
 - Include explicit blocking edges and ask the owner to confirm granularity when a slice could be split into smaller independently testable Tasks.
 - Every non-deferred requirement maps to at least one node; every node maps to at least one requirement.
-- Contract decisions precede parallel implementation lanes; integration depends on every lane it consumes.
 - Do not create an implementation proxy Task or implementation task items on the Epic. Materialization creates real Tasks and active TIPs from this block.
 - Before persisting each node, define bounded module directories in `scope_roots` as Reviewer guidance. They are not mutation allowlists; Git-derived changed files remain authoritative.
 - Put disposable command output such as Playwright `test-results/**`, `playwright-report/**`, coverage output, and caches in `constraints.generated_files`; these paths are excluded from patch integration and must not be used for source or committed generated files.

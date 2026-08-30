@@ -335,3 +335,52 @@ test("contractor verification prompt separates environment prerequisites from re
   assert.match(prompt, /Required Commands/);
   assert.match(prompt, /pytest/);
 });
+
+test("Blueprint prompt publishes the solution spec with owner-approved seams", () => {
+  const prompt = buildWorkItemContinuePrompt({ work_item_id: "wi-b", next_stage: "blueprint" }, { title: "Blueprint", type: "epic" });
+  assert.match(prompt, /"decomposition_policy_version":2/);
+  assert.match(prompt, /verification_seams/);
+  assert.match(prompt, /highest seam that isolates each requirement under test/);
+  assert.match(prompt, /Do not include a task_decomposition_preview/);
+  assert.doesNotMatch(prompt, /task_decomposition_preview with estimated_tasks/);
+  assert.match(prompt, /"verification_seams":true/);
+  // The tool gate accepts the policy-dependent fifth check from the draft.
+  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  assert.match(tool, /decomposition_policy_version[\s\S]{0,120}"verification_seams", "nothing_missing"/);
+  const primer = buildStagePrimer({ work_item_id: "wi-b", stage: "blueprint", approved_digests: [] });
+  assert.match(primer, /owner-approved verification_seams \(decomposition_policy_version 2, no task_decomposition_preview\)/);
+});
+
+test("Contract prompt binds the approved Blueprint lineage and classifies obligations", () => {
+  const prompt = buildWorkItemContinuePrompt({ work_item_id: "wi-c", next_stage: "contracts" }, { title: "Contract", type: "epic" });
+  assert.match(prompt, /"decomposition_policy_version":2/);
+  assert.match(prompt, /source_blueprint/);
+  assert.match(prompt, /artifact_id/);
+  assert.match(prompt, /user_behavior, data_invariant, interface_contract, security, migration_rule, operational_rule, integration_gate/);
+  assert.match(prompt, /a seam that the approved Blueprint's verification_seams declares/);
+});
+
+test("Task Graph prompt encodes tracer-bullet decomposition with justified exceptions", () => {
+  const prompt = buildWorkItemContinuePrompt({ work_item_id: "wi-t", next_stage: "task_graph" }, { title: "Graph", type: "epic" });
+  assert.match(prompt, /"decomposition_policy_version":2/);
+  assert.match(prompt, /bind "source_contract" to the exact approved Contract lineage/);
+  assert.match(prompt, /vertical by default/);
+  assert.match(prompt, /What behavior becomes possible\?/);
+  assert.match(prompt, /What is its direct blocker\?/);
+  assert.match(prompt, /Can it fit one focused execution session\?/);
+  assert.match(prompt, /exception_reason/);
+  assert.match(prompt, /paired_contract_node/);
+  assert.match(prompt, /depends_on closure/);
+  assert.match(prompt, /integration_gate/);
+  assert.match(prompt, /depends_on_rationale/);
+  assert.match(prompt, /effective acceptance contract/);
+  assert.match(prompt, /seam is a verification seam the approved Blueprint declares/);
+  // Reference, don't restate: a single-requirement node resolves its acceptance.
+  assert.match(prompt, /resolves that requirement's acceptance/);
+  const primer = buildStagePrimer({ work_item_id: "wi-t", stage: "task_graph", approved_digests: [] });
+  assert.match(primer, /five granularity questions/);
+  // Standalone graphs have no Blueprint/Contract predecessors and stay on v1.
+  const standalone = buildWorkItemContinuePrompt({ work_item_id: "wi-s", next_stage: "task_graph" }, { title: "Leaf", type: "task" });
+  assert.doesNotMatch(standalone, /"decomposition_policy_version":2/);
+  assert.match(standalone, /stays on policy v1/);
+});

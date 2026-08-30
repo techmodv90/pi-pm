@@ -364,8 +364,13 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             const draft = loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id);
             let checkpoint: Record<string, unknown>;
             try { checkpoint = JSON.parse(params.content) as Record<string, unknown>; }
-            catch { return { content: [{ type: "text", text: "Error: content must be a JSON object with the five checkpoint booleans: architecture, design, requirements, task_decomposition, nothing_missing" }], details: {}, isError: true }; }
-            const checks = ["architecture", "design", "requirements", "task_decomposition", "nothing_missing"];
+            catch { return { content: [{ type: "text", text: "Error: content must be a JSON object with the five checkpoint booleans: architecture, design, requirements, task_decomposition (verification_seams for decomposition policy v2 drafts), nothing_missing" }], details: {}, isError: true }; }
+            // The fifth check is policy-dependent: decomposition policy v2 drafts
+            // are reviewed for verification seams, v1 drafts for task decomposition.
+            const policyVersion = (JSON.parse(draft.content) as { decomposition_policy_version?: number }).decomposition_policy_version ?? 1;
+            const checks = policyVersion === 2
+              ? ["architecture", "design", "requirements", "verification_seams", "nothing_missing"]
+              : ["architecture", "design", "requirements", "task_decomposition", "nothing_missing"];
             if (!checks.every((key) => checkpoint[key] === true)) return { content: [{ type: "text", text: `Error: all five Blueprint checks must pass; set each to true: ${checks.join(", ")}` }], details: {}, isError: true };
             const reviewed = saveBlueprintDraft(ctx.cwd, params.id, draft.content, checkpoint);
             blueprintPresentation = renderBlueprintReportMarkdown(parseBlueprintReportJson(draft.content)).replaceAll("- [ ]", "- [x]");

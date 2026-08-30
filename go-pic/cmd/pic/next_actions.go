@@ -98,12 +98,29 @@ func nextActionHints(stage string) []NextAction {
 	}
 }
 
+// taskGraphApprovalQuestions are the five structured granularity questions the
+// owner answers at the existing Task Graph approval checkpoint, before
+// materialization. They ride the approval gate — no new approval state is
+// introduced — and are rendered wherever the Task Graph approval checkpoint is
+// presented (workflow-status next actions and gate hints).
+var taskGraphApprovalQuestions = []string{
+	"Are any slices too coarse or too fine?",
+	"Does each slice have independently meaningful verification?",
+	"Does each blocker genuinely gate execution?",
+	"Are any horizontal exceptions justified?",
+	"Should any node merge or split?",
+}
+
 // withNextActions attaches the stage's structured oracle actions to a
-// workflow-status map.
+// workflow-status map. The Task Graph approval checkpoint additionally carries
+// the five granularity questions the owner reviews before approving.
 func withNextActions(status map[string]any) map[string]any {
 	if next, ok := status["next_stage"].(string); ok {
 		if hints := nextActionHints(next); len(hints) > 0 {
 			status["next_actions"] = hints
+		}
+		if next == "task_graph" {
+			status["checkpoint_questions"] = taskGraphApprovalQuestions
 		}
 	}
 	return status

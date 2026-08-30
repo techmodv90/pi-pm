@@ -22,6 +22,14 @@ export interface PicWorkItem {
   workflow_mode?: string;
   design_status?: string;
   owner_status?: string;
+  // Decomposition policy v2 projection recorded by materialization; empty on
+  // v1 lineage and non-projection rows.
+  decomposition_mode?: string;
+  decomposition_reason?: string;
+  paired_contract_node?: string;
+  source_graph_artifact_id?: string;
+  source_graph_revision?: number;
+  source_graph_content_hash?: string;
 }
 
 export interface PicProject {
@@ -130,6 +138,7 @@ export interface PicDependency {
   status?: string;
   review_status?: string;
   title?: string;
+  rationale?: string;
 }
 
 export interface PicProfile {
