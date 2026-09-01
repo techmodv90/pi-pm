@@ -305,13 +305,13 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 				return errors.New("review-fix claim requires a bound rejected candidate")
 			}
 			var unchangedFailures int
-			if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND candidate_patch_hash=? AND error='review-fix produced the unchanged rejected candidate patch' AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, candidatePatchHash, taskID).Scan(&unchangedFailures); err != nil {
+			if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND candidate_patch_hash=? AND error='review-fix produced the unchanged rejected candidate patch' AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion','owner_review_decision') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, candidatePatchHash, taskID).Scan(&unchangedFailures); err != nil {
 				return err
 			}
 			if unchangedFailures > 0 {
 				return errors.New("review-fix circuit breaker open: rejected candidate already produced no progress; owner action or a new instruction pack is required")
 			}
-			if err = tx.QueryRow(`SELECT COALESCE(MAX(review_fix_cycle),0)+1 FROM pipeline_runs WHERE task_id=? AND instruction_pack_hash=? AND status!='cancelled' AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, packHash, taskID).Scan(&reviewFixCycle); err != nil {
+			if err = tx.QueryRow(`SELECT COALESCE(MAX(review_fix_cycle),0)+1 FROM pipeline_runs WHERE task_id=? AND instruction_pack_hash=? AND status!='cancelled' AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion','owner_review_decision') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, packHash, taskID).Scan(&reviewFixCycle); err != nil {
 				return err
 			}
 			if reviewFixCycle > 3 {
@@ -684,6 +684,65 @@ func workflowReviewFixBlock(db *sql.DB, args []string) error {
 		return errors.New("review-fix block rejected: completed failed review not mutable")
 	}
 	if err = addEvent(tx, taskID, "review_fix_round_cap", "orchestrator", summary, map[string]any{"pipeline_run_id": reviewID, "owner_action_required": true, "summary": summary}); err != nil {
+		return err
+	}
+	if err = tx.Commit(); err != nil {
+		return err
+	}
+	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, reviewID)
+}
+
+// Owner review-decision constraint: a failed review carrying
+// owner_approval_required=true durably stops the scheduler (the review-fix claim
+// gate and nextPipelineStage both honor the flag), and only
+// workflowReviewFixBlock ever set that flag — so a reviewer-flagged verdict had
+// no owner resolution instrument. This command records the owner's fix decision:
+// it validates the flagged review, clears the durable flag, and appends an
+// owner_review_decision audit event whose after_attempt baseline resets the
+// review-fix cycle counters.
+func workflowReviewDecision(db *sql.DB, args []string) error {
+	if len(args) < 3 {
+		return errors.New("usage: pic workflow review-decision <task-id> <review-run-id> fix --notes <text> --actor-role owner")
+	}
+	taskID, reviewID, decision := args[0], args[1], args[2]
+	opts, err := parseOptions(args[3:])
+	if err != nil {
+		return err
+	}
+	if validateWorkflowActor(opts["actor-role"], "owner") != nil {
+		return errors.New("review-decision requires actor_role=owner")
+	}
+	if decision != "fix" {
+		return errors.New("review-decision supports only decision 'fix'; deferral has no execution state model")
+	}
+	if opts["notes"] == "" {
+		return errors.New("review-decision requires --notes")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var candidateRunID string
+	err = tx.QueryRow(`SELECT json_extract(result_json,'$.candidate_run_id') FROM pipeline_runs WHERE id=? AND task_id=? AND stage='review' AND status='completed' AND json_valid(result_json) AND json_extract(result_json,'$.review_status')='failed' AND COALESCE(json_extract(result_json,'$.owner_approval_required'),0)!=0`, reviewID, taskID).Scan(&candidateRunID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("review-decision requires a completed failed review with owner_approval_required for this Work Item")
+	}
+	if err != nil {
+		return err
+	}
+	var candidateAttempt int
+	if candidateRunID != "" {
+		_ = tx.QueryRow(`SELECT attempt FROM pipeline_runs WHERE id=? AND task_id=?`, candidateRunID, taskID).Scan(&candidateAttempt)
+	}
+	result, err := tx.Exec(`UPDATE pipeline_runs SET result_json=json_set(result_json, '$.owner_approval_required', json('false')), updated_at=datetime('now') WHERE id=? AND status='completed' AND stage='review' AND json_valid(result_json)`, reviewID)
+	if err != nil {
+		return err
+	}
+	if changed, _ := result.RowsAffected(); changed != 1 {
+		return errors.New("review-decision rejected: completed failed review not mutable")
+	}
+	if err = addEvent(tx, taskID, "owner_review_decision", "owner", opts["notes"], map[string]any{"pipeline_run_id": reviewID, "decision": decision, "candidate_run_id": candidateRunID, "after_attempt": candidateAttempt}); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {

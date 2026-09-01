@@ -2061,6 +2061,62 @@ func TestReviewFixCapPersistsBlockedOwnerAction(t *testing.T) {
 	}
 }
 
+func TestReviewDecisionFixClearsOwnerApprovalBlock(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Review decision fix"))
+	id := item["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	activateTestWorkItemTIP(t, dbPath, id)
+	suffix := strings.TrimPrefix(id, "wi-")
+	// Seed a completed worker candidate (attempt 2) and a completed failed review
+	// that durably requires owner approval, mirroring a reviewer-flagged verdict.
+	runSQLite(t, dbPath, `INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,integrated_patch_path,integrated_patch_hash,artifact_saved_at,completed_at,advanced_at) VALUES('pr-cand','`+id+`','worker',2,'completed','lease-cand',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','candidate.patch','patch-hash',datetime('now'),datetime('now'),datetime('now')); INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,candidate_run_id,candidate_patch_hash,result_json,completed_at) VALUES('pr-rev','`+id+`','review',1,'completed','lease-rev',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','pr-cand','patch-hash','{"review_status":"failed","candidate_run_id":"pr-cand","candidate_patch_hash":"patch-hash","owner_approval_required":true}',datetime('now')); UPDATE work_items SET review_status='failed' WHERE id='`+id+`';`)
+
+	// The blocked review-fix claim is rejected while the flag stands.
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--review-fix", "1"); !strings.Contains(out, "requires owner approval") {
+		t.Fatalf("pre-decision claim = %s", out)
+	}
+	// Non-owner actors are rejected.
+	if out := runPicError(t, bin, root, home, "workflow", "review-decision", id, "pr-rev", "fix", "--notes", "n", "--actor-role", "contractor"); !strings.Contains(out, "actor_role=owner") {
+		t.Fatalf("contractor decision = %s", out)
+	}
+	// Only the fix decision is modeled.
+	if out := runPicError(t, bin, root, home, "workflow", "review-decision", id, "pr-rev", "deferred", "--notes", "n", "--actor-role", "owner"); !strings.Contains(out, "supports only decision 'fix'") {
+		t.Fatalf("deferred decision = %s", out)
+	}
+	// A review without the durable flag is not a decision target.
+	runSQLite(t, dbPath, `INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,candidate_run_id,candidate_patch_hash,result_json,completed_at) VALUES('pr-plain','`+id+`','review',2,'completed','lease-plain',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','pr-cand','patch-hash','{"review_status":"failed","candidate_run_id":"pr-cand","candidate_patch_hash":"patch-hash"}',datetime('now'));`)
+	if out := runPicError(t, bin, root, home, "workflow", "review-decision", id, "pr-plain", "fix", "--notes", "n", "--actor-role", "owner"); !strings.Contains(out, "requires a completed failed review with owner_approval_required") {
+		t.Fatalf("plain failed review decision = %s", out)
+	}
+	// The owner records the fix decision; the durable flag clears.
+	decided := asObject(t, runPic(t, bin, root, home, "workflow", "review-decision", id, "pr-rev", "fix", "--notes", "owner directs a fix of the Important findings", "--actor-role", "owner"))
+	if decided["id"] != "pr-rev" {
+		t.Fatalf("review-decision returned run = %#v", decided)
+	}
+	if !strings.Contains(fmt.Sprint(decided["result_json"]), `"owner_approval_required":false`) {
+		t.Fatalf("flag not cleared: %#v", decided)
+	}
+	events := runPic(t, bin, root, home, "workflow", "events", id).([]any)
+	foundDecision := false
+	for _, ev := range events {
+		obj := asObject(t, ev)
+		if obj["event_type"] == "owner_review_decision" && obj["actor_role"] == "owner" {
+			foundDecision = true
+		}
+	}
+	if !foundDecision {
+		t.Fatalf("missing owner_review_decision audit event: %#v", events)
+	}
+	// The cleared flag plus the event's after_attempt baseline let the review-fix
+	// claim proceed with a fresh cycle instead of staying blocked.
+	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--review-fix", "1"))
+	if claim["review_fix_cycle"] != float64(1) {
+		t.Fatalf("post-decision claim did not start a fresh review-fix epoch: %#v", claim)
+	}
+}
+
 func TestPipelineCircuitResetClearsAutomaticWorkerRetryLimit(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
