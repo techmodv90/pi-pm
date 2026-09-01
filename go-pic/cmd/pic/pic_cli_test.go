@@ -1291,6 +1291,213 @@ func cloneJSONMap(t *testing.T, value any) map[string]any {
 	return result
 }
 
+// markedRriPayload builds a publishable marked frontier payload with an
+// optional set of open_questions rows so publish-gate tests can vary only the
+// frontier rows under test.
+func markedRriPayload(t *testing.T, title string, questions []any) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-GATE", "priority": "tier1", "title": "Publish gate", "description": "Gate RRI publication", "acceptanceCriteria": "Given a marked RRI payload\nWhen rri-finalize runs\nThen the publish gate applies"}},
+		"decisions":    []map[string]any{{"key": "gate_mode", "answer": "Gate marked reports"}},
+		"report": map[string]any{
+			"project_name": title, "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-GATE", "requirement": "Publish gate", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Gate mode", "options_considered": "Gated vs legacy", "chosen": "Gated", "rationale": "Blocking frontier"}},
+			"open_questions":      questions,
+			"not_yet_specified":   []map[string]string{},
+			"out_of_scope":        []map[string]string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
+}
+
+func TestRriPublishGateBlocksOpenP0P1Questions(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	for _, tc := range []struct {
+		name    string
+		row     map[string]any
+		wantErr string
+	}{
+		{name: "open P0", row: map[string]any{"id": "Q1", "question": "Ship order", "status": "open", "priority": "P0", "mode": "hitl", "blocks": true}, wantErr: "open P0/P1 question Q1 (P0) remains unresolved: Ship order"},
+		{name: "open P1", row: map[string]any{"id": "Q2", "question": "Auth mode", "status": "open", "priority": "P1", "mode": "hitl", "blocks": true}, wantErr: "open P0/P1 question Q2 (P1) remains unresolved: Auth mode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Publish gate "+tc.name))
+			id := item["id"].(string)
+			scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+			runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+			runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+			out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, markedRriPayload(t, "Publish gate "+tc.name, []any{tc.row}))
+			if !strings.Contains(out, tc.wantErr) {
+				t.Fatalf("open P0/P1 finalization must name the open question, got %s", out)
+			}
+			db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var artifacts, decisions, events int
+			if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&artifacts); err != nil || artifacts != 0 {
+				t.Fatalf("rejected publication persisted artifacts=%d err=%v", artifacts, err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM owner_decisions WHERE epic_id=?`, id).Scan(&decisions); err != nil || decisions != 0 {
+				t.Fatalf("rejected publication persisted owner decisions=%d err=%v", decisions, err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=?`, id).Scan(&decisions); err != nil || decisions != 0 {
+				t.Fatalf("rejected publication persisted work-item owner decisions=%d err=%v", decisions, err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='rri_finalized'`, id).Scan(&events); err != nil || events != 0 {
+				t.Fatalf("rejected publication persisted events=%d err=%v", events, err)
+			}
+		})
+	}
+	// Open P2 rows and legacy pre-marker rows must not trip the gate.
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Publish gate low priority"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	openP2 := map[string]any{"id": "Q3", "question": "Nice to have", "status": "open", "priority": "P2", "mode": "hitl", "blocks": false}
+	runPic(t, bin, root, home, "work-item", "rri-finalize", id, markedRriPayload(t, "Publish gate low priority", []any{openP2}))
+}
+
+func TestRriDeferralReasonPersistence(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Deferral persistence"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	deferredP1 := map[string]any{"id": "Q1", "question": "Export formats", "status": "deferred", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "Owner deferred formats to the contracts stage", "source": "Owner decision 2026-09-01"}}
+	deferredP2 := map[string]any{"id": "Q2", "question": "Nice to have", "status": "deferred", "priority": "P2", "mode": "afk", "blocks": false, "resolution": map[string]string{"answer": "Skip for now", "source": "Owner note"}}
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, markedRriPayload(t, "Deferral persistence", []any{deferredP1, deferredP2})))
+	artifactID := finalized["artifact_id"].(string)
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var decision, questionID, artifactRef, notes string
+	if err = db.QueryRow(`SELECT decision,question_id,rri_artifact_id,notes FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred'`, id).Scan(&decision, &questionID, &artifactRef, &notes); err != nil {
+		t.Fatalf("deferred P1 owner reason must persist durably in work_item_owner_decisions: %v", err)
+	}
+	if questionID != "Q1" || notes != "Owner deferred formats to the contracts stage" || artifactRef != artifactID {
+		t.Fatalf("persisted deferral = decision %q question %q notes %q artifact %q", decision, questionID, notes, artifactRef)
+	}
+	// Only P0/P1 deferrals get the durable deferral record; the P2 deferral stays
+	// report-only so the deferral projection tracks exactly the gated frontier.
+	var count int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred'`, id).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("deferral records=%d err=%v, want exactly the P1 deferral", count, err)
+	}
+	// The deferral is available to planning review projections via the show
+	// document's owner_decisions collection (core.go projects
+	// work_item_owner_decisions there).
+	shown := asObject(t, runPic(t, bin, root, home, "show", id))
+	var projected bool
+	for _, entry := range shown["owner_decisions"].([]any) {
+		row := entry.(map[string]any)
+		if row["decision"] == "deferred" && row["question_id"] == "Q1" && row["notes"] == "Owner deferred formats to the contracts stage" {
+			projected = true
+		}
+	}
+	if !projected {
+		t.Fatalf("show owner_decisions projection must carry the deferral: %#v", shown["owner_decisions"])
+	}
+	// Re-finalizing replaces the deferral rows so a revision cannot strand stale
+	// deferrals: Q1 resolves and a new P0 question defers with its own reason.
+	resolvedQ1 := map[string]any{"id": "Q1", "question": "Export formats", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "CSV first", "source": "Owner"}}
+	deferredP0 := map[string]any{"id": "Q10", "question": "Batch size", "status": "deferred", "priority": "P0", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "Owner deferred batch sizing to the contracts stage", "source": "Owner decision"}}
+	revised := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, markedRriPayload(t, "Deferral persistence revised", []any{resolvedQ1, deferredP0})))
+	if revised["revised"] != true {
+		t.Fatalf("re-finalization must take the revision path: %#v", revised)
+	}
+	var staleRows int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred' AND question_id='Q1'`, id).Scan(&staleRows); err != nil || staleRows != 0 {
+		t.Fatalf("stale deferral rows after revision=%d err=%v", staleRows, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred' AND question_id='Q10'`, id).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("replacement deferral rows=%d err=%v, want exactly the revised P0 deferral", count, err)
+	}
+	// A deferred P0/P1 row without a real reason still rejects publication.
+	item2 := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Deferral missing reason"))
+	id2 := item2["id"].(string)
+	scan2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id2, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id2, "scan", scan2["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id2, "rri", "# Disposable interview checkpoint")
+	blankReason := map[string]any{"id": "Q9", "question": "Auth mode", "status": "deferred", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "   ", "source": "Owner"}}
+	out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id2, markedRriPayload(t, "Deferral missing reason", []any{blankReason}))
+	if !strings.Contains(out, "deferred P0/P1 question Q9 (P1) requires a non-empty owner deferral reason") {
+		t.Fatalf("missing deferral reason must produce a concrete error, got %s", out)
+	}
+	var artifacts, deferralRows int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id2).Scan(&artifacts); err != nil || artifacts != 0 {
+		t.Fatalf("rejected deferral persisted artifacts=%d err=%v", artifacts, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=?`, id2).Scan(&deferralRows); err != nil || deferralRows != 0 {
+		t.Fatalf("rejected deferral persisted owner decisions=%d err=%v", deferralRows, err)
+	}
+}
+
+func TestInitDBWidensOwnerDecisionsForRriDeferrals(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a database from a binary predating the RRI deferral widening:
+	// recreate the table in its legacy shape and clear migration records so the
+	// next open re-runs the rebuild exactly as an upgrade would.
+	legacySQL := strings.Replace(workItemOwnerDecisionsTableSQL, "completion_report_id TEXT REFERENCES", "completion_report_id TEXT NOT NULL REFERENCES", 1)
+	legacySQL = strings.Replace(legacySQL, "decision IN ('accepted','rejected','deferred')", "decision IN ('accepted','rejected')", 1)
+	legacySQL = strings.Replace(legacySQL, ", question_id TEXT NOT NULL DEFAULT '', rri_artifact_id TEXT NOT NULL DEFAULT ''", "", 1)
+	if _, err = db.Exec(`PRAGMA foreign_keys=OFF;
+		PRAGMA legacy_alter_table=ON;
+		ALTER TABLE work_item_owner_decisions RENAME TO work_item_owner_decisions__workflow_migration`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(legacySQL); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO work_items(id,type,title) VALUES('wi-deferral-mig','epic','Deferral migration');
+		INSERT INTO work_item_owner_decisions(id,work_item_id,completion_report_id,decision,notes,decided_by_role) VALUES('wiod-legacy','wi-deferral-mig','','rejected','needs changes','owner');
+		DROP TABLE work_item_owner_decisions__workflow_migration;
+		DELETE FROM schema_migrations`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var decision, questionID, artifactRef, notes string
+	if err = db.QueryRow(`SELECT decision,question_id,rri_artifact_id,notes FROM work_item_owner_decisions WHERE id='wiod-legacy'`).Scan(&decision, &questionID, &artifactRef, &notes); err != nil {
+		t.Fatalf("legacy decision row must survive the widening rebuild: %v", err)
+	}
+	if decision != "rejected" || questionID != "" || artifactRef != "" || notes != "needs changes" {
+		t.Fatalf("rebuilt legacy row = decision %q question %q artifact %q notes %q", decision, questionID, artifactRef, notes)
+	}
+	if _, err = db.Exec(`INSERT INTO work_item_owner_decisions(id,work_item_id,completion_report_id,decision,question_id,rri_artifact_id,notes,decided_by_role) VALUES('wiod-deferred','wi-deferral-mig',NULL,'deferred','Q1','wia-rri','Owner deferred formats','owner')`); err != nil {
+		t.Fatalf("widened table must accept RRI deferral rows: %v", err)
+	}
+}
+
 func TestImplementationAuthorization(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)

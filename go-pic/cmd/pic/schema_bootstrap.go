@@ -17,6 +17,12 @@ import (
 // one deliberate correction: trg_work_item_pack_immutable guards the canonical
 // work_item_instruction_packs table and is now created on fresh databases too.
 
+// workItemOwnerDecisionsTableSQL carries the RRI deferral surface (REQ-F1-3):
+// decision='deferred' rows persist a deferred P0/P1 question with its
+// owner-recorded reason and RRI artifact linkage, so completion_report_id is
+// nullable — deferral rows precede any completion report.
+var workItemOwnerDecisionsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_owner_decisions (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, completion_report_id TEXT REFERENCES work_item_completion_reports(id), decision TEXT NOT NULL CHECK(decision IN ('accepted','rejected','deferred')), question_id TEXT NOT NULL DEFAULT '', rri_artifact_id TEXT NOT NULL DEFAULT '', notes TEXT DEFAULT '', decided_by_role TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`
+
 var canonicalSchemaStatements = []string{
 		workItemsTableSQL,
 		`CREATE TABLE IF NOT EXISTS work_item_labels (work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, label TEXT NOT NULL, PRIMARY KEY(work_item_id,label))`,
@@ -32,7 +38,7 @@ var canonicalSchemaStatements = []string{
 		`CREATE TABLE IF NOT EXISTS work_item_corrective_bugs (verification_report_id TEXT PRIMARY KEY REFERENCES work_item_verification_reports(id) ON DELETE CASCADE, bug_work_item_id TEXT NOT NULL UNIQUE REFERENCES work_items(id) ON DELETE CASCADE, owner_approval_required INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))`,
 		workItemCompletionReportsTableSQL,
 		workItemEscalationsTableSQL,
-		`CREATE TABLE IF NOT EXISTS work_item_owner_decisions (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, completion_report_id TEXT NOT NULL REFERENCES work_item_completion_reports(id), decision TEXT NOT NULL CHECK(decision IN ('accepted','rejected')), notes TEXT DEFAULT '', decided_by_role TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
+		workItemOwnerDecisionsTableSQL,
 		`CREATE TABLE IF NOT EXISTS work_item_delivery_states (work_item_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE, integration_mode TEXT NOT NULL CHECK(integration_mode IN ('branch','coordination')), branch_name TEXT DEFAULT '', base_branch TEXT DEFAULT 'develop', base_commit TEXT DEFAULT '', verified_head TEXT DEFAULT '', verification_report_id TEXT DEFAULT '', merge_status TEXT NOT NULL DEFAULT '' CHECK(merge_status IN ('','merge_pending','merged','blocked')), merged_commit TEXT DEFAULT '', merge_error TEXT DEFAULT '', updated_at TEXT DEFAULT (datetime('now')))`,
 		`CREATE TABLE IF NOT EXISTS work_item_aggregate_owner_decisions (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, verification_report_id TEXT NOT NULL REFERENCES work_item_verification_reports(id), decision TEXT NOT NULL CHECK(decision IN ('accepted','rejected')), notes TEXT DEFAULT '', decided_by_role TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
 		`CREATE TABLE IF NOT EXISTS work_item_events (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, event_type TEXT NOT NULL, actor_role TEXT DEFAULT '', actor_model TEXT DEFAULT '', summary TEXT DEFAULT '', payload_json TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
@@ -478,6 +484,20 @@ func applyPipelineColumnMigrations(db schemaDB) error {
 	}
 	if completionRunTarget == "pipeline_runs__workflow_migration" {
 		if err := rebuildSchemaTable(db, "work_item_completion_reports", workItemCompletionReportsTableSQL); err != nil {
+			return err
+		}
+	}
+	var ownerDecisionSQL string
+	ownerDecisionErr := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='work_item_owner_decisions'`).Scan(&ownerDecisionSQL)
+	if ownerDecisionErr != nil && ownerDecisionErr != sql.ErrNoRows {
+		return ownerDecisionErr
+	}
+	if ownerDecisionErr == nil && !strings.Contains(ownerDecisionSQL, "question_id") {
+		// The legacy shape (decision IN ('accepted','rejected'),
+		// completion_report_id NOT NULL) cannot hold RRI deferral rows, so
+		// rebuild; the canonical statement batch re-runs after this step and
+		// recreates the item index on the rebuilt table.
+		if err := rebuildSchemaTable(db, "work_item_owner_decisions", workItemOwnerDecisionsTableSQL); err != nil {
 			return err
 		}
 	}

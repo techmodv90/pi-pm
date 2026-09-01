@@ -1053,6 +1053,49 @@ func validateRriReportConsistency(payload rriFinalization) error {
 	return nil
 }
 
+// RRI publish gate (REQ-F1-3): for marked frontier reports (rri_policy_version 2)
+// an open P0/P1 question rejects publication and a deferred P0/P1 question
+// requires a non-empty owner deferral reason. Status and priority are checked
+// together, so open P2/P3 rows and legacy pre-marker reports never block.
+func validateRriPublishGate(report rriReport) error {
+	if report.PolicyVersion < 2 {
+		return nil
+	}
+	for _, row := range report.OpenQuestions {
+		if row.Priority != "P0" && row.Priority != "P1" {
+			continue
+		}
+		if row.Status == "open" {
+			return fmt.Errorf("RRI publication blocked: open P0/P1 question %s (%s) remains unresolved: %s", row.ID, row.Priority, row.Question)
+		}
+		if row.Status == "deferred" && (row.Resolution == nil || strings.TrimSpace(row.Resolution.Answer) == "") {
+			return fmt.Errorf("RRI publication blocked: deferred P0/P1 question %s (%s) requires a non-empty owner deferral reason", row.ID, row.Priority)
+		}
+	}
+	return nil
+}
+
+// insertRriDeferralDecisions persists each reasoned deferred P0/P1 question as
+// a durable owner decision row in work_item_owner_decisions (the
+// contract-required deferral home for REQ-F1-3): decision='deferred' with the
+// question/artifact linkage and the owner-recorded reason in notes, so Blueprint
+// review projections reading the show document's owner_decisions collection can
+// surface the deferral. The publish gate guarantees the reason is non-empty.
+func insertRriDeferralDecisions(tx *sql.Tx, workItemID, artifactID string, report rriReport) error {
+	if report.PolicyVersion < 2 {
+		return nil
+	}
+	for _, row := range report.OpenQuestions {
+		if (row.Priority != "P0" && row.Priority != "P1") || row.Status != "deferred" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO work_item_owner_decisions(id,work_item_id,completion_report_id,decision,question_id,rri_artifact_id,notes,decided_by_role) VALUES(?,?,NULL,'deferred',?,?,?,'owner')`, "wiod-"+shortID(), workItemID, row.ID, artifactID, row.Resolution.Answer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func workItemRriFinalize(db *sql.DB, args []string) error {
 	if len(args) != 2 {
 		return errors.New("usage: pic work-item rri-finalize <id> <payload-json>")
@@ -1065,6 +1108,9 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		return err
 	}
 	if err := validateRriReportConsistency(payload); err != nil {
+		return err
+	}
+	if err := validateRriPublishGate(payload.Report); err != nil {
 		return err
 	}
 	seenRequirements, seenDecisions := map[string]bool{}, map[string]bool{}
@@ -1138,6 +1184,12 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		if _, err = tx.Exec(`DELETE FROM owner_decisions WHERE `+subjectColumn+`=? AND related_type='rri'`, args[0]); err != nil {
 			return err
 		}
+		// Deferral rows live in work_item_owner_decisions with decision='deferred',
+		// a value only this RRI path writes (owner acceptance validates
+		// accepted|rejected), so this delete cannot touch review decisions.
+		if _, err = tx.Exec(`DELETE FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred'`, args[0]); err != nil {
+			return err
+		}
 		inherit := 0
 		if subjectColumn == "epic_id" {
 			inherit = 1
@@ -1153,6 +1205,9 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 			if _, err = tx.Exec(query, "od-"+shortID(), args[0], artifactID, decision.Key, decision.Answer); err != nil {
 				return err
 			}
+		}
+		if err = insertRriDeferralDecisions(tx, args[0], artifactID, payload.Report); err != nil {
+			return err
 		}
 		if err = tx.Commit(); err != nil {
 			return err
@@ -1186,6 +1241,9 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		if _, err = tx.Exec(query, "od-"+shortID(), args[0], artifactID, decision.Key, decision.Answer); err != nil {
 			return err
 		}
+	}
+	if err = insertRriDeferralDecisions(tx, args[0], artifactID, payload.Report); err != nil {
+		return err
 	}
 	if err = addEvent(tx, args[0], "rri_finalized", "contractor", "Owner-confirmed RRI requirements and decisions persisted", map[string]any{"artifact_id": artifactID, "requirements": len(payload.Requirements), "decisions": len(payload.Decisions)}); err != nil {
 		return err

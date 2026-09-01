@@ -224,6 +224,7 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
       if (primerContext.missing.length) {
         throw new Error(`Work Item ${taskId} planning stage ${stage} is missing approved context for: ${primerContext.missing.join(", ")}. Re-save and re-approve the listed stages before dispatching this one.`);
       }
+      gateOpenP0P1RriQuestions(doc, profile.stages, stage, taskId);
       const primer = buildStagePrimer({
         work_item_id: taskId,
         stage,
@@ -278,9 +279,9 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
 // documents, so only the two collections that feed validity are required.
 type CheckpointSource = { checkpoints?: PicCheckpoint[]; artifacts?: PicArtifact[] };
 
-function latestValidatedCheckpoint(doc: CheckpointSource, stage: string): { checkpoint: PicCheckpoint; artifact: PicArtifact } | undefined {
+function latestValidatedCheckpoint(doc: CheckpointSource, stage: string, decisionTypes: string[] = ["approved", "accepted"]): { checkpoint: PicCheckpoint; artifact: PicArtifact } | undefined {
   const checkpoint = (doc.checkpoints || [])
-    .filter((entry) => entry.stage === stage && (entry.decision_type === "approved" || entry.decision_type === "accepted"))
+    .filter((entry) => entry.stage === stage && decisionTypes.includes(String(entry.decision_type || "")))
     .sort((a, b) => Number(b.artifact_revision || 0) - Number(a.artifact_revision || 0)
       || String(b.created_at || "").localeCompare(String(a.created_at || "")))[0];
   if (!checkpoint) return undefined;
@@ -288,6 +289,54 @@ function latestValidatedCheckpoint(doc: CheckpointSource, stage: string): { chec
   if (!artifact) return undefined;
   if (String(checkpoint.content_hash || "") !== String(artifact.content_hash || "")) return undefined;
   return { checkpoint, artifact };
+}
+
+// RRI publish gate (OB-F1-3) evaluated at dispatch over the approved checkpoint
+// lineage: a marked frontier report (rri_policy_version >= 2) still carrying an
+// open P0/P1 question blocks Vision/Blueprint dispatch, while approved deferred
+// rows (with their owner-recorded reasons) travel inside the primer content.
+// Status and priority are checked together, so open P2/P3 rows never block, and
+// legacy pre-marker reports (or non-JSON content) stay ungated.
+export function openP0P1RriQuestions(artifact: Pick<PicArtifact, "content">): Array<{ id: string; priority: string; question: string }> {
+  let report: { rri_policy_version?: unknown; open_questions?: unknown };
+  try {
+    report = JSON.parse(String(artifact.content || ""));
+  } catch {
+    return [];
+  }
+  if (Number(report.rri_policy_version || 0) < 2 || !Array.isArray(report.open_questions)) return [];
+  return (report.open_questions as Array<Record<string, unknown>>)
+    .filter((row) => row.status === "open" && (row.priority === "P0" || row.priority === "P1"))
+    .map((row) => ({ id: String(row.id ?? ""), priority: String(row.priority), question: String(row.question ?? "") }));
+}
+
+// Approved-lineage publish gate (OB-F1-3): any stage dispatched after the RRI
+// stays blocked while its approved frontier report still carries an open P0/P1
+// question, so later planning context cannot be built on an unresolved frontier.
+// The report is read only from the validated approved checkpoint lineage.
+// Fail-closed constraint: the gate never fail-opens on a malformed or incomplete
+// persisted Plan profile. Post-RRI dispatch is rejected when the profile omits
+// the RRI stage, orders it after the dispatched stage (or omits the dispatched
+// stage), or when no validated approved RRI checkpoint exists (absent,
+// orphaned, hash-stale, or rejected). Only the RRI stage itself is ungated.
+// Lineage constraint: the gate's predecessor lookup accepts only approved RRI
+// checkpoints — an accepted-only RRI checkpoint is not an approved predecessor
+// and must not unblock post-RRI dispatch.
+export function gateOpenP0P1RriQuestions(doc: PicShowDocument, profileStages: string[], stage: string, taskId: string): void {
+  if (stage === "scan" || stage === "rri") return;
+  const rriIndex = profileStages.indexOf("rri");
+  const stageIndex = profileStages.indexOf(stage);
+  if (rriIndex === -1 || stageIndex === -1 || rriIndex >= stageIndex) {
+    throw new Error(`Work Item ${taskId} planning stage ${stage} requires the RRI as a predecessor stage in the persisted Plan profile, but the profile does not order an RRI stage before it. Fix the profile stage order and approve the RRI before dispatching this stage.`);
+  }
+  const approvedRri = latestValidatedCheckpoint(doc, "rri", ["approved"]);
+  if (!approvedRri) {
+    throw new Error(`Work Item ${taskId} planning stage ${stage} requires a validated approved RRI checkpoint as its predecessor, but none exists (missing, orphaned, hash-stale, or rejected). Approve the RRI before dispatching this stage.`);
+  }
+  const openQuestions = openP0P1RriQuestions(approvedRri.artifact);
+  if (openQuestions.length) {
+    throw new Error(`Work Item ${taskId} planning stage ${stage} is blocked by open P0/P1 RRI questions: ${openQuestions.map((row) => `${row.id} (${row.priority}) ${row.question}`).join("; ")}. Resolve or defer them with owner-recorded reasons and republish the RRI before dispatching this stage.`);
+  }
 }
 
 export function planPrimerContext(doc: PicShowDocument, profileStages: string[], stage: string): { digests: StagePrimerDigest[]; missing: string[] } {

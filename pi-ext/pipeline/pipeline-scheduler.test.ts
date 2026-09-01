@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { planPrimerContext, planScanRetryWave, PLANNING_DEADLINE_MS } from "./stage-prompts.ts";
+import { gateOpenP0P1RriQuestions, openP0P1RriQuestions, planPrimerContext, planScanRetryWave, PLANNING_DEADLINE_MS } from "./stage-prompts.ts";
 import { MANAGED_WORKER_DEADLINE_MS } from "../subagent/runner.ts";
 import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
@@ -1756,4 +1756,119 @@ test("primer context blocks dispatch when a predecessor checkpoint or artifact i
   const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
   assert.match(prompts, /missing\.length[\s\S]{0,200}throw new Error/);
   assert.match(prompts, /planning stage \$\{stage\} is missing approved/);
+});
+
+// Marked frontier report fixture for the dispatch-side publish gate (OB-F1-3):
+// rri_policy_version 2 with one row set per blocked/allowed disposition.
+const rriFrontierArtifact = (content: string) => ({ id: "wia-rri", stage: "rri", revision: 2, content_hash: "h-rri", content });
+const markedRriContent = (questions: Array<Record<string, unknown>>) =>
+  JSON.stringify({ project_name: "Project", generated: "2026-09-01", rri_policy_version: 2, open_questions: questions });
+
+test("RRI publish gate blocks dispatch while a marked P0/P1 question is open", () => {
+  // Open P0 and open P1 block; open P2 and P3 do not.
+  assert.deepEqual(
+    openP0P1RriQuestions(rriFrontierArtifact(markedRriContent([
+      { id: "Q1", question: "Ship order", status: "open", priority: "P0", mode: "hitl", blocks: true },
+      { id: "Q2", question: "Auth mode", status: "open", priority: "P1", mode: "hitl", blocks: true },
+      { id: "Q3", question: "Nice to have", status: "open", priority: "P2", mode: "hitl", blocks: false },
+    ]))),
+    [
+      { id: "Q1", priority: "P0", question: "Ship order" },
+      { id: "Q2", priority: "P1", question: "Auth mode" },
+    ],
+  );
+  // Resolved and reasoned-deferred P0/P1 rows pass the dispatch gate.
+  assert.deepEqual(
+    openP0P1RriQuestions(rriFrontierArtifact(markedRriContent([
+      { id: "Q4", question: "Ship order", status: "resolved", priority: "P0", mode: "hitl", blocks: true, resolution: { answer: "CLI first", source: "Owner" } },
+      { id: "Q5", question: "Export formats", status: "deferred", priority: "P1", mode: "hitl", blocks: true, resolution: { answer: "Owner deferred to contracts", source: "Owner decision" } },
+    ]))),
+    [],
+  );
+  // Legacy lifecycle behavior: pre-marker reports and non-JSON content stay ungated.
+  assert.deepEqual(openP0P1RriQuestions(rriFrontierArtifact(JSON.stringify({ project_name: "Project", generated: "2026-09-01", open_questions: [{ id: "Q1", question: "Legacy" }] }))), []);
+  assert.deepEqual(openP0P1RriQuestions(rriFrontierArtifact("not json at all")), []);
+});
+
+test("planning dispatch gate consults the approved RRI lineage and carries deferrals", () => {
+  const stages = ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"];
+  const workItem = { id: "wi-1", type: "epic", title: "Aggregate" };
+  const approvedRriContent = markedRriContent([
+    { id: "Q5", question: "Export formats", status: "deferred", priority: "P1", mode: "hitl", blocks: true, resolution: { answer: "Owner deferred formats to contracts", source: "Owner decision" } },
+  ]);
+  // Blueprint planning context rides the approved checkpoint lineage, so the
+  // approved deferral (with its owner reason) is projected into the digests.
+  const blueprint = planPrimerContext(
+    {
+      work_item: workItem,
+      checkpoints: [
+        { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+        { stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: "h-rri", decision_type: "approved" },
+        { stage: "vision", artifact_id: "wia-vision", artifact_revision: 1, content_hash: "h-vision", decision_type: "approved" },
+      ],
+      artifacts: [
+        { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
+        rriFrontierArtifact(approvedRriContent),
+        { id: "wia-vision", stage: "vision", revision: 1, content_hash: "h-vision", content: "<vision/>" },
+      ],
+    },
+    stages,
+    "blueprint",
+  );
+  assert.deepEqual(blueprint.missing, []);
+  const rriDigest = blueprint.digests.find((digest) => digest.stage === "rri");
+  assert.match(String(rriDigest?.content), /Owner deferred formats to contracts/);
+
+  // The dispatch gate itself evaluates the approved lineage: the stage prompt
+  // throws naming the open question only from a validated approved checkpoint.
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  assert.match(prompts, /latestValidatedCheckpoint\(doc, "rri", \["approved"\]\)/);
+  assert.match(prompts, /openP0P1RriQuestions\(approvedRri\.artifact\)/);
+  assert.match(prompts, /is blocked by open P0\/P1 RRI questions/);
+  assert.match(prompts, /gateOpenP0P1RriQuestions\(doc, profile\.stages, stage, taskId\)/);
+});
+
+// Behavioral coverage for the fail-closed dispatch gate (OB-F1-3): a malformed
+// or incomplete persisted Plan profile, or a missing/stale approved RRI
+// checkpoint, rejects post-RRI dispatch instead of silently permitting it.
+test("RRI dispatch gate fails closed on malformed profiles and missing approved lineage", () => {
+  const stages = ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"];
+  const workItem = { id: "wi-1", type: "epic", title: "Aggregate" };
+  const openRriContent = markedRriContent([
+    { id: "Q1", question: "Ship order", status: "open", priority: "P0", mode: "hitl", blocks: true },
+  ]);
+  const settledRriContent = markedRriContent([
+    { id: "Q1", question: "Ship order", status: "resolved", priority: "P0", mode: "hitl", blocks: true, resolution: { answer: "CLI first", source: "Owner" } },
+    { id: "Q2", question: "Export formats", status: "deferred", priority: "P1", mode: "hitl", blocks: true, resolution: { answer: "Owner deferred formats to contracts", source: "Owner decision" } },
+  ]);
+  const doc = (rriContent: string | null, rriHash = "h-rri", rriDecision = "approved") => ({
+    work_item: workItem,
+    checkpoints: [
+      { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+      ...(rriContent !== null ? [{ stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: rriHash, decision_type: rriDecision }] : []),
+    ],
+    artifacts: [
+      { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
+      ...(rriContent !== null ? [rriFrontierArtifact(rriContent)] : []),
+    ],
+  });
+
+  // A profile that omits the RRI stage blocks post-RRI dispatch.
+  assert.throws(() => gateOpenP0P1RriQuestions(doc(settledRriContent), ["scan", "vision", "blueprint"], "vision", "wi-1"), /RRI as a predecessor stage in the persisted Plan profile/);
+  // A profile that orders the RRI after the dispatched stage blocks dispatch.
+  assert.throws(() => gateOpenP0P1RriQuestions(doc(settledRriContent), ["scan", "vision", "rri", "blueprint"], "vision", "wi-1"), /RRI as a predecessor stage in the persisted Plan profile/);
+  // A dispatched stage missing from the profile blocks dispatch.
+  assert.throws(() => gateOpenP0P1RriQuestions(doc(settledRriContent), ["scan", "rri", "vision"], "blueprint", "wi-1"), /RRI as a predecessor stage in the persisted Plan profile/);
+  // A missing approved RRI checkpoint blocks post-RRI dispatch.
+  assert.throws(() => gateOpenP0P1RriQuestions(doc(null), stages, "vision", "wi-1"), /validated approved RRI checkpoint/);
+  // A hash-stale RRI checkpoint blocks post-RRI dispatch.
+  assert.throws(() => gateOpenP0P1RriQuestions(doc(settledRriContent, "stale-hash"), stages, "vision", "wi-1"), /validated approved RRI checkpoint/);
+  // An accepted-only RRI checkpoint is not an approved predecessor and blocks dispatch.
+  assert.throws(() => gateOpenP0P1RriQuestions(doc(settledRriContent, "h-rri", "accepted"), stages, "vision", "wi-1"), /validated approved RRI checkpoint/);
+  // An open P0 blocks dispatch even over a valid approved lineage.
+  assert.throws(() => gateOpenP0P1RriQuestions(doc(openRriContent), stages, "vision", "wi-1"), /open P0\/P1 RRI questions[\s\S]*Q1/);
+  // Resolved and reasoned-deferred P0/P1 rows pass on a well-formed profile.
+  assert.doesNotThrow(() => gateOpenP0P1RriQuestions(doc(settledRriContent), stages, "blueprint", "wi-1"));
+  // Scan and the RRI stage itself remain ungated.
+  assert.doesNotThrow(() => gateOpenP0P1RriQuestions(doc(null), ["scan", "rri"], "rri", "wi-1"));
 });
