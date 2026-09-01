@@ -872,6 +872,7 @@ type rriFinalization struct {
 type rriReport struct {
 	ProjectName        string              `json:"project_name"`
 	Generated          string              `json:"generated"`
+	PolicyVersion      int                 `json:"rri_policy_version,omitempty"`
 	RequirementsMatrix []rriRequirementRow `json:"requirements_matrix"`
 	AutoAnswered       []rriAutoAnswerRow  `json:"auto_answered"`
 	DecisionsLog       []rriDecisionRow    `json:"decisions_log"`
@@ -896,11 +897,31 @@ type rriDecisionRow struct {
 	Rationale         string `json:"rationale"`
 }
 type rriOpenQuestion struct {
-	ID       string `json:"id"`
-	Question string `json:"question"`
+	ID         string         `json:"id"`
+	Question   string         `json:"question"`
+	Status     string         `json:"status,omitempty"`
+	Priority   string         `json:"priority,omitempty"`
+	Mode       string         `json:"mode,omitempty"`
+	Blocks     *bool          `json:"blocks,omitempty"`
+	Resolution *rriResolution `json:"resolution,omitempty"`
+}
+type rriResolution struct {
+	Answer string `json:"answer"`
+	Source string `json:"source"`
 }
 
+// Marker-gated frontier schema for open_questions: reports carrying rri_policy_version 2
+// require the frontier fields, while pre-marker reports stay valid under the legacy shape.
+var (
+	rriOpenQuestionStatuses   = []string{"open", "resolved", "deferred"}
+	rriOpenQuestionPriorities = []string{"P0", "P1", "P2", "P3"}
+	rriOpenQuestionModes      = []string{"afk", "hitl"}
+)
+
 func validateRriReport(report rriReport) error {
+	if report.PolicyVersion > 2 {
+		return fmt.Errorf("unsupported rri_policy_version %d", report.PolicyVersion)
+	}
 	if strings.TrimSpace(report.ProjectName) == "" || strings.TrimSpace(report.Generated) == "" {
 		return errors.New("RRI report requires project_name and generated")
 	}
@@ -922,6 +943,33 @@ func validateRriReport(report rriReport) error {
 	for _, row := range report.OpenQuestions {
 		if row.ID == "" || row.Question == "" {
 			return errors.New("RRI open_questions rows require id and question")
+		}
+		if report.PolicyVersion < 2 {
+			continue
+		}
+		if row.Status == "" {
+			return fmt.Errorf("RRI open_questions row %s requires status", row.ID)
+		}
+		if !contains(rriOpenQuestionStatuses, row.Status) {
+			return fmt.Errorf("RRI open_questions row %s has invalid status %s", row.ID, row.Status)
+		}
+		if row.Priority == "" {
+			return fmt.Errorf("RRI open_questions row %s requires priority", row.ID)
+		}
+		if !contains(rriOpenQuestionPriorities, row.Priority) {
+			return fmt.Errorf("RRI open_questions row %s has invalid priority %s", row.ID, row.Priority)
+		}
+		if row.Mode == "" {
+			return fmt.Errorf("RRI open_questions row %s requires mode", row.ID)
+		}
+		if !contains(rriOpenQuestionModes, row.Mode) {
+			return fmt.Errorf("RRI open_questions row %s has invalid mode %s", row.ID, row.Mode)
+		}
+		if row.Blocks == nil {
+			return fmt.Errorf("RRI open_questions row %s requires blocks", row.ID)
+		}
+		if row.Status != "open" && (row.Resolution == nil || row.Resolution.Answer == "" || row.Resolution.Source == "") {
+			return fmt.Errorf("RRI open_questions row %s requires resolution with answer and source when status is resolved or deferred", row.ID)
 		}
 	}
 	return nil
@@ -954,8 +1002,14 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		return errors.New("usage: pic work-item rri-finalize <id> <payload-json>")
 	}
 	var payload rriFinalization
-	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 || validateRriReport(payload.Report) != nil || validateRriReportConsistency(payload) != nil {
+	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 {
 		return errors.New("RRI finalization requires valid JSON with requirements, decisions, and report")
+	}
+	if err := validateRriReport(payload.Report); err != nil {
+		return err
+	}
+	if err := validateRriReportConsistency(payload); err != nil {
+		return err
 	}
 	seenRequirements, seenDecisions := map[string]bool{}, map[string]bool{}
 	for _, requirement := range payload.Requirements {

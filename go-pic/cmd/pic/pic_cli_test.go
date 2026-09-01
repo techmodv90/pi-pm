@@ -972,6 +972,201 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	}
 }
 
+func TestRriReportValidationMarkerGate(t *testing.T) {
+	legacy := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01",
+		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Legacy shape row"}},
+	}
+	if err := validateRriReport(legacy); err != nil {
+		t.Fatalf("legacy open_questions row must stay valid: %v", err)
+	}
+	marked := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01", PolicyVersion: 2,
+		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Resolved frontier row", Status: "resolved", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true), Resolution: &rriResolution{Answer: "Ship CLI first", Source: "Owner confirm"}}},
+	}
+	if err := validateRriReport(marked); err != nil {
+		t.Fatalf("resolved frontier row with resolution must be accepted: %v", err)
+	}
+	openRow := marked
+	openRow.OpenQuestions = []rriOpenQuestion{{ID: "Q2", Question: "Open frontier row", Status: "open", Priority: "P0", Mode: "afk", Blocks: boolPtr(false)}}
+	if err := validateRriReport(openRow); err != nil {
+		t.Fatalf("open frontier row without resolution must be accepted: %v", err)
+	}
+	cases := []struct {
+		name string
+		row  rriOpenQuestion
+		want string
+	}{{
+		name: "missing status",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No status", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "requires status",
+	}, {
+		name: "invalid status",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Bad status", Status: "parked", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "invalid status",
+	}, {
+		name: "missing priority",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No priority", Status: "open", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "requires priority",
+	}, {
+		name: "invalid priority",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Bad priority", Status: "open", Priority: "P9", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "invalid priority",
+	}, {
+		name: "missing mode",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No mode", Status: "open", Priority: "P1", Blocks: boolPtr(true)},
+		want: "requires mode",
+	}, {
+		name: "invalid mode",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Bad mode", Status: "open", Priority: "P1", Mode: "async", Blocks: boolPtr(true)},
+		want: "invalid mode",
+	}, {
+		name: "missing blocks",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No blocks", Status: "open", Priority: "P1", Mode: "hitl"},
+		want: "requires blocks",
+	}, {
+		name: "resolved without resolution",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No resolution", Status: "resolved", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "requires resolution",
+	}, {
+		name: "deferred without source",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Partial resolution", Status: "deferred", Priority: "P2", Mode: "afk", Blocks: boolPtr(true), Resolution: &rriResolution{Answer: "Later"}},
+		want: "requires resolution",
+	}}
+	for _, tc := range cases {
+		report := marked
+		report.OpenQuestions = []rriOpenQuestion{tc.row}
+		err := validateRriReport(report)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: expected error containing %q, got %v", tc.name, tc.want, err)
+		}
+	}
+	unsupported := marked
+	unsupported.PolicyVersion = 3
+	if err := validateRriReport(unsupported); err == nil || !strings.Contains(err.Error(), "unsupported rri_policy_version") {
+		t.Fatalf("expected unsupported rri_policy_version rejection, got %v", err)
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
+
+func TestWorkItemRriFinalizeMarkedFrontierReportPersists(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Marked RRI finalization"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	payload, _ := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-FRONTIER", "priority": "tier1", "title": "Frontier persistence", "description": "Persist frontier rows", "acceptanceCriteria": "Given a marked RRI payload\nWhen rri-finalize runs\nThen the frontier rows persist"}},
+		"decisions":    []map[string]any{{"key": "frontier_mode", "answer": "Adopt the frontier schema"}},
+		"report": map[string]any{
+			"project_name": "Marked RRI finalization", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-FRONTIER", "requirement": "Frontier persistence", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Frontier mode", "options_considered": "Legacy vs frontier", "chosen": "Frontier", "rationale": "Single contract"}},
+			"open_questions": []map[string]any{{"id": "Q1", "question": "Ship order", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "CLI first", "source": "Owner confirm"}}},
+		},
+	})
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload)))
+	if finalized["artifact_id"] == "" {
+		t.Fatalf("finalized = %#v", finalized)
+	}
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var content string
+	if err = db.QueryRow(`SELECT content FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	var persisted map[string]any
+	if err = json.Unmarshal([]byte(content), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted["rri_policy_version"] != float64(2) {
+		t.Fatalf("persisted rri_policy_version = %#v", persisted["rri_policy_version"])
+	}
+	questions := persisted["open_questions"].([]any)
+	row := questions[0].(map[string]any)
+	if row["status"] != "resolved" || row["priority"] != "P1" || row["mode"] != "hitl" || row["blocks"] != true {
+		t.Fatalf("persisted frontier row = %#v", row)
+	}
+	resolution := row["resolution"].(map[string]any)
+	if resolution["answer"] != "CLI first" || resolution["source"] != "Owner confirm" {
+		t.Fatalf("persisted resolution = %#v", resolution)
+	}
+}
+
+func TestWorkItemRriFinalizeRejectsMalformedMarkedRows(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Rejected RRI finalization"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	base := map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-FRONTIER", "priority": "tier1", "title": "Frontier persistence", "description": "Persist frontier rows", "acceptanceCriteria": "Given a marked RRI payload\nWhen rri-finalize runs\nThen the frontier rows persist"}},
+		"decisions":    []map[string]any{{"key": "frontier_mode", "answer": "Adopt the frontier schema"}},
+		"report": map[string]any{
+			"project_name": "Rejected RRI finalization", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-FRONTIER", "requirement": "Frontier persistence", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Frontier mode", "options_considered": "Legacy vs frontier", "chosen": "Frontier", "rationale": "Single contract"}},
+			"open_questions":      []map[string]any{},
+		},
+	}
+	cases := []struct {
+		name string
+		row  map[string]any
+		want string
+	}{{
+		name: "missing status",
+		row:  map[string]any{"id": "Q1", "question": "No status", "priority": "P1", "mode": "hitl", "blocks": true},
+		want: "requires status",
+	}, {
+		name: "invalid enum",
+		row:  map[string]any{"id": "Q1", "question": "Bad status", "status": "parked", "priority": "P1", "mode": "hitl", "blocks": true},
+		want: "invalid status",
+	}, {
+		name: "resolved without resolution",
+		row:  map[string]any{"id": "Q1", "question": "No resolution", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true},
+		want: "requires resolution",
+	}}
+	for _, tc := range cases {
+		report := cloneJSONMap(t, base["report"])
+		report["open_questions"] = []any{tc.row}
+		payload, _ := json.Marshal(map[string]any{"requirements": base["requirements"], "decisions": base["decisions"], "report": report})
+		out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload))
+		if !strings.Contains(out, tc.want) {
+			t.Fatalf("%s: expected error containing %q, got %s", tc.name, tc.want, out)
+		}
+	}
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var artifacts int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND revision=2`, id).Scan(&artifacts); err != nil || artifacts != 0 {
+		t.Fatalf("rejected finalization persisted artifacts=%d err=%v", artifacts, err)
+	}
+}
+
+func cloneJSONMap(t *testing.T, value any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err = json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
 func TestImplementationAuthorization(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
