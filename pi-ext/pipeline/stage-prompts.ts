@@ -21,6 +21,12 @@ export const planningStages: PipelineStage[] = ["rri", "vision", "blueprint", "c
 
 export function isPlanningStage(stage: PipelineStage): boolean { return planningStages.includes(stage); }
 
+// Planning-stage deadline: planners load up to five approved artifacts and author
+// large validated JSON artifacts in one session; the 30-minute managed-worker
+// default killed task_graph planners mid-work (three consecutive 30m04s terminations
+// on wi-155af9fc/wi-e486a1dd), so planning stages get a doubled deadline.
+export const PLANNING_DEADLINE_MS = 60 * 60 * 1000;
+
 
 export function reviewStagePrompt(taskId: string, cwd: string): string {
   const handoff = buildWorkItemReviewerHandoff(taskId);
@@ -39,6 +45,7 @@ export function workerSessionPath(cwd: string, packKey: string): string {
 export function pipelineSpawnParams(stage: PipelineStage, task: any, cwd: string): any {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const spec: any = { agent: task.agent, task: task.task, cwd, stage, taskId: task.taskId, acceptance: stage === "review" ? "attested" : "checked", ...(task.skillFamilies ? { skillFamilies: task.skillFamilies } : {}) };
+  if (isPlanningStage(stage)) spec.deadlineMs = PLANNING_DEADLINE_MS;
   if (isMutationStage(stage) || stage === "review") spec.isolation = "worktree";
   return spec;
 }

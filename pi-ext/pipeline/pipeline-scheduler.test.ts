@@ -5,7 +5,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { planPrimerContext, planScanRetryWave } from "./stage-prompts.ts";
+import { planPrimerContext, planScanRetryWave, PLANNING_DEADLINE_MS } from "./stage-prompts.ts";
+import { MANAGED_WORKER_DEADLINE_MS } from "../subagent/runner.ts";
 import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
@@ -743,6 +744,15 @@ test("pipelineSpawnParams maps one persisted claim to one owned subagent", () =>
     { isolation: pipelineSpawnParams("autofix", task, "/repo/project").isolation, acceptance: pipelineSpawnParams("autofix", task, "/repo/project").acceptance },
     { isolation: "worktree", acceptance: "checked" },
   );
+});
+
+test("planning spawn params carry the doubled planning deadline", () => {
+  const task = { agent: "task-planner", task: "plan", taskId: "t-2" };
+  const spec = pipelineSpawnParams("task_graph", task, "/repo/project");
+  assert.equal(spec.deadlineMs, PLANNING_DEADLINE_MS);
+  assert.ok(spec.deadlineMs > MANAGED_WORKER_DEADLINE_MS);
+  // Non-planning stages keep the runner default (no explicit deadlineMs).
+  assert.equal("deadlineMs" in pipelineSpawnParams("worker", task, "/repo/project"), false);
 });
 
 test("formatPipelineStatus keeps task pipeline output compact", () => {
