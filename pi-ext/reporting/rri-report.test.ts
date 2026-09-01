@@ -26,6 +26,8 @@ const markedReport = (openQuestions: unknown[]) => ({
   requirements_matrix: [{ req_id: "REQ-F1-1", requirement: "Frontier schema", source: "RRI Q#2", priority: "P1", persona: "Business Analyst" }],
   auto_answered: [{ topic: "Storage", details: "SQLite already persisted", resolution: "Keep SQLite" }],
   decisions_log: [{ decision: "Schema gating", options_considered: "Global vs marker-gated", chosen: "Marker-gated", rationale: "Legacy tolerance" }],
+  not_yet_specified: [{ uncertainty: "Export formats", graduation_path: "Resolve with the owner before contracts" }],
+  out_of_scope: [{ exclusion: "Cloud sync", reason: "Outside the epic scope" }],
   open_questions: openQuestions,
 });
 
@@ -154,6 +156,47 @@ test("open_questions resolution values must be strings like Go unmarshalling", (
     () => parseRriReportJson(JSON.stringify(markedReport([{ ...resolvedFrontierRow, resolution: { answer: "CLI first", source: true } }]))),
     /row Q-1 requires resolution answer and source to be non-empty strings/,
   );
+});
+
+test("marked RRI report renders both scope sections and never a Destination", () => {
+  const markdown = renderRriReportMarkdown(parseRriReportJson(JSON.stringify(markedReport([]))));
+  assert.match(markdown, /## NOT YET SPECIFIED\n- \*\*Export formats:\*\* graduation path -> Resolve with the owner before contracts/);
+  assert.match(markdown, /## OUT OF SCOPE\n- \*\*Cloud sync:\*\* Outside the epic scope/);
+  assert.doesNotMatch(markdown, /destination/i);
+  // A destination key in the payload is ignored: no Destination field exists in
+  // the schema because Work Item goals remain the destination authority.
+  const withDestination = renderRriReportMarkdown(parseRriReportJson(JSON.stringify({ ...markedReport([]), destination: "Work Item goals" })));
+  assert.doesNotMatch(withDestination, /destination/i);
+});
+
+test("marked RRI report rejects a missing or malformed scope section", () => {
+  const withoutUncertainty: Record<string, unknown> = markedReport([]);
+  delete withoutUncertainty.not_yet_specified;
+  assert.throws(
+    () => parseRriReportJson(JSON.stringify(withoutUncertainty)),
+    /requires the not_yet_specified section/,
+  );
+  const withoutOutOfScope: Record<string, unknown> = markedReport([]);
+  delete withoutOutOfScope.out_of_scope;
+  assert.throws(
+    () => parseRriReportJson(JSON.stringify(withoutOutOfScope)),
+    /requires the out_of_scope section/,
+  );
+  assert.throws(
+    () => parseRriReportJson(JSON.stringify({ ...markedReport([]), not_yet_specified: [{ uncertainty: "Export formats" }] })),
+    /not_yet_specified rows require uncertainty and graduation_path/,
+  );
+  assert.throws(
+    () => parseRriReportJson(JSON.stringify({ ...markedReport([]), out_of_scope: [{ exclusion: "Cloud sync" }] })),
+    /out_of_scope rows require exclusion and reason/,
+  );
+});
+
+test("legacy RRI report stays valid without scope sections", () => {
+  const report = parseRriReportJson(JSON.stringify(legacyReport));
+  const markdown = renderRriReportMarkdown(report);
+  assert.match(markdown, /## NOT YET SPECIFIED\n- None/);
+  assert.match(markdown, /## OUT OF SCOPE\n- None/);
 });
 
 test("marked RRI report rejects unsupported policy versions and keeps legacy tolerance", () => {

@@ -15,6 +15,9 @@ export interface RriReport {
     blocks?: boolean;
     resolution?: { answer: string; source: string };
   }>;
+  /** Marked scope sections: required on rri_policy_version 2 reports, absent on legacy reports. */
+  not_yet_specified?: Array<{ uncertainty: string; graduation_path: string }>;
+  out_of_scope?: Array<{ exclusion: string; reason: string }>;
 }
 
 const RRI_QUESTION_STATUSES = ["open", "resolved", "deferred"];
@@ -67,6 +70,25 @@ function validateRriOpenQuestions(report: Partial<RriReport>): void {
   }
 }
 
+// Marker-gated scope sections mirror the Go validator: marked reports require
+// both sections, legacy reports stay valid without them. null behaves like Go
+// pointer/slice unmarshalling and counts as a missing section.
+function validateRriScopeSections(report: Partial<RriReport>): void {
+  if (!isMarkedRriReport(report)) return;
+  if (!Array.isArray(report.not_yet_specified)) throw new Error("Marked RRI report requires the not_yet_specified section");
+  if (!Array.isArray(report.out_of_scope)) throw new Error("Marked RRI report requires the out_of_scope section");
+  for (const row of report.not_yet_specified) {
+    if (!row || typeof row.uncertainty !== "string" || !row.uncertainty || typeof row.graduation_path !== "string" || !row.graduation_path) {
+      throw new Error("RRI not_yet_specified rows require uncertainty and graduation_path to be non-empty strings");
+    }
+  }
+  for (const row of report.out_of_scope) {
+    if (!row || typeof row.exclusion !== "string" || !row.exclusion || typeof row.reason !== "string" || !row.reason) {
+      throw new Error("RRI out_of_scope rows require exclusion and reason to be non-empty strings");
+    }
+  }
+}
+
 export function parseRriReportJson(content: string): RriReport {
   const report = JSON.parse(content) as Partial<RriReport>;
   if ((report.rri_policy_version ?? 1) > 2) throw new Error(`RRI rri_policy_version ${report.rri_policy_version} is unsupported`);
@@ -77,6 +99,7 @@ export function parseRriReportJson(content: string): RriReport {
   const autoAnswered = (report.auto_answered as RriReport["auto_answered"]).every((row) => row && row.topic && row.details && row.resolution);
   const decisions = (report.decisions_log as RriReport["decisions_log"]).every((row) => row && row.decision && row.options_considered && row.chosen && row.rationale);
   if (!required || !autoAnswered || !decisions) throw new Error("RRI report contains an incomplete row");
+  validateRriScopeSections(report);
   validateRriOpenQuestions(report);
   return report as RriReport;
 }
@@ -95,11 +118,19 @@ export function renderRriReportMarkdown(report: RriReport): string {
     if (row.resolution) parts.push(`resolution: ${cell(row.resolution.answer)} (source: ${cell(row.resolution.source)})`);
     return `${base} (${parts.join(", ")})`;
   }).join("\n");
+  const notYetSpecified = report.not_yet_specified?.length
+    ? report.not_yet_specified.map((row) => `- **${cell(row.uncertainty)}:** graduation path -> ${cell(row.graduation_path)}`).join("\n")
+    : "- None";
+  const outOfScope = report.out_of_scope?.length
+    ? report.out_of_scope.map((row) => `- **${cell(row.exclusion)}:** ${cell(row.reason)}`).join("\n")
+    : "- None";
   return [
     `# RRI REPORT: ${report.project_name}`, `Generated: ${report.generated}`, "", "## REQUIREMENTS MATRIX", "",
     "| REQ-ID | Requirement | Source | Priority | Persona |", "|--------|-------------|--------|----------|---------|", requirements,
     "", "## AUTO-ANSWERED (from Scan)", autoAnswered, "", "## DECISIONS LOG", "",
     "| Decision | Options Considered | Chosen | Rationale |", "|----------|--------------------|--------|-----------|", decisions,
     "", "## OPEN QUESTIONS", questions,
+    "", "## NOT YET SPECIFIED", notYetSpecified,
+    "", "## OUT OF SCOPE", outOfScope,
   ].join("\n");
 }

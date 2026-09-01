@@ -870,13 +870,15 @@ type rriFinalization struct {
 }
 
 type rriReport struct {
-	ProjectName        string              `json:"project_name"`
-	Generated          string              `json:"generated"`
-	PolicyVersion      int                 `json:"rri_policy_version,omitempty"`
-	RequirementsMatrix []rriRequirementRow `json:"requirements_matrix"`
-	AutoAnswered       []rriAutoAnswerRow  `json:"auto_answered"`
-	DecisionsLog       []rriDecisionRow    `json:"decisions_log"`
-	OpenQuestions      []rriOpenQuestion   `json:"open_questions"`
+	ProjectName        string                  `json:"project_name"`
+	Generated          string                  `json:"generated"`
+	PolicyVersion      int                     `json:"rri_policy_version,omitempty"`
+	RequirementsMatrix []rriRequirementRow     `json:"requirements_matrix"`
+	AutoAnswered       []rriAutoAnswerRow      `json:"auto_answered"`
+	DecisionsLog       []rriDecisionRow        `json:"decisions_log"`
+	OpenQuestions      []rriOpenQuestion       `json:"open_questions"`
+	NotYetSpecified    []rriNotYetSpecifiedRow `json:"not_yet_specified,omitempty"`
+	OutOfScope         []rriOutOfScopeRow      `json:"out_of_scope,omitempty"`
 }
 type rriRequirementRow struct {
 	ReqID       string `json:"req_id"`
@@ -909,6 +911,14 @@ type rriResolution struct {
 	Answer string `json:"answer"`
 	Source string `json:"source"`
 }
+type rriNotYetSpecifiedRow struct {
+	Uncertainty    string `json:"uncertainty"`
+	GraduationPath string `json:"graduation_path"`
+}
+type rriOutOfScopeRow struct {
+	Exclusion string `json:"exclusion"`
+	Reason    string `json:"reason"`
+}
 
 // Marker-gated frontier schema for open_questions: reports carrying rri_policy_version 2
 // require the frontier fields, while pre-marker reports stay valid under the legacy shape.
@@ -917,6 +927,31 @@ var (
 	rriOpenQuestionPriorities = []string{"P0", "P1", "P2", "P3"}
 	rriOpenQuestionModes      = []string{"afk", "hitl"}
 )
+
+// marshalRriReport persists the report. Marked reports (rri_policy_version >= 2)
+// must carry both scope sections in the artifact even when empty, but plain
+// json.Marshal drops empty slices via omitempty; legacy reports keep the keys
+// omitted. Merge the scope keys back in for marked reports.
+func marshalRriReport(report rriReport) ([]byte, error) {
+	base, err := json.Marshal(report)
+	if err != nil {
+		return nil, err
+	}
+	if report.PolicyVersion < 2 {
+		return base, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	if merged["not_yet_specified"], err = json.Marshal(report.NotYetSpecified); err != nil {
+		return nil, err
+	}
+	if merged["out_of_scope"], err = json.Marshal(report.OutOfScope); err != nil {
+		return nil, err
+	}
+	return json.Marshal(merged)
+}
 
 func validateRriReport(report rriReport) error {
 	if report.PolicyVersion > 2 {
@@ -970,6 +1005,27 @@ func validateRriReport(report rriReport) error {
 		}
 		if row.Status != "open" && (row.Resolution == nil || row.Resolution.Answer == "" || row.Resolution.Source == "") {
 			return fmt.Errorf("RRI open_questions row %s requires resolution with answer and source when status is resolved or deferred", row.ID)
+		}
+	}
+	// Scope sections are marker-gated like the open_questions frontier fields:
+	// marked reports must carry both, legacy reports stay valid without them.
+	// A missing section unmarshals to a nil slice, so nil is the rejected state.
+	if report.PolicyVersion >= 2 {
+		if report.NotYetSpecified == nil {
+			return errors.New("marked RRI report requires the not_yet_specified section")
+		}
+		for _, row := range report.NotYetSpecified {
+			if row.Uncertainty == "" || row.GraduationPath == "" {
+				return errors.New("RRI not_yet_specified rows require uncertainty and graduation_path")
+			}
+		}
+		if report.OutOfScope == nil {
+			return errors.New("marked RRI report requires the out_of_scope section")
+		}
+		for _, row := range report.OutOfScope {
+			if row.Exclusion == "" || row.Reason == "" {
+				return errors.New("RRI out_of_scope rows require exclusion and reason")
+			}
 		}
 	}
 	return nil
@@ -1062,7 +1118,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		if approved != 0 {
 			return errors.New("RRI finalization already approved; reset planning before revising it")
 		}
-		reportJSON, marshalErr := json.Marshal(payload.Report)
+		reportJSON, marshalErr := marshalRriReport(payload.Report)
 		if marshalErr != nil {
 			return marshalErr
 		}
@@ -1107,7 +1163,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&revision); err != nil {
 		return err
 	}
-	reportJSON, err := json.Marshal(payload.Report)
+	reportJSON, err := marshalRriReport(payload.Report)
 	if err != nil {
 		return err
 	}

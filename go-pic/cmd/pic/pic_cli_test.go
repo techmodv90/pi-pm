@@ -982,6 +982,7 @@ func TestRriReportValidationMarkerGate(t *testing.T) {
 	}
 	marked := rriReport{
 		ProjectName: "Project", Generated: "2026-09-01", PolicyVersion: 2,
+		NotYetSpecified: []rriNotYetSpecifiedRow{}, OutOfScope: []rriOutOfScopeRow{},
 		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Resolved frontier row", Status: "resolved", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true), Resolution: &rriResolution{Answer: "Ship CLI first", Source: "Owner confirm"}}},
 	}
 	if err := validateRriReport(marked); err != nil {
@@ -1050,6 +1051,71 @@ func TestRriReportValidationMarkerGate(t *testing.T) {
 
 func boolPtr(value bool) *bool { return &value }
 
+func TestRriScopeSections(t *testing.T) {
+	markedBase := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01", PolicyVersion: 2,
+		NotYetSpecified: []rriNotYetSpecifiedRow{},
+		OutOfScope:      []rriOutOfScopeRow{},
+	}
+	if err := validateRriReport(markedBase); err != nil {
+		t.Fatalf("marked report with empty scope sections must be accepted: %v", err)
+	}
+	filled := markedBase
+	filled.NotYetSpecified = []rriNotYetSpecifiedRow{{Uncertainty: "Export formats", GraduationPath: "Resolve with the owner before contracts"}}
+	filled.OutOfScope = []rriOutOfScopeRow{{Exclusion: "Cloud sync", Reason: "Outside the epic scope"}}
+	if err := validateRriReport(filled); err != nil {
+		t.Fatalf("marked report with filled scope sections must be accepted: %v", err)
+	}
+	cases := []struct {
+		name string
+		mut  func(r *rriReport)
+		want string
+	}{{
+		name: "missing not_yet_specified",
+		mut:  func(r *rriReport) { r.NotYetSpecified = nil },
+		want: "requires the not_yet_specified section",
+	}, {
+		name: "missing out_of_scope",
+		mut:  func(r *rriReport) { r.OutOfScope = nil },
+		want: "requires the out_of_scope section",
+	}, {
+		name: "not_yet_specified row without graduation path",
+		mut:  func(r *rriReport) { r.NotYetSpecified = []rriNotYetSpecifiedRow{{Uncertainty: "Export formats"}} },
+		want: "require uncertainty and graduation_path",
+	}, {
+		name: "out_of_scope row without reason",
+		mut:  func(r *rriReport) { r.OutOfScope = []rriOutOfScopeRow{{Exclusion: "Cloud sync"}} },
+		want: "require exclusion and reason",
+	}}
+	for _, tc := range cases {
+		report := markedBase
+		tc.mut(&report)
+		err := validateRriReport(report)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: expected error containing %q, got %v", tc.name, tc.want, err)
+		}
+	}
+	legacy := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01",
+		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Legacy shape row"}},
+	}
+	if err := validateRriReport(legacy); err != nil {
+		t.Fatalf("legacy report without scope sections must stay valid: %v", err)
+	}
+	// No Destination field exists in the schema: a destination key in the payload
+	// is ignored at unmarshal time and never re-emitted by persistence.
+	var withDestination rriReport
+	if err := json.Unmarshal([]byte(`{"project_name":"Project","generated":"2026-09-01","rri_policy_version":2,"not_yet_specified":[],"out_of_scope":[],"destination":"Work Item goals"}`), &withDestination); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRriReport(withDestination); err != nil {
+		t.Fatalf("destination payload must validate without a Destination field: %v", err)
+	}
+	if persisted, err := json.Marshal(withDestination); err != nil || strings.Contains(string(persisted), "destination") {
+		t.Fatalf("persisted report must not carry a destination field: %s err=%v", persisted, err)
+	}
+}
+
 func TestWorkItemRriFinalizeMarkedFrontierReportPersists(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
@@ -1065,7 +1131,9 @@ func TestWorkItemRriFinalizeMarkedFrontierReportPersists(t *testing.T) {
 			"project_name": "Marked RRI finalization", "generated": "2026-09-01", "rri_policy_version": 2,
 			"requirements_matrix": []map[string]string{{"req_id": "REQ-FRONTIER", "requirement": "Frontier persistence", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
 			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Frontier mode", "options_considered": "Legacy vs frontier", "chosen": "Frontier", "rationale": "Single contract"}},
-			"open_questions": []map[string]any{{"id": "Q1", "question": "Ship order", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "CLI first", "source": "Owner confirm"}}},
+			"open_questions":    []map[string]any{{"id": "Q1", "question": "Ship order", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "CLI first", "source": "Owner confirm"}}},
+			"not_yet_specified": []map[string]string{{"uncertainty": "Export formats", "graduation_path": "Resolve with the owner before contracts"}},
+			"out_of_scope":      []map[string]string{{"exclusion": "Cloud sync", "reason": "Outside the epic scope"}},
 		},
 	})
 	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload)))
@@ -1096,6 +1164,62 @@ func TestWorkItemRriFinalizeMarkedFrontierReportPersists(t *testing.T) {
 	resolution := row["resolution"].(map[string]any)
 	if resolution["answer"] != "CLI first" || resolution["source"] != "Owner confirm" {
 		t.Fatalf("persisted resolution = %#v", resolution)
+	}
+	scopeRows := persisted["not_yet_specified"].([]any)
+	if len(scopeRows) != 1 || scopeRows[0].(map[string]any)["uncertainty"] != "Export formats" || scopeRows[0].(map[string]any)["graduation_path"] != "Resolve with the owner before contracts" {
+		t.Fatalf("persisted not_yet_specified = %#v", scopeRows)
+	}
+	excluded := persisted["out_of_scope"].([]any)
+	if len(excluded) != 1 || excluded[0].(map[string]any)["exclusion"] != "Cloud sync" || excluded[0].(map[string]any)["reason"] != "Outside the epic scope" {
+		t.Fatalf("persisted out_of_scope = %#v", excluded)
+	}
+	if _, hasDestination := persisted["destination"]; hasDestination {
+		t.Fatalf("persisted report must not carry a destination field: %#v", persisted)
+	}
+}
+
+func TestWorkItemRriFinalizeMarkedEmptyScopeSectionsPersist(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Empty scope finalization"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	payload, _ := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-SCOPE-EMPTY", "priority": "tier1", "title": "Scope sections persist", "description": "Persist empty scope sections", "acceptanceCriteria": "Given a marked report with empty scope sections\nWhen rri-finalize runs\nThen both scope keys persist"}},
+		"decisions":    []map[string]any{},
+		"report": map[string]any{
+			"project_name":        "Empty scope finalization", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-SCOPE-EMPTY", "requirement": "Scope sections persist", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{},
+			"open_questions":      []map[string]any{},
+			"not_yet_specified":   []map[string]string{},
+			"out_of_scope":        []map[string]string{},
+		},
+	})
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload)))
+	if finalized["artifact_id"] == "" {
+		t.Fatalf("finalized = %#v", finalized)
+	}
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var content string
+	if err = db.QueryRow(`SELECT content FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	var persisted map[string]any
+	if err = json.Unmarshal([]byte(content), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"not_yet_specified", "out_of_scope"} {
+		rows, ok := persisted[key].([]any)
+		if !ok || len(rows) != 0 {
+			t.Fatalf("persisted %s must remain an empty array, got %#v", key, persisted[key])
+		}
 	}
 }
 
