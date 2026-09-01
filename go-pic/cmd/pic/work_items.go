@@ -1,15 +1,18 @@
 package main
 
 import (
-	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/earendil-works/task-system/go-pic/internal/tip"
 )
 
 const workItemColumns = `id,type,parent_id,title,description,status,priority,deferred,claimed_at,claimed_by,review_status,review_notes,planning_depth,created_at,decomposition_mode,decomposition_reason,paired_contract_node,source_graph_artifact_id,source_graph_revision,source_graph_content_hash`
@@ -1096,6 +1099,207 @@ func insertRriDeferralDecisions(tx *sql.Tx, workItemID, artifactID string, repor
 	return nil
 }
 
+// RRI glossary/ADR conflict guard (REQ-F1-5): marked RRI payloads fail closed
+// when resolved requirement or decision terminology contradicts the repository
+// glossary (CONTEXT.md) or accepted ADR terms (docs/adr/*.md). Comparison
+// normalizes case and whitespace only, so the persisted report keeps its
+// source text; a conflict returns before any artifact, requirement, decision,
+// or event is written, leaving the previous state untouched.
+type rriForbiddenTerm struct {
+	Phrase    string // conflicting terminology in the source document's spelling
+	Canonical string // glossary term whose definition the phrase contradicts (empty for ADR rejections)
+	Source    string // document path the constraint comes from
+}
+
+func validateRriTerminology(payload rriFinalization) error {
+	if payload.Report.PolicyVersion < 2 {
+		return nil
+	}
+	terms, err := loadRriForbiddenTerms()
+	if err != nil {
+		return err
+	}
+	for _, requirement := range payload.Requirements {
+		for _, text := range []string{requirement.Title, requirement.Description, requirement.AcceptanceCriteria} {
+			if err := checkRriTerminology(terms, "requirement", requirement.Key, text); err != nil {
+				return err
+			}
+		}
+	}
+	for _, decision := range payload.Decisions {
+		if err := checkRriTerminology(terms, "decision", decision.Key, decision.Answer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkRriTerminology(terms []rriForbiddenTerm, kind, key, text string) error {
+	normalized := strings.Join(strings.Fields(text), " ")
+	if normalized == "" {
+		return nil
+	}
+	for _, term := range terms {
+		pattern, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(strings.Join(strings.Fields(term.Phrase), " ")) + `\b`)
+		if err != nil {
+			return fmt.Errorf("RRI terminology check failed for constraint from %s: %w", term.Source, err)
+		}
+		if !pattern.MatchString(normalized) {
+			continue
+		}
+		if term.Canonical != "" {
+			return fmt.Errorf("RRI save blocked: %s %s uses %q, which contradicts the glossary definition of %s (source: %s)", kind, key, term.Phrase, term.Canonical, term.Source)
+		}
+		return fmt.Errorf("RRI save blocked: %s %s uses %q, which is rejected by accepted ADR %s", kind, key, term.Phrase, term.Source)
+	}
+	return nil
+}
+
+func loadRriForbiddenTerms() ([]rriForbiddenTerm, error) {
+	root, err := findRriTruthRoot()
+	if err != nil || root == "" {
+		return nil, err
+	}
+	var terms []rriForbiddenTerm
+	glossary, err := os.ReadFile(filepath.Join(root, "CONTEXT.md"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+	}
+	if err == nil {
+		terms = append(terms, parseRriGlossaryAvoidTerms(string(glossary), "CONTEXT.md")...)
+	}
+	adrFiles, err := filepath.Glob(filepath.Join(root, "docs", "adr", "*.md"))
+	if err != nil {
+		return nil, fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+	}
+	for _, adrPath := range adrFiles {
+		content, err := os.ReadFile(adrPath)
+		if err != nil {
+			return nil, fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+		}
+		// Only accepted architecture decisions constrain terminology; drafts
+		// and proposed records stay advisory.
+		if !strings.Contains(string(content), "**Status**: accepted") {
+			continue
+		}
+		rel, err := filepath.Rel(root, adrPath)
+		if err != nil {
+			rel = adrPath
+		}
+		terms = append(terms, parseRriAdrRejectedTerms(string(content), rel)...)
+	}
+	return terms, nil
+}
+
+// findRriTruthRoot walks up from the working directory to the first directory
+// carrying the repository glossary (CONTEXT.md) or ADR directory, mirroring the
+// upward resolution of findDB. An empty result means the project defines no
+// repository truth, which leaves marked saves unguarded rather than blocked;
+// truth that exists but cannot be read fails closed in loadRriForbiddenTerms.
+func findRriTruthRoot() (string, error) {
+	dir, err := filepath.Abs(".")
+	if err != nil {
+		return "", err
+	}
+	for current := dir; ; current = filepath.Dir(current) {
+		if _, err := os.Stat(filepath.Join(current, "CONTEXT.md")); err == nil {
+			return current, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+		}
+		adrDir := filepath.Join(current, "docs", "adr")
+		entries, err := os.ReadDir(adrDir)
+		if err == nil {
+			for _, entry := range entries {
+				if strings.HasSuffix(entry.Name(), ".md") {
+					return current, nil
+				}
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+		}
+		if filepath.Dir(current) == current {
+			return "", nil
+		}
+	}
+}
+
+var (
+	rriGlossaryTermPattern  = regexp.MustCompile(`^\*\*([^*]+)\*\*:\s*$`)
+	rriGlossaryAvoidPattern = regexp.MustCompile(`^_Avoid_:\s*(.+?)\s*$`)
+)
+
+// parseRriGlossaryAvoidTerms extracts every _Avoid_ phrase from CONTEXT.md
+// entries; each phrase is conflicting terminology for the canonical term that
+// owns the entry, so a payload using it contradicts that definition.
+func parseRriGlossaryAvoidTerms(content, source string) []rriForbiddenTerm {
+	var terms []rriForbiddenTerm
+	canonical := ""
+	for _, line := range strings.Split(content, "\n") {
+		if match := rriGlossaryTermPattern.FindStringSubmatch(line); match != nil {
+			canonical = strings.TrimSpace(match[1])
+			continue
+		}
+		match := rriGlossaryAvoidPattern.FindStringSubmatch(line)
+		if match == nil || canonical == "" {
+			continue
+		}
+		for _, phrase := range strings.Split(match[1], ",") {
+			phrase = strings.TrimSpace(phrase)
+			if phrase != "" {
+				terms = append(terms, rriForbiddenTerm{Phrase: phrase, Canonical: canonical, Source: source})
+			}
+		}
+	}
+	return terms
+}
+
+var (
+	rriAdrRejectPattern        = regexp.MustCompile(`(?i)\breject\b`)
+	rriAdrJustificationPattern = regexp.MustCompile(`(?i)\b(?:not\s+sufficient|insufficient)\s+justification\s+for\b`)
+)
+
+// parseRriAdrRejectedTerms extracts the explicit rejected practices from an
+// accepted ADR: a sentence containing "reject" contributes the phrases that
+// follow it, split on " and ", and a sentence stating something "is not
+// sufficient justification for" a practice contributes that practice (the
+// ADR 0002 constraint forbidding speculative abstractions justified only by a
+// single implementation). Parsing stays conservative so ADR prose only adds a
+// constraint when the document states one explicitly, and the two-word
+// minimum keeps generic single-word terms from blocking every RRI save.
+func parseRriAdrRejectedTerms(content, source string) []rriForbiddenTerm {
+	var terms []rriForbiddenTerm
+	for _, sentence := range strings.Split(content, ".") {
+		for _, pattern := range []*regexp.Regexp{rriAdrJustificationPattern, rriAdrRejectPattern} {
+			for _, loc := range pattern.FindAllStringIndex(sentence, -1) {
+				phrase := trimRriAdrPhraseLeadIn(strings.TrimSpace(sentence[loc[1]:]))
+				for _, part := range strings.Split(phrase, " and ") {
+					part = strings.TrimSpace(part)
+					if len(strings.Fields(part)) >= 2 {
+						terms = append(terms, rriForbiddenTerm{Phrase: part, Source: source})
+					}
+				}
+			}
+		}
+	}
+	return terms
+}
+
+// trimRriAdrPhraseLeadIn strips enumerators and articles so the forbidden
+// phrase names the practice itself rather than its grammatical lead-in.
+func trimRriAdrPhraseLeadIn(phrase string) string {
+	for {
+		trimmed := phrase
+		for _, prefix := range []string{"both ", "a ", "an ", "the "} {
+			trimmed = strings.TrimPrefix(trimmed, prefix)
+		}
+		if trimmed == phrase {
+			return phrase
+		}
+		phrase = trimmed
+	}
+}
+
 func workItemRriFinalize(db *sql.DB, args []string) error {
 	if len(args) != 2 {
 		return errors.New("usage: pic work-item rri-finalize <id> <payload-json>")
@@ -1111,6 +1315,12 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		return err
 	}
 	if err := validateRriPublishGate(payload.Report); err != nil {
+		return err
+	}
+	// Glossary/ADR conflicts are pure terminology checks, so they run with the
+	// other pre-flight validators before the transaction opens; any conflict
+	// therefore commits no partial state by construction.
+	if err := validateRriTerminology(payload); err != nil {
 		return err
 	}
 	seenRequirements, seenDecisions := map[string]bool{}, map[string]bool{}

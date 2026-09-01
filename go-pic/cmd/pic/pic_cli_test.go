@@ -1314,6 +1314,200 @@ func markedRriPayload(t *testing.T, title string, questions []any) string {
 	return string(payload)
 }
 
+func glossaryRriPayload(t *testing.T, requirementTitle, requirementDescription, decisionAnswer string) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-GLOSSARY", "priority": "tier1", "title": requirementTitle, "description": requirementDescription, "acceptanceCriteria": "Given a resolved requirement\nWhen save_rri_interview runs\nThen the terminology guard applies"}},
+		"decisions":    []map[string]any{{"key": "glossary_mode", "answer": decisionAnswer}},
+		"report": map[string]any{
+			"project_name": "Glossary guard", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-GLOSSARY", "requirement": requirementTitle, "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Glossary mode", "options_considered": "Guarded vs legacy", "chosen": "Guarded", "rationale": "Canonical terminology"}},
+			"open_questions": []any{}, "not_yet_specified": []map[string]string{}, "out_of_scope": []map[string]string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
+}
+
+func TestRriGlossaryConflictFailsClosed(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	// A frontend-phase requirement title contradicts CONTEXT.md's Feature
+	// definition; this mirrors the real repository truth the guard reads.
+	if err := os.WriteFile(filepath.Join(root, "CONTEXT.md"), []byte("# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Glossary guard"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Frontend phase delivery", "Deliver the frontend phase first", "Gate marked reports"))
+	if !strings.Contains(out, "frontend phase") || !strings.Contains(out, "CONTEXT.md") || !strings.Contains(out, "Feature") {
+		t.Fatalf("glossary conflict must name the term, canonical definition, and source document, got %s", out)
+	}
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var artifacts, requirements, decisions, events int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&artifacts); err != nil || artifacts != 0 {
+		t.Fatalf("conflicting save persisted artifacts=%d err=%v", artifacts, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM requirements WHERE epic_id=?`, id).Scan(&requirements); err != nil || requirements != 0 {
+		t.Fatalf("conflicting save persisted requirements=%d err=%v", requirements, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM owner_decisions WHERE epic_id=?`, id).Scan(&decisions); err != nil || decisions != 0 {
+		t.Fatalf("conflicting save persisted decisions=%d err=%v", decisions, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='rri_finalized'`, id).Scan(&events); err != nil || events != 0 {
+		t.Fatalf("conflicting save persisted events=%d err=%v", events, err)
+	}
+	// The same payload without the conflicting terminology proceeds normally.
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "Gate marked reports")))
+	if finalized["requirements"] != float64(1) || finalized["artifact_id"] == "" {
+		t.Fatalf("conflict-free save must proceed normally, got %#v", finalized)
+	}
+}
+
+func TestRriGlossaryDecisionConflictFailsClosed(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	if err := os.WriteFile(filepath.Join(root, "CONTEXT.md"), []byte("# Work Item Planning Context\n\n**Requirement**:\nAn authoritative behavioral obligation.\n_Avoid_: wish\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Decision glossary guard"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "Treat requirements as a wish"))
+	if !strings.Contains(out, "decision glossary_mode") || !strings.Contains(out, "wish") {
+		t.Fatalf("decision conflicts must use the same check with kind decision, got %s", out)
+	}
+}
+
+func TestRriAdrConflictFailsClosed(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	if err := os.MkdirAll(filepath.Join(root, "docs", "adr"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	adr := "# Rejected Planning Shape\n\n**Status**: accepted\n\nWe reject both one oversized Task per slice and removing child Code Review in favor of aggregate QA alone.\n"
+	if err := os.WriteFile(filepath.Join(root, "docs", "adr", "0001-test.md"), []byte(adr), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "ADR guard"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "One oversized Task per slice"))
+	if !strings.Contains(out, "one oversized Task per slice") || !strings.Contains(out, "0001-test.md") {
+		t.Fatalf("ADR conflict must name the phrase and source document, got %s", out)
+	}
+	// An accepted ADR that constrains a practice without the word reject (the
+	// ADR 0002 speculative-abstraction rule) must block a decision endorsing
+	// exactly that practice.
+	seams := "# Codebase Design At Module Seams\n\n**Status**: accepted\n\nAdd a Seam only when behavior actually varies; one implementation alone is not sufficient justification for a speculative abstraction.\n"
+	if err := os.WriteFile(filepath.Join(root, "docs", "adr", "0002-seams.md"), []byte(seams), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out = runPicError(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "adding a speculative abstraction with one implementation"))
+	if !strings.Contains(out, "speculative abstraction") || !strings.Contains(out, "0002-seams.md") {
+		t.Fatalf("accepted ADR constraint without reject wording must block the save, got %s", out)
+	}
+	// A non-accepted ADR stays advisory and must not block, even for phrases
+	// only it rejects.
+	if err := os.WriteFile(filepath.Join(root, "docs", "adr", "0003-draft.md"), []byte("# Draft\n\n**Status**: proposed\n\nWe reject adapter wands as Seam justification.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "Adapter wands stay out"))
+}
+
+func TestRriGlossaryReportTextPersistsUnchanged(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	if err := os.WriteFile(filepath.Join(root, "CONTEXT.md"), []byte("# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Source text preservation"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical  Slice   delivery", "Deliver one vertical slice", "Gate marked reports")))
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var content string
+	if err = db.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=?`, finalized["artifact_id"].(string)).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, `"Vertical  Slice   delivery"`) {
+		t.Fatalf("persisted report must preserve source text despite normalization, got %s", content)
+	}
+}
+
+func TestRriGlossaryParsesRepositoryTruth(t *testing.T) {
+	// The test binary runs in go-pic/cmd/pic, so the repository truth is three
+	// levels up; prove the parsing conventions match the real documents.
+	content, err := os.ReadFile(filepath.Join("..", "..", "..", "CONTEXT.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terms := parseRriGlossaryAvoidTerms(string(content), "CONTEXT.md")
+	var epicAvoid bool
+	for _, term := range terms {
+		if term.Canonical == "Epic" && term.Phrase == "one giant Task" {
+			epicAvoid = true
+		}
+	}
+	if !epicAvoid {
+		t.Fatalf("real CONTEXT.md must yield the Epic avoid terms, got %#v", terms)
+	}
+	adr, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "adr", "0001-vertical-slice-groups-and-bite-sized-tasks.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adrTerms := parseRriAdrRejectedTerms(string(adr), "docs/adr/0001-vertical-slice-groups-and-bite-sized-tasks.md")
+	var oversized bool
+	for _, term := range adrTerms {
+		if term.Phrase == "one oversized Task per slice" {
+			oversized = true
+		}
+	}
+	if !oversized {
+		t.Fatalf("accepted ADR 0001 must yield its rejected phrase, got %#v", adrTerms)
+	}
+}
+
+func TestRriAdrParsesSpeculativeAbstractionConstraint(t *testing.T) {
+	// Accepted ADR 0002 forbids speculative abstractions whose only
+	// justification is a single implementation; the parser must contribute
+	// that constraint even though the sentence never uses the word reject.
+	adr, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "adr", "0002-codebase-design-at-module-seams.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adrTerms := parseRriAdrRejectedTerms(string(adr), "docs/adr/0002-codebase-design-at-module-seams.md")
+	var speculative bool
+	for _, term := range adrTerms {
+		if term.Phrase == "speculative abstraction" {
+			speculative = true
+		}
+	}
+	if !speculative {
+		t.Fatalf("accepted ADR 0002 must yield its speculative abstraction constraint, got %#v", adrTerms)
+	}
+}
+
 func TestRriPublishGateBlocksOpenP0P1Questions(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
