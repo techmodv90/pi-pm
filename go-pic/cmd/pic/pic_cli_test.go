@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -982,6 +984,7 @@ func TestRriReportValidationMarkerGate(t *testing.T) {
 	}
 	marked := rriReport{
 		ProjectName: "Project", Generated: "2026-09-01", PolicyVersion: 2,
+		RequirementsMatrix: []rriRequirementRow{}, AutoAnswered: []rriAutoAnswerRow{}, DecisionsLog: []rriDecisionRow{},
 		NotYetSpecified: []rriNotYetSpecifiedRow{}, OutOfScope: []rriOutOfScopeRow{},
 		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Resolved frontier row", Status: "resolved", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true), Resolution: &rriResolution{Answer: "Ship CLI first", Source: "Owner confirm"}}},
 	}
@@ -1051,9 +1054,87 @@ func TestRriReportValidationMarkerGate(t *testing.T) {
 
 func boolPtr(value bool) *bool { return &value }
 
+// Dual-enforcer parity (REQ-F1-7, OB-F1-7): marker-gated required-array
+// strictness must match the TypeScript validator in reporting/rri-report.ts,
+// including the named missing-array defect in the error message.
+func TestRriPolicy(t *testing.T) {
+	markedBase := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01", PolicyVersion: 2,
+		RequirementsMatrix: []rriRequirementRow{}, AutoAnswered: []rriAutoAnswerRow{},
+		DecisionsLog: []rriDecisionRow{}, OpenQuestions: []rriOpenQuestion{},
+		NotYetSpecified: []rriNotYetSpecifiedRow{}, OutOfScope: []rriOutOfScopeRow{},
+	}
+	if err := validateRriReport(markedBase); err != nil {
+		t.Fatalf("marked complete report must proceed: %v", err)
+	}
+	// Marked reports with a missing required array are rejected, and the defect
+	// names the missing array identically to the TypeScript validator.
+	nilBySection := map[string]func(r *rriReport){
+		"requirements_matrix": func(r *rriReport) { r.RequirementsMatrix = nil },
+		"auto_answered":       func(r *rriReport) { r.AutoAnswered = nil },
+		"decisions_log":       func(r *rriReport) { r.DecisionsLog = nil },
+		"open_questions":      func(r *rriReport) { r.OpenQuestions = nil },
+	}
+	for section, clear := range nilBySection {
+		report := markedBase
+		clear(&report)
+		err := validateRriReport(report)
+		want := "marked RRI report is missing the " + section + " section"
+		if err == nil || err.Error() != want {
+			t.Fatalf("marked report missing %s: expected error %q, got %v", section, want, err)
+		}
+	}
+	// Legacy reports retain their prior tolerated shape: missing arrays stay
+	// valid under legacy rules, matching the TypeScript legacy tolerance.
+	legacy := rriReport{ProjectName: "Project", Generated: "2026-09-01"}
+	if err := validateRriReport(legacy); err != nil {
+		t.Fatalf("legacy report with every array missing must stay valid: %v", err)
+	}
+	legacyPartial := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01",
+		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Legacy shape row"}},
+	}
+	if err := validateRriReport(legacyPartial); err != nil {
+		t.Fatalf("legacy report with some arrays missing must stay valid: %v", err)
+	}
+}
+
+// Stage-order parity (REQ-F1-7): the Go artifact-stage taxonomy must match the
+// TypeScript scheduler's PLANNING_STAGE_ORDER in pi-ext/pipeline/stage-resolution.ts
+// stage for stage, including the supplementary rri_t_scenarios entry.
+func TestRriStageOrder(t *testing.T) {
+	pkgDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsSource, err := os.ReadFile(filepath.Join(pkgDir, "..", "..", "..", "pi-ext", "pipeline", "stage-resolution.ts"))
+	if err != nil {
+		t.Fatalf("read TypeScript stage order: %v", err)
+	}
+	match := regexp.MustCompile(`PLANNING_STAGE_ORDER: string\[\] = \[([^\]]*)\]`).FindSubmatch(tsSource)
+	if match == nil {
+		t.Fatal("PLANNING_STAGE_ORDER not found in pi-ext/pipeline/stage-resolution.ts")
+	}
+	var tsOrder []string
+	for _, raw := range strings.Split(string(match[1]), ",") {
+		entry := strings.Trim(strings.TrimSpace(raw), "\"")
+		if entry != "" {
+			tsOrder = append(tsOrder, entry)
+		}
+	}
+	if !reflect.DeepEqual(workItemStages, tsOrder) {
+		t.Fatalf("Go workItemStages %v must match TypeScript PLANNING_STAGE_ORDER %v", workItemStages, tsOrder)
+	}
+	if indexOfStage(workItemStages, "rri_t_scenarios") != indexOfStage(workItemStages, "rri")+1 {
+		t.Fatalf("rri_t_scenarios must directly follow rri in both stage orders: %v", workItemStages)
+	}
+}
+
 func TestRriScopeSections(t *testing.T) {
 	markedBase := rriReport{
 		ProjectName: "Project", Generated: "2026-09-01", PolicyVersion: 2,
+		RequirementsMatrix: []rriRequirementRow{}, AutoAnswered: []rriAutoAnswerRow{},
+		DecisionsLog: []rriDecisionRow{}, OpenQuestions: []rriOpenQuestion{},
 		NotYetSpecified: []rriNotYetSpecifiedRow{},
 		OutOfScope:      []rriOutOfScopeRow{},
 	}
@@ -1105,7 +1186,7 @@ func TestRriScopeSections(t *testing.T) {
 	// No Destination field exists in the schema: a destination key in the payload
 	// is ignored at unmarshal time and never re-emitted by persistence.
 	var withDestination rriReport
-	if err := json.Unmarshal([]byte(`{"project_name":"Project","generated":"2026-09-01","rri_policy_version":2,"not_yet_specified":[],"out_of_scope":[],"destination":"Work Item goals"}`), &withDestination); err != nil {
+	if err := json.Unmarshal([]byte(`{"project_name":"Project","generated":"2026-09-01","rri_policy_version":2,"requirements_matrix":[],"auto_answered":[],"decisions_log":[],"open_questions":[],"not_yet_specified":[],"out_of_scope":[],"destination":"Work Item goals"}`), &withDestination); err != nil {
 		t.Fatal(err)
 	}
 	if err := validateRriReport(withDestination); err != nil {

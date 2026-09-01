@@ -11,7 +11,7 @@ import { listSkillFamilies, type SkillFamilyCatalogEntry } from "../subagent/ski
 import { buildAutofixContext, buildEscalationResolutionContext, buildOwnerRejectionContext, buildTargetedReReviewInstructions, buildWorkerCorrectionContext, reviewCycleCount } from "./corrections.ts";
 import { currentFailedReview, isMutationStage } from "./report-parsing.ts";
 import { buildStagePrimer, buildWorkProgressLedger, type StagePrimerDigest } from "../tasking/work-item-prompts.ts";
-import { normalizePipelineData, resolvePlanProfile } from "./stage-resolution.ts";
+import { normalizePipelineData, resolvePlanProfile, SUPPLEMENTARY_PLANNING_STAGES } from "./stage-resolution.ts";
 import { parsePicShow, type PicShowDocument, type PicArtifact, type PicCheckpoint, type PicCompletionReport, type PicInstructionPack, type PicVerificationReport } from "./pic-show.ts";
 
 // Known planning stages the scheduler can route and map to a bounded agent.
@@ -207,7 +207,15 @@ export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, tas
 export function predecessorCheckpointFor(doc: CheckpointSource, stage: string, profileStages: string[]): PicCheckpoint | undefined {
   const index = profileStages.indexOf(stage);
   if (index <= 0) return undefined;
-  return latestValidatedCheckpoint(doc, profileStages[index - 1])?.checkpoint;
+  // Supplementary stages (e.g. rri_t_scenarios) never produce an approval
+  // checkpoint, so the predecessor is the nearest precedent gating stage —
+  // mirroring the Go visibility-only carve-out in work_items.go.
+  for (let cursor = index - 1; cursor >= 0; cursor--) {
+    const prior = profileStages[cursor];
+    if (prior === undefined || SUPPLEMENTARY_PLANNING_STAGES.includes(prior)) continue;
+    return latestValidatedCheckpoint(doc, prior)?.checkpoint;
+  }
+  return undefined;
 }
 
 export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): string {
@@ -341,7 +349,12 @@ export function gateOpenP0P1RriQuestions(doc: PicShowDocument, profileStages: st
 
 export function planPrimerContext(doc: PicShowDocument, profileStages: string[], stage: string): { digests: StagePrimerDigest[]; missing: string[] } {
   const stageIndex = profileStages.indexOf(stage);
-  const predecessors = stageIndex > 0 ? profileStages.slice(0, stageIndex) : [];
+  // Supplementary stages (e.g. rri_t_scenarios) are retained for artifact
+  // taxonomy/visibility only — they never produce an approval checkpoint, so
+  // requiring one here would strand the next planning stage forever.
+  const predecessors = stageIndex > 0
+    ? profileStages.slice(0, stageIndex).filter((prior) => !SUPPLEMENTARY_PLANNING_STAGES.includes(prior))
+    : [];
   const digests: StagePrimerDigest[] = [];
   const missing: string[] = [];
   for (const prior of predecessors) {

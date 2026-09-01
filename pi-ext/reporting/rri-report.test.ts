@@ -209,3 +209,40 @@ test("marked RRI report rejects unsupported policy versions and keeps legacy tol
     /incomplete row/,
   );
 });
+
+// Dual-enforcer parity (REQ-F1-7, OB-F1-7): marked reports with a missing
+// required array are rejected with the same named defect as the Go validator,
+// while legacy reports stay valid without the arrays.
+test("marked RRI report rejects each missing required array with the named section", () => {
+  for (const section of ["requirements_matrix", "auto_answered", "decisions_log", "open_questions"]) {
+    const withoutSection: Record<string, unknown> = markedReport([]);
+    delete withoutSection[section];
+    assert.throws(
+      () => parseRriReportJson(JSON.stringify(withoutSection)),
+      new RegExp(`^Error: marked RRI report is missing the ${section} section$`),
+      `missing ${section} must be rejected`,
+    );
+  }
+  const nullSection = { ...markedReport([]), open_questions: null };
+  assert.throws(
+    () => parseRriReportJson(JSON.stringify(nullSection)),
+    /marked RRI report is missing the open_questions section/,
+  );
+});
+
+test("legacy RRI report stays valid with missing required arrays like Go nil slices", () => {
+  const minimal: Record<string, unknown> = { project_name: "Legacy Project", generated: "2026-08-17" };
+  const report = parseRriReportJson(JSON.stringify(minimal));
+  const markdown = renderRriReportMarkdown(report);
+  assert.match(markdown, /^# RRI REPORT: Legacy Project/);
+  assert.match(markdown, /## OPEN QUESTIONS\n- None/);
+  assert.match(markdown, /## DECISIONS LOG/);
+  const partial: Record<string, unknown> = {
+    ...legacyReport,
+    auto_answered: undefined,
+    open_questions: null,
+  };
+  const partialReport = parseRriReportJson(JSON.stringify(partial));
+  assert.deepEqual(partialReport.auto_answered, []);
+  assert.deepEqual(partialReport.open_questions, []);
+});

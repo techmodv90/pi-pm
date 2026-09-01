@@ -10,6 +10,75 @@ import { MANAGED_WORKER_DEADLINE_MS } from "../subagent/runner.ts";
 import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
+import { PLANNING_STAGE_ORDER, SUPPLEMENTARY_PLANNING_STAGES } from "./stage-resolution.ts";
+
+// Stage-taxonomy parity (REQ-F1-7): the TS order must match the Go
+// workItemStages taxonomy stage for stage, including the supplementary
+// rri_t_scenarios entry instead of silently dropping it.
+test("PLANNING_STAGE_ORDER matches the Go workItemStages taxonomy including rri_t_scenarios", () => {
+  assert.deepEqual(PLANNING_STAGE_ORDER, ["scan", "rri", "rri_t_scenarios", "vision", "blueprint", "contracts", "task_graph"]);
+  assert.equal(PLANNING_STAGE_ORDER.indexOf("rri_t_scenarios"), PLANNING_STAGE_ORDER.indexOf("rri") + 1);
+});
+
+test("resolvePlanProfile retains rri_t_scenarios from a persisted profile instead of dropping it", () => {
+  const profile = resolvePlanProfile(normalizePipelineData({
+    work_item: { id: "wi-rri-t", type: "epic", parent_id: "", planning_depth: "full" },
+    profiles: [
+      { profile_name: "plan", profile_version: 1, planning_depth: "full", stages_json: JSON.stringify(["scan", "rri", "rri_t_scenarios", "vision", "blueprint", "contracts", "task_graph"]), content_hash: "hash-1" },
+    ],
+  }));
+  assert.ok(profile.resolved);
+  assert.ok(profile.stages.includes("rri_t_scenarios"));
+  assert.deepEqual(profile.stages, ["scan", "rri", "rri_t_scenarios", "vision", "blueprint", "contracts", "task_graph"]);
+});
+
+// Supplementary carve-out (OB-F1-7): rri_t_scenarios never produces an
+// approval checkpoint, so dispatching the next planning stage (vision) must
+// not be blocked as "missing rri_t_scenarios" — the primer skips the
+// supplementary stage and the handoff predecessor is the approved RRI.
+test("vision dispatch with a profile containing rri_t_scenarios is not blocked by the supplementary stage", () => {
+  const stages = ["scan", "rri", "rri_t_scenarios", "vision", "blueprint", "contracts", "task_graph"];
+  const doc = {
+    work_item: { id: "wi-rri-t", type: "epic", title: "Aggregate" },
+    checkpoints: [
+      { stage: "scan", artifact_id: "wia-scan", artifact_revision: 1, content_hash: "h-scan", decision_type: "accepted" },
+      { stage: "rri", artifact_id: "wia-rri", artifact_revision: 2, content_hash: "h-rri", decision_type: "approved" },
+    ],
+    artifacts: [
+      { id: "wia-scan", stage: "scan", revision: 1, content_hash: "h-scan", content: "<scan/>" },
+      { id: "wia-rri", stage: "rri", revision: 2, content_hash: "h-rri", content: JSON.stringify({ project_name: "P", generated: "2026-01-01" }) },
+    ],
+  };
+  const primer = planPrimerContext(doc, stages, "vision");
+  assert.deepEqual(primer.missing, []);
+  assert.deepEqual(primer.digests.map((digest) => digest.stage), ["scan", "rri"]);
+  assert.equal(predecessorCheckpointFor(doc, "vision", stages)?.artifact_id, "wia-rri");
+  // The other stagePrompt planning gate also tolerates the supplementary stage.
+  gateOpenP0P1RriQuestions(doc, stages, "vision", "wi-rri-t");
+  assert.ok(SUPPLEMENTARY_PLANNING_STAGES.includes("rri_t_scenarios"));
+});
+
+// Persisted-profile constraint: malformed stage arrays fail closed — the whole
+// profile is rejected (resolved:false, deterministic fallback) instead of
+// being filtered or preserved out of canonical order.
+test("resolvePlanProfile rejects malformed persisted stage orders instead of filtering them", () => {
+  const item = { id: "wi-bad-profile", type: "epic", parent_id: "", planning_depth: "full" };
+  const resolveWith = (stages: unknown) => resolvePlanProfile(normalizePipelineData({
+    work_item: item,
+    profiles: [
+      { profile_name: "plan", profile_version: 1, planning_depth: "full", stages_json: JSON.stringify(stages), content_hash: "hash-1" },
+    ],
+  }));
+  for (const malformed of [["vision", "scan"], ["scan", "nonsense", "rri"], ["scan", "scan", "rri"], ["rri", "rri_t_scenarios", "scan"]]) {
+    const profile = resolveWith(malformed);
+    assert.equal(profile.resolved, false, `profile ${JSON.stringify(malformed)} must be rejected`);
+    assert.deepEqual(profile.stages, planStagesForProfile(item.type, item.parent_id, "full"));
+  }
+  // A canonical-order subset (e.g. the standalone depth) still resolves.
+  const subset = resolveWith(["scan", "rri", "rri_t_scenarios", "task_graph"]);
+  assert.ok(subset.resolved);
+  assert.deepEqual(subset.stages, ["scan", "rri", "rri_t_scenarios", "task_graph"]);
+});
 
 test("worker and reviewer reports require strict XML envelopes", () => {
   const worker = `<completion_report tip_id="tip-1" version="1" status="done"><files_changed>None</files_changed><test_results>go test ./... PASS</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`;

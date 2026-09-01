@@ -89,12 +89,33 @@ function validateRriScopeSections(report: Partial<RriReport>): void {
   }
 }
 
+// Marker-gated required-array parity with the Go validator (OB-F1-7): marked
+// reports must carry every core array, and the failure names the missing
+// section exactly like the Go validator; legacy reports keep their pre-marker
+// tolerance, with absent arrays defaulting to empty like Go nil slices.
+const RRI_CORE_SECTIONS = ["requirements_matrix", "auto_answered", "decisions_log", "open_questions"] as const;
+
+function validateRriCoreSections(report: Partial<RriReport>, marked: boolean): void {
+  const record = report as Record<string, unknown>;
+  for (const section of RRI_CORE_SECTIONS) {
+    const value = record[section];
+    if (value === undefined || value === null) {
+      if (marked) throw new Error(`marked RRI report is missing the ${section} section`);
+      record[section] = [];
+      continue;
+    }
+    if (!Array.isArray(value)) throw new Error("RRI report is missing one of the required sections");
+  }
+}
+
 export function parseRriReportJson(content: string): RriReport {
   const report = JSON.parse(content) as Partial<RriReport>;
+  const marked = isMarkedRriReport(report);
   if ((report.rri_policy_version ?? 1) > 2) throw new Error(`RRI rri_policy_version ${report.rri_policy_version} is unsupported`);
-  if (!report.project_name || !report.generated || !Array.isArray(report.requirements_matrix) || !Array.isArray(report.auto_answered) || !Array.isArray(report.decisions_log) || !Array.isArray(report.open_questions)) {
+  if (!report.project_name || !report.generated) {
     throw new Error("RRI report is missing one of the required sections");
   }
+  validateRriCoreSections(report, marked);
   const required = (report.requirements_matrix as RriReport["requirements_matrix"]).every((row) => row && row.req_id && row.requirement && row.source && row.priority && row.persona);
   const autoAnswered = (report.auto_answered as RriReport["auto_answered"]).every((row) => row && row.topic && row.details && row.resolution);
   const decisions = (report.decisions_log as RriReport["decisions_log"]).every((row) => row && row.decision && row.options_considered && row.chosen && row.rationale);

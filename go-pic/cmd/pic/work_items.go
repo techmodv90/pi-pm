@@ -963,6 +963,26 @@ func validateRriReport(report rriReport) error {
 	if strings.TrimSpace(report.ProjectName) == "" || strings.TrimSpace(report.Generated) == "" {
 		return errors.New("RRI report requires project_name and generated")
 	}
+	// Marker-gated required-array parity (OB-F1-7): marked reports must carry
+	// every core array and the failure names the missing section exactly like
+	// the TypeScript validator; legacy reports keep their pre-marker tolerance
+	// for absent sections (nil slices stay valid). A missing array unmarshals
+	// to nil, so nil is the rejected state.
+	if report.PolicyVersion >= 2 {
+		for _, missing := range []struct {
+			present bool
+			name    string
+		}{
+			{report.RequirementsMatrix != nil, "requirements_matrix"},
+			{report.AutoAnswered != nil, "auto_answered"},
+			{report.DecisionsLog != nil, "decisions_log"},
+			{report.OpenQuestions != nil, "open_questions"},
+		} {
+			if !missing.present {
+				return fmt.Errorf("marked RRI report is missing the %s section", missing.name)
+			}
+		}
+	}
 	for _, row := range report.RequirementsMatrix {
 		if row.ReqID == "" || row.Requirement == "" || row.Source == "" || row.Priority == "" || row.Persona == "" {
 			return errors.New("RRI requirements_matrix rows require req_id, requirement, source, priority, and persona")
