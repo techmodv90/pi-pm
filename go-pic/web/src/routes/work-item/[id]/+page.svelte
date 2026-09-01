@@ -58,6 +58,18 @@
   function openItem(itemId: string) { goto(resolve('/work-item/[id]', { id: itemId }) + `?projectId=${projectId}`); }
   function value(row: Record<string, unknown>, key: string): string { return row[key] == null ? '' : String(row[key]); }
   function date(raw: string): string { return raw ? new Date(raw.replace(' ', 'T')).toLocaleString() : '—'; }
+
+  // routingEvents payloads arrive as JSON text; parse defensively so a foreign
+  // or malformed writer renders as empty instead of breaking the page.
+  function routingMissing(raw: unknown): string {
+    if (typeof raw !== 'string' || !raw) return '';
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      return Array.isArray(parsed['missing_families']) && parsed['missing_families'].length
+        ? `Missing: ${(parsed['missing_families'] as unknown[]).map(String).join(', ')}`
+        : '';
+    } catch { return ''; }
+  }
 </script>
 
 <svelte:head><title>{detail?.workItem.title || 'Work Item'} - pic task system</title></svelte:head>
@@ -110,6 +122,8 @@
   </div>
 
   <section class="detail-section"><div class="section-heading"><h3>Instruction Packs</h3><span>{detail.instructionPacks.length}</span></div>{#if detail.instructionPacks.length === 0}<p class="empty-state compact">No instruction packs.</p>{:else}<div class="artifact-table">{#each detail.instructionPacks as row (value(row, 'id'))}<div><strong>Version {value(row, 'version')}</strong><span class="status-badge {value(row, 'status')}">{value(row, 'status')}</span><code>{value(row, 'content_hash')}</code></div>{/each}</div>{/if}</section>
+
+  <section class="detail-section"><div class="section-heading"><h3>Routing Events</h3><span>{detail.routingEvents.length}</span></div>{#if detail.routingEvents.length === 0}<p class="empty-state compact">No skill routing events recorded.</p>{:else}<ul class="artifact-list">{#each detail.routingEvents as row (value(row, 'createdAt') + value(row, 'summary'))}<li><strong>{date(value(row, 'createdAt'))}</strong><span>{value(row, 'summary')}</span>{#if routingMissing(row.payloadJson)}<small>{routingMissing(row.payloadJson)}</small>{/if}</li>{/each}</ul>{/if}</section>
 
   <div class="detail-columns">
     <section class="detail-section"><div class="section-heading"><h3>Completion Evidence</h3><span>{detail.completionReports.length}</span></div>{#if detail.completionReports.length === 0}<p class="empty-state compact">No completion reports.</p>{:else}<ul class="artifact-list">{#each detail.completionReports as row (value(row, 'id'))}<li><strong>{value(row, 'status')}</strong><span>{value(row, 'summary')}</span></li>{/each}</ul>{/if}</section>

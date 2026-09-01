@@ -15,6 +15,15 @@ export function normalizeRriTXml(output: string): string {
   return trimmed.slice(start, end + "</rri_t_persona>".length);
 }
 
+// RRI-T authoring boundary: LLM persona output routinely carries bare `&` in
+// scenario text (commands like `a && b`, prose like `R&D`), which is invalid XML
+// and fails the validator. Repair bare ampersands to `&amp;` before validation;
+// well-formed entities pass through untouched and structural malformation still
+// fails closed.
+export function repairBareAmpersands(xml: string): string {
+  return xml.replace(/&(?!(?:amp|lt|gt|quot|apos|#\d+|#x[0-9a-fA-F]+);)/g, "&amp;");
+}
+
 // RRI-T authoring boundary: a concrete procedure must pair a non-empty command
 // with a non-empty expected observable on opposite sides of the supported
 // `→`/`->` delimiter. An arrow alone or a blank side is not a concrete procedure.
@@ -28,7 +37,7 @@ export function hasConcreteProcedure(procedure: string): boolean {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function parseRriTPersonaResult(output: string, expectedPersona: string): any {
-  const xml = normalizeRriTXml(output);
+  const xml = repairBareAmpersands(normalizeRriTXml(output));
   // RRI-T authoring boundary: reject malformed XML before any per-scenario work so
   // a broken document fails closed instead of being leniently parsed.
   const validation = XMLValidator.validate(xml);

@@ -68,6 +68,50 @@ export interface WorkItemDetail {
   authorizations: Array<Record<string, unknown>>;
   completionReports: Array<Record<string, unknown>>;
   verificationReports: Array<Record<string, unknown>>;
+  routingEvents: SkillRoutingEventRow[];
+}
+
+export interface SkillRoutingFamilyCount {
+  family: string;
+  /** JSON array text of the appliesTo tokens that fired, e.g. '[".ts"]' */
+  matchedBy: string;
+  count: number;
+}
+
+export interface SkillRoutingMissingCount {
+  missing: string;
+  count: number;
+}
+
+export interface SkillRoutingEvent {
+  workItemId: string;
+  createdAt: string;
+  stage: string;
+  packId: string;
+  /** JSON array text */
+  selectedFamilies: string;
+  /** JSON array text of {id, matched_by} */
+  matchedFamilies: string;
+  /** JSON array text */
+  missingFamilies: string;
+  /** JSON array text */
+  evidenceSources: string;
+}
+
+export interface SkillRoutingEventRow {
+  event_type: string;
+  createdAt: string;
+  summary: string;
+  payloadJson: string;
+}
+
+export interface SkillRoutingStats {
+  projectId: string;
+  projectName: string;
+  totalEvents: number;
+  familyCounts: SkillRoutingFamilyCount[];
+  missingCounts: SkillRoutingMissingCount[];
+  recentEvents: SkillRoutingEvent[];
 }
 
 export interface WorkflowAnalyticsRow {
@@ -121,6 +165,7 @@ export interface ActivityRow {
 export const api = {
   projects: () => request<{ projects: Project[] }>('/api/projects'),
   projectSummary: (projectId: string) => request<ProjectSummary>(`/api/projects/${projectId}/summary`),
+  skillRouting: (projectId: string) => request<SkillRoutingStats>(`/api/projects/${projectId}/skill-routing`),
   workflowAnalytics: (projectId: string) => request<{ rows: WorkflowAnalyticsRow[] }>(`/api/projects/${projectId}/workflow-analytics`),
   workItems: (projectId: string, label = '') => request<{ workItems: WorkItem[] }>(`/api/projects/${projectId}/work-items${label ? `?label=${encodeURIComponent(label)}` : ''}`),
   workItemLabels: (projectId: string) => request<{ labels: WorkItemLabel[] }>(`/api/projects/${projectId}/work-items/labels`),

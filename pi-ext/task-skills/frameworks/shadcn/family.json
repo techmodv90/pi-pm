@@ -1,0 +1,9 @@
+{
+  "description": "shadcn-svelte component library guidance: adding, updating, and composing shadcn-svelte components, CLI usage, design-system presets, and project context for components.json projects. Vendored from ~/.agents/skills/shadcn-svelte (2026-08-30); refresh from upstream when it changes.",
+  "mandatorySkills": [
+    "shadcn-svelte"
+  ],
+  "appliesTo": {
+    "technologies": ["shadcn", "shadcn/ui", "shadcn-svelte"]
+  }
+}

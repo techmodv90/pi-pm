@@ -5,7 +5,7 @@
   import { page } from '$app/stores';
   import { currentProjectId, workItems, activeTab } from '$lib/stores.js';
   import { api } from '$lib/api.js';
-  import type { ProjectSummary, WorkItem, WorkItemDetail, WorkItemLabel, WorkflowItem, WorkflowAnalyticsRow } from '$lib/api.js';
+  import type { ProjectSummary, WorkItem, WorkItemDetail, WorkItemLabel, WorkflowItem, WorkflowAnalyticsRow, SkillRoutingStats } from '$lib/api.js';
 
   let pid = $state<string | null>(null);
   let summary = $state<ProjectSummary | null>(null);
@@ -13,6 +13,7 @@
   let readyIds = $state.raw<Set<string>>(new Set());
   let queues = $state.raw<Record<string, WorkflowItem[]>>({ review: [], verification: [], escalations: [], blocked: [] });
   let analytics = $state.raw<WorkflowAnalyticsRow[]>([]);
+  let routing = $state.raw<SkillRoutingStats | null>(null);
   let labels = $state.raw<WorkItemLabel[]>([]);
   let selectedId = $state('');
   let selectedDetail = $state.raw<WorkItemDetail | null>(null);
@@ -88,6 +89,33 @@
     if (next === 'analytics' && pid) {
       try { analytics = (await api.workflowAnalytics(pid)).rows; } catch { analytics = []; }
     }
+    if (next === 'routing' && pid) {
+      try { routing = await api.skillRouting(pid); } catch { routing = null; }
+    }
+  }
+
+  // The skill-routing endpoint returns JSON array columns as JSON text; parse
+  // defensively so a foreign or malformed writer renders as "—" instead of
+  // breaking the tab.
+  function jsonList(value: unknown): string[] {
+    if (typeof value !== 'string' || !value) return [];
+    try {
+      const parsed = JSON.parse(value);
+      return Array.isArray(parsed) ? parsed.map((entry) => String(entry)) : [];
+    } catch { return []; }
+  }
+
+  function tokenList(value: unknown): string {
+    const tokens = jsonList(value);
+    return tokens.length ? tokens.join(', ') : '—';
+  }
+
+  function familyMatches(value: unknown): string {
+    if (typeof value !== 'string' || !value) return '—';
+    try {
+      const parsed = JSON.parse(value) as Array<Record<string, unknown>>;
+      return parsed.length ? parsed.map((entry) => String(entry?.id ?? '')).join(', ') : '—';
+    } catch { return '—'; }
   }
 
   async function createItem() {
@@ -169,6 +197,7 @@
     <button class="tab" class:active={tab === 'work-items'} onclick={() => switchTab('work-items')}>Work Items</button>
     <button class="tab" class:active={tab === 'workflow'} onclick={() => switchTab('workflow')}>Workflow</button>
     <button class="tab" class:active={tab === 'analytics'} onclick={() => switchTab('analytics')}>Analytics</button>
+    <button class="tab" class:active={tab === 'routing'} onclick={() => switchTab('routing')}>Routing</button>
   </div>
 
   {#if tab === 'work-items'}
@@ -213,6 +242,43 @@
     </div>
   {:else if tab === 'workflow'}
     <div class="workflow-queues">{#each Object.entries(queues) as [name, rows] (name)}<section class="workflow-queue"><h3>{name} <span class="queue-count">{rows.length}</span></h3>{#if rows.length === 0}<p class="queue-empty">None</p>{:else}<ul class="queue-list">{#each rows as row (row.taskId)}<li><button onclick={() => openItem(row.taskId)}><strong>{row.taskTitle}</strong><span>{row.status}</span></button></li>{/each}</ul>{/if}</section>{/each}</div>
+  {:else if tab === 'routing'}
+    {#if !routing || routing.totalEvents === 0}
+      <p class="empty-state">No skill routing events recorded yet. Worker launches record one routing decision each once the scheduler runs.</p>
+    {:else}
+      <div class="stats-grid">
+        <div class="stat-card"><div class="stat-value">{routing.totalEvents}</div><div class="stat-label">Routing Events</div></div>
+        <div class="stat-card"><div class="stat-value">{routing.familyCounts.length}</div><div class="stat-label">Families Matched</div></div>
+        <div class="stat-card"><div class="stat-value">{routing.missingCounts.reduce((sum, row) => sum + row.count, 0)}</div><div class="stat-label">Missing Occurrences</div></div>
+      </div>
+      {#if routing.missingCounts.length}
+        <section class="routing-section"><h3>Missing families (matched but not selected — enforcement-decision signal)</h3>
+          <div class="table-scroll"><table><thead><tr><th>Family</th><th>Occurrences</th></tr></thead><tbody>
+            {#each routing.missingCounts as row (row.missing)}<tr><td>{row.missing}</td><td>{row.count}</td></tr>{/each}
+          </tbody></table></div>
+        </section>
+      {/if}
+      <section class="routing-section"><h3>Matched families</h3>
+        {#if routing.familyCounts.length === 0}<p class="empty-state compact">No family matches recorded.</p>
+        {:else}<div class="table-scroll"><table><thead><tr><th>Family</th><th>Matched by</th><th>Count</th></tr></thead><tbody>
+          {#each routing.familyCounts as row (`${row.family}:${row.matchedBy}`)}<tr><td>{row.family}</td><td>{tokenList(row.matchedBy)}</td><td>{row.count}</td></tr>{/each}
+        </tbody></table></div>{/if}
+      </section>
+      <section class="routing-section"><h3>Recent routing decisions</h3>
+        <div class="table-scroll"><table><thead><tr><th>Work Item</th><th>Stage</th><th>Selected</th><th>Matched</th><th>Missing</th><th>Evidence</th><th>At</th></tr></thead><tbody>
+          {#each routing.recentEvents as row (`${row.workItemId}:${row.createdAt}:${row.packId}`)}
+            <tr onclick={() => openItem(row.workItemId)} onkeydown={(event) => event.key === 'Enter' && openItem(row.workItemId)} role="button" tabindex="0">
+              <td>{row.workItemId}</td><td>{row.stage}</td>
+              <td>{jsonList(row.selectedFamilies).join(', ') || '—'}</td>
+              <td>{familyMatches(row.matchedFamilies)}</td>
+              <td>{jsonList(row.missingFamilies).join(', ') || '—'}</td>
+              <td>{jsonList(row.evidenceSources).join(', ') || '—'}</td>
+              <td>{date(row.createdAt)}</td>
+            </tr>
+          {/each}
+        </tbody></table></div>
+      </section>
+    {/if}
   {:else}
     {#if analytics.length === 0}<p class="empty-state">No workflow analytics recorded.</p>{:else}<div class="table-scroll"><table id="analytics-table"><thead><tr><th>Work Item</th><th>Stage</th><th>Status</th><th>Attempts</th><th>Outcome</th></tr></thead><tbody>{#each analytics as row (`${row.taskId}:${row.stage}`)}<tr onclick={() => openItem(row.taskId)} onkeydown={(event) => event.key === 'Enter' && openItem(row.taskId)} role="button" tabindex="0"><td>{row.taskTitle}</td><td>{row.stageLabel}</td><td>{row.status}</td><td>{row.attempts || '—'}</td><td>{row.outcome || '—'}</td></tr>{/each}</tbody></table></div>{/if}
   {/if}

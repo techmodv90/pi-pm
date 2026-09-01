@@ -2034,6 +2034,75 @@ func TestWebAPISupportsDashboardContract(t *testing.T) {
 	}
 }
 
+func TestWebAPISkillRouting(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	t.Setenv("HOME", home)
+	project := asObject(t, runPic(t, bin, root, home, "project", "current"))
+	projectID := project["id"].(string)
+
+	res := webRequest(t, http.MethodPost, "/api/projects/"+projectID+"/work-items", map[string]any{"type": "epic", "title": "Routing epic"})
+	if res.Code != http.StatusOK {
+		t.Fatalf("create epic: %d %s", res.Code, res.Body.String())
+	}
+	var epicBody map[string]any
+	_ = json.Unmarshal(res.Body.Bytes(), &epicBody)
+	epicID := epicBody["workItem"].(map[string]any)["id"].(string)
+	res = webRequest(t, http.MethodPost, "/api/projects/"+projectID+"/work-items", map[string]any{"type": "task", "parent_id": epicID, "title": "Routing task"})
+	if res.Code != http.StatusOK {
+		t.Fatalf("create task: %d %s", res.Code, res.Body.String())
+	}
+	var taskBody map[string]any
+	_ = json.Unmarshal(res.Body.Bytes(), &taskBody)
+	taskID := taskBody["workItem"].(map[string]any)["id"].(string)
+
+	payload := `{"stage":"worker","pack_id":"wip-1","selected_families":["languages/typescript"],"matched_families":[{"id":"languages/typescript","matched_by":[".ts"]},{"id":"frameworks/sveltekit","matched_by":["sveltekit"]}],"missing_families":["frameworks/sveltekit"],"evidence_sources":["pack_content","scan_artifact"]}`
+	runPic(t, bin, root, home, "workflow", "event-add", taskID, "skill_family_routing", "--actor-role", "scheduler", "--summary", "Skill family routing (worker): matched 2, missing 1", "--payload-json", payload)
+	// A malformed payload from a foreign writer must not break the aggregation
+	// (json_valid guards) nor appear in recent events.
+	runPic(t, bin, root, home, "workflow", "event-add", taskID, "skill_family_routing", "--actor-role", "scheduler", "--summary", "malformed payload", "--payload-json", "not json")
+
+	res = webRequest(t, http.MethodGet, "/api/projects/"+projectID+"/skill-routing", nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("skill-routing: %d %s", res.Code, res.Body.String())
+	}
+	var routing map[string]any
+	_ = json.Unmarshal(res.Body.Bytes(), &routing)
+	if routing["totalEvents"].(float64) != 2 {
+		t.Fatalf("totalEvents = %v", routing["totalEvents"])
+	}
+	missing := routing["missingCounts"].([]any)
+	if len(missing) != 1 || missing[0].(map[string]any)["missing"] != "frameworks/sveltekit" || missing[0].(map[string]any)["count"].(float64) != 1 {
+		t.Fatalf("missingCounts = %v", routing["missingCounts"])
+	}
+	families := routing["familyCounts"].([]any)
+	if len(families) != 2 {
+		t.Fatalf("familyCounts = %v", routing["familyCounts"])
+	}
+	recent := routing["recentEvents"].([]any)
+	if len(recent) != 1 {
+		t.Fatalf("recentEvents = %v", routing["recentEvents"])
+	}
+	latest := recent[0].(map[string]any)
+	if latest["stage"] != "worker" || latest["packId"] != "wip-1" || latest["workItemId"] != taskID {
+		t.Fatalf("recent event = %v", latest)
+	}
+	if latest["missingFamilies"] != `["frameworks/sveltekit"]` {
+		t.Fatalf("recent missingFamilies = %v", latest["missingFamilies"])
+	}
+
+	res = webRequest(t, http.MethodGet, "/api/projects/"+projectID+"/work-items/"+taskID, nil)
+	if res.Code != http.StatusOK {
+		t.Fatalf("detail: %d %s", res.Code, res.Body.String())
+	}
+	var detail map[string]any
+	_ = json.Unmarshal(res.Body.Bytes(), &detail)
+	events := detail["routingEvents"].([]any)
+	if len(events) != 1 {
+		t.Fatalf("routingEvents = %v", detail["routingEvents"])
+	}
+}
+
 func TestRemainingCommandGroups(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)

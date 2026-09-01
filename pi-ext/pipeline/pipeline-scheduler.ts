@@ -25,6 +25,7 @@ import { DEFAULT_GENERATED_FILES, filterGeneratedFiles, pipelineFailureResult, v
 import { REVIEW_FIX_ROUND_LIMIT, assertReviewFixChangedPatch, buildReviewFixCapBlock, reviewCycleCount } from "./corrections.ts";
 import { isPlanningStage, pipelineSpawnParams, planningStages, stageAgent, stagePrompt, predecessorCheckpointFor, startFullScanFanout, workerSessionPath } from "./stage-prompts.ts";
 import { assertRunContractCurrent, buildPipelineDryRun, canonicalReadyLeafIds, isResumableExecutionState, nextPipelineStage, normalizePipelineData, pipelineWorkerBlockReason, resolvePlanProfile, workerIntegrationCandidate, type PlanningProfileState } from "./stage-resolution.ts";
+import { evaluateSkillFamilyRouting, recordSkillRoutingEvent } from "./skill-routing.ts";
 
 export * from "./rri-t.ts";
 export * from "./report-parsing.ts";
@@ -526,6 +527,14 @@ export class PipelineScheduler {
         const runs = this.pipelineRuns(taskId);
         // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
         const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
+        // Observe-mode routing telemetry (skill-family-routing plan): record the
+        // routing evaluation for every worker/autofix launch without ever
+        // blocking it — enforcement is a follow-up gated on this data.
+        if (stage === "worker" || stage === "autofix") {
+          const routingPack = (data.instruction_packs || []).find((pack: { status?: string }) => pack.status === "active");
+          const scanEvidence = Array.isArray(data.scan_reports) && data.scan_reports.length ? [data.scan_reports[0]] : [];
+          recordSkillRoutingEvent(this.cwd, taskId, stage, routingPack?.id || "", evaluateSkillFamilyRouting(routingPack || {}, scanEvidence, { cwd: this.cwd }));
+        }
         if (stage === "worker" && currentFailedReview(runs, activePack)) {
           const cycle = reviewCycleCount(runs);
           if (cycle >= REVIEW_FIX_ROUND_LIMIT) {

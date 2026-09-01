@@ -461,7 +461,14 @@ func applyPipelineColumnMigrations(db schemaDB) error {
 	}
 	var pipelineSQL string
 	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='pipeline_runs'`).Scan(&pipelineSQL); err == nil && (!strings.Contains(pipelineSQL, "'rri'") || strings.Contains(pipelineSQL, "REFERENCES tasks(id)")) {
-		if err := rebuildSchemaTable(db, "pipeline_runs", pipelineRunsTableSQL); err != nil {
+		// Retired legacy stage vocabulary (scan,worker,review,qa,verify) violates
+	// the canonical stage CHECK, so translate it during the rebuild copy.
+	// Distinct targets (qa→autofix, verify→review) preserve
+	// UNIQUE(task_id, stage, attempt) for databases that carried both.
+	pipelineStageExprs := map[string]string{
+		"stage": `CASE stage WHEN 'qa' THEN 'autofix' WHEN 'verify' THEN 'review' ELSE stage END`,
+	}
+	if err := rebuildSchemaTable(db, "pipeline_runs", pipelineRunsTableSQL, pipelineStageExprs); err != nil {
 			return err
 		}
 	}

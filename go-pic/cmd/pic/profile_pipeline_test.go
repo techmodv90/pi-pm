@@ -265,6 +265,54 @@ func TestPipelineStageInvalidPredecessorRejected(t *testing.T) {
 	}
 }
 
+func TestLegacyPipelineStageVocabularyMigrated(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	// Build a legacy pipeline_runs with the retired stage vocabulary
+	// (scan,worker,review,qa,verify); the canonical CHECK rejects 'qa'/'verify',
+	// so migration must translate them instead of failing the rebuild copy.
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TABLE work_items (id TEXT PRIMARY KEY, type TEXT NOT NULL, parent_id TEXT, title TEXT NOT NULL, description TEXT DEFAULT '', status TEXT DEFAULT 'open', priority TEXT DEFAULT 'medium', deferred INTEGER NOT NULL DEFAULT 0, claimed_at TEXT DEFAULT '', claimed_by TEXT DEFAULT '', review_status TEXT DEFAULT 'pending', review_notes TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO work_items(id,type,title,status) VALUES('wi-legacy','task','Legacy','in_progress');
+		CREATE TABLE pipeline_runs (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','worker','review','qa','verify')), attempt INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'claimed', lease_token TEXT NOT NULL, lease_expires_at TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')));
+		INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at) VALUES
+			('pr-legacy-qa','wi-legacy','qa',1,'failed','lease-qa',datetime('now','+1 hour')),
+			('pr-legacy-verify','wi-legacy','verify',2,'failed','lease-verify',datetime('now','+1 hour'));	`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if err := initDB(dbPath); err != nil {
+		t.Fatalf("migration failed on legacy stage vocabulary: %v", err)
+	}
+	read, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer read.Close()
+	var stage string
+	if err := read.QueryRow(`SELECT stage FROM pipeline_runs WHERE id='pr-legacy-qa'`).Scan(&stage); err != nil {
+		t.Fatalf("legacy qa run lost after migration: %v", err)
+	}
+	if stage != "autofix" {
+		t.Fatalf("legacy qa stage = %q, want autofix", stage)
+	}
+	if err := read.QueryRow(`SELECT stage FROM pipeline_runs WHERE id='pr-legacy-verify'`).Scan(&stage); err != nil {
+		t.Fatalf("legacy verify run lost after migration: %v", err)
+	}
+	if stage != "review" {
+		t.Fatalf("legacy verify stage = %q, want review", stage)
+	}
+	rows, err := queryMaps(read, `SELECT * FROM pipeline_runs WHERE task_id=?`, "wi-legacy")
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("legacy runs not fully preserved: rows=%d err=%v", len(rows), err)
+	}
+}
+
 func TestLegacyPipelineRowsRemainReadableAfterMigration(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	// Build a legacy schema that predates the profile columns.

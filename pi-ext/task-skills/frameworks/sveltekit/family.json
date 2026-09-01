@@ -5,7 +5,7 @@
     "sveltekit-svelte-core-bestpractices"
   ],
   "appliesTo": {
-    "technologies": ["svelte", "sveltekit", "svelte 5"],
-    "fileExtensions": [".svelte"]
+    "technologies": ["svelte", "sveltekit", "svelte 5", "svelte.config"],
+    "fileExtensions": [".svelte", ".svelte.ts"]
   }
 }

@@ -8,7 +8,7 @@
     "golang-safety"
   ],
   "appliesTo": {
-    "technologies": ["golang", "go language"],
+    "technologies": ["golang", "go language", "go.mod", "go.work", "go test", "gofmt", "golang.org"],
     "fileExtensions": [".go"]
   }
 }

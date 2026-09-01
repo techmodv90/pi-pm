@@ -192,7 +192,10 @@ func ownerColumnNotNull(db schemaDB, table, column string) bool {
 // shared columns, and verifies the row count before dropping the old table.
 // The migration runner holds foreign_keys=OFF and legacy_alter_table=ON on the
 // connection for the whole step, so no per-call pragma juggling is needed.
-func rebuildSchemaTable(db schemaDB, table, createSQL string) error {
+// columnExprs (variadic, at most one map) optionally overrides the copied
+// expression for specific columns, e.g. to translate retired legacy values
+// that would violate the rebuilt table's CHECK constraints.
+func rebuildSchemaTable(db schemaDB, table, createSQL string, columnExprs ...map[string]string) error {
 	old := table + "__workflow_migration"
 	if tableExists(db, old) {
 		return fmt.Errorf("incomplete workflow migration: %s already exists", old)
@@ -219,15 +222,25 @@ func rebuildSchemaTable(db schemaDB, table, createSQL string) error {
 	for _, column := range oldColumns {
 		oldSet[column] = true
 	}
-	shared := []string{}
+	var exprs map[string]string
+	if len(columnExprs) > 0 {
+		exprs = columnExprs[0]
+	}
+	var names, exprsOut []string
 	for _, column := range newColumns {
-		if oldSet[column] {
-			shared = append(shared, `"`+strings.ReplaceAll(column, `"`, `""`)+`"`)
+		if !oldSet[column] {
+			continue
+		}
+		quoted := `"` + strings.ReplaceAll(column, `"`, `""`) + `"`
+		names = append(names, quoted)
+		if expr, ok := exprs[column]; ok {
+			exprsOut = append(exprsOut, expr)
+		} else {
+			exprsOut = append(exprsOut, quoted)
 		}
 	}
-	if len(shared) > 0 {
-		columns := strings.Join(shared, ",")
-		if _, err = db.Exec(`INSERT INTO "` + table + `" (` + columns + `) SELECT ` + columns + ` FROM "` + old + `"`); err != nil {
+	if len(names) > 0 {
+		if _, err = db.Exec(`INSERT INTO "` + table + `" (` + strings.Join(names, ",") + `) SELECT ` + strings.Join(exprsOut, ",") + ` FROM "` + old + `"`); err != nil {
 			return err
 		}
 	}

@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
-import { listSkillFamilies, resolveSkillDirectories, validateInstructionPackSkillFamilies, validateSkillFamilies, validateTaskPlanSkillFamilies } from "./skills.ts";
+import { evaluateSkillFamilyMatches, listSkillFamilies, resolveSkillDirectories, validateInstructionPackSkillFamilies, validateSkillFamilies, validateTaskPlanSkillFamilies } from "./skills.ts";
 
 function skill(root: string, relative: string, name: string, bytes = 0): string {
   const dir = join(root, relative);
@@ -102,6 +102,37 @@ test("Task Plan validation matches each node against family file-extension metad
   assert.throws(() => validateTaskPlanSkillFamilies(plan, options), /T01 missing applicable skill families: frameworks\/sveltekit/);
 });
 
+test("evaluateSkillFamilyMatches reports which appliesTo tokens fired", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "task-skills-"));
+  const global = join(fixture, "global");
+  family(global, "frameworks/sveltekit", [], { technologies: ["sveltekit", "svelte 5"], fileExtensions: [".svelte"] });
+  family(global, "languages/typescript", [], { technologies: ["typescript"], fileExtensions: [".ts"] });
+  const options = { globalRoot: global, packagedRoot: join(fixture, "packaged"), projectRoot: null };
+  assert.deepEqual(
+    evaluateSkillFamilyMatches({ files: ["src/App.svelte"], goal: "Migrate the SvelteKit store to Svelte 5 runes" }, options),
+    [{ id: "frameworks/sveltekit", matchedBy: ["sveltekit", "svelte 5", ".svelte"] }],
+  );
+});
+
+test("extension tokens match with a trailing boundary", () => {
+  const fixture = mkdtempSync(join(tmpdir(), "task-skills-"));
+  const global = join(fixture, "global");
+  family(global, "languages/golang", [], { fileExtensions: [".go"] });
+  const options = { globalRoot: global, packagedRoot: join(fixture, "packaged"), projectRoot: null };
+  const ids = (evidence: unknown) => evaluateSkillFamilyMatches(evidence, options).map(({ id }) => id);
+  assert.deepEqual(ids({ files: ["cmd/pic/main.go"] }), ["languages/golang"]);
+  assert.deepEqual(ids({ files: ["cmd/pic/main.go:42"] }), ["languages/golang"]);
+  assert.deepEqual(ids({ files: ["assets/logo.gone", "styles/x.gob"] }), []);
+});
+
+test("packaged family tokens route on manifests and build files", () => {
+  const packagedRoot = fileURLToPath(new URL("../task-skills", import.meta.url));
+  const ids = (evidence: unknown) => evaluateSkillFamilyMatches(evidence, { packagedRoot, globalRoot: join(tmpdir(), "missing-task-skills"), projectRoot: null }).map(({ id }) => id);
+  assert.ok(ids({ files: ["go.mod"], goal: "harden the CLI" }).includes("languages/golang"));
+  assert.ok(ids({ files: ["tsconfig.json"] }).includes("languages/typescript"));
+  assert.ok(ids({ files: ["src/routes/+page.svelte"] }).includes("frameworks/sveltekit"));
+});
+
 test("packaged SvelteKit and TypeScript families resolve", () => {
   const packagedRoot = fileURLToPath(new URL("../task-skills", import.meta.url));
   const catalog = listSkillFamilies({ packagedRoot, globalRoot: join(tmpdir(), "missing-task-skills"), projectRoot: null });
@@ -109,4 +140,15 @@ test("packaged SvelteKit and TypeScript families resolve", () => {
   assert.ok(catalog.some(({ id }) => id === "languages/typescript"));
   const resolved = resolveSkillDirectories({ baselineSkills: [], skillFamilies: ["frameworks/sveltekit", "languages/typescript"], packagedRoot, globalRoot: join(tmpdir(), "missing-task-skills"), projectRoot: null });
   assert.equal(resolved.length, 2);
+});
+
+test("packaged shadcn family resolves and routes on shadcn technology tokens only", () => {
+  const packagedRoot = fileURLToPath(new URL("../task-skills", import.meta.url));
+  const catalog = listSkillFamilies({ packagedRoot, globalRoot: join(tmpdir(), "missing-task-skills"), projectRoot: null });
+  assert.ok(catalog.some(({ id }) => id === "frameworks/shadcn"));
+  const resolved = resolveSkillDirectories({ baselineSkills: [], skillFamilies: ["frameworks/shadcn"], packagedRoot, globalRoot: join(tmpdir(), "missing-task-skills"), projectRoot: null });
+  assert.equal(resolved.length, 1);
+  const ids = (evidence: unknown) => evaluateSkillFamilyMatches(evidence, { packagedRoot, globalRoot: join(tmpdir(), "missing-task-skills"), projectRoot: null }).map(({ id }) => id);
+  assert.ok(ids({ goal: "Add a dialog component with the shadcn-svelte CLI" }).includes("frameworks/shadcn"));
+  assert.ok(!ids({ files: ["src/App.svelte"], goal: "Rework the runes store" }).includes("frameworks/shadcn"));
 });

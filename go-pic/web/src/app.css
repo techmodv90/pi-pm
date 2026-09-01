@@ -1017,6 +1017,9 @@ code { overflow-wrap: anywhere; color: var(--text-muted); font-size: 11px; }
 .text-button { padding: 0; border: 0; background: none; color: var(--accent); cursor: pointer; text-align: left; }
 .action-section { margin-top: 4px; }
 
+.routing-section { margin: 20px 0; }
+.routing-section h3 { margin-bottom: 10px; }
+
 @media (max-width: 760px) {
   #header { height: auto; min-height: 48px; align-items: flex-start; }
   .header-left { align-items: flex-start; flex-direction: column; gap: 6px; }

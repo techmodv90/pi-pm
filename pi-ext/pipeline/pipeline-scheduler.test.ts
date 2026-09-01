@@ -420,8 +420,19 @@ test("planning pipeline stages use planning agents and prompts without an active
   assert.match(prompts, /stage === "contracts".*Contract drafting is Contractor-owned/);
   assert.match(prompts, /task_graph: "task-planner"/);
   assert.match(prompts, /if \(isPlanningStage\(stage\)\) \{/);
-  assert.match(prompts, /planningHandoff\(stage, doc, taskId\)/);
+  assert.match(prompts, /planningHandoff\(stage, doc, taskId, listSkillFamilies\(\{ cwd \}\)\)/);
   assert.match(source, /if \(planningStages\.includes\(workflow\.next_stage\)\)[\s\S]+launchGroup\(workflow\.next_stage, \[rootTaskId\]\)/);
+});
+
+test("worker launches record an observe-mode skill family routing event without blocking", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /recordSkillRoutingEvent\(this\.cwd, taskId, stage, routingPack\?\.id \|\| "", evaluateSkillFamilyRouting\(routingPack \|\| \{\}, scanEvidence, \{ cwd: this\.cwd \}\)\)/);
+  const routing = readFileSync(new URL("./skill-routing.ts", import.meta.url), "utf8");
+  assert.match(routing, /event-add/, "telemetry reuses the existing pic workflow event-add command");
+  assert.match(routing, /"skill_family_routing"/);
+  assert.doesNotMatch(routing, /throw new Error/, "observe mode: telemetry never blocks a launch");
+  assert.match(routing, /pack_id: packId/);
+  assert.match(routing, /matched_by: match\.matchedBy/);
 });
 
 test("completed planning stages pause for main-agent synthesis instead of launching Scan", () => {
@@ -462,6 +473,9 @@ test("RRI-T persona results accept the six-field authoring contract and ignore l
   // malformed XML fails closed instead of being leniently parsed
   assert.throws(() => parseRriTPersonaResult(valid.replace("</scenario></scenarios>", "</scenarios>"), "QA / Tester"), /invalid XML/);
   assert.throws(() => parseRriTPersonaResult("no document at all", "QA / Tester"), /one rri_t_persona document/);
+  // bare ampersands in persona prose/commands are repaired, real entities pass through
+  assert.equal(parseRriTPersonaResult(valid.replace("inline error is shown", "error for R&D && release"), "QA / Tester").scenarios[0].procedure.includes("R&D && release"), true);
+  assert.equal(parseRriTPersonaResult(valid.replace("inline error is shown", "saved as &amp;lt;tag&amp;gt;"), "QA / Tester").scenarios[0].procedure.includes("&lt;tag&gt;"), true);
 });
 
 test("RRI-T merge keeps one deterministic scenario per identity and preserves author persona metadata", () => {

@@ -7,6 +7,7 @@ import { finalAssistantText, startSubagent, type SubagentHandle } from "../subag
 import type { SubagentResult } from "../subagent/types.ts";
 import { parsePipelineRuns, type PipelineStage } from "./pipeline-types.ts";
 import { renderCanonicalInstructionPackXml } from "./instruction-pack-xml.ts";
+import { listSkillFamilies, type SkillFamilyCatalogEntry } from "../subagent/skills.ts";
 import { buildAutofixContext, buildEscalationResolutionContext, buildOwnerRejectionContext, buildTargetedReReviewInstructions, buildWorkerCorrectionContext, reviewCycleCount } from "./corrections.ts";
 import { currentFailedReview, isMutationStage } from "./report-parsing.ts";
 import { buildStagePrimer, buildWorkProgressLedger, type StagePrimerDigest } from "../tasking/work-item-prompts.ts";
@@ -162,7 +163,7 @@ export function stageAgent(stage: PipelineStage): string {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, taskId: string): string {
+export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, taskId: string, skillFamilyCatalog: SkillFamilyCatalogEntry[] = []): string {
   const requiredStages = stage === "blueprint" ? ["scan", "rri", "vision"] : ["scan", "rri", "vision", "blueprint", "contracts"];
   const checkpoints = (Array.isArray(raw?.checkpoints) ? raw.checkpoints : [])
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
@@ -182,7 +183,13 @@ export function planningHandoff(stage: "blueprint" | "task_graph", raw: any, tas
     instructions: "Load each approved context artifact with task_manager action load_planning_artifact before planning. Do not use historical revisions.",
   };
   const encoded = JSON.stringify(payload).replaceAll("]]>", "]] ]>");
-  return `<${stage}_handoff schema_version="2" work_item_id="${taskId}"><approved_context><![CDATA[${encoded}]]></approved_context></${stage}_handoff>`;
+  // The catalog travels beside approved_context (not inside it) so the handoff
+  // schema stays unchanged: the planner cannot select skill families it cannot
+  // see, and additions here are prompt-only, never parsed back.
+  const catalogSection = skillFamilyCatalog.length
+    ? `<skill_family_catalog><![CDATA[${JSON.stringify(skillFamilyCatalog.map(({ id, description }) => ({ id, description }))).replaceAll("]]>", "]] ]>")}]]></skill_family_catalog>`
+    : "";
+  return `<${stage}_handoff schema_version="2" work_item_id="${taskId}"><approved_context><![CDATA[${encoded}]]></approved_context>${catalogSection}</${stage}_handoff>`;
 }
 
 // Planning profile constraint: a handoff must name the approved checkpoint of
@@ -217,7 +224,7 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
         predecessor_checkpoint: checkpoint ? { stage: String(checkpoint.stage), artifact_id: String(checkpoint.artifact_id || ""), artifact_revision: Number(checkpoint.artifact_revision || 1), content_hash: String(checkpoint.content_hash || "") } : undefined,
         approved_digests: primerContext.digests,
       });
-      const handoff = stage === "blueprint" || stage === "task_graph" ? planningHandoff(stage, doc, taskId) + "\n" : "";
+      const handoff = stage === "blueprint" || stage === "task_graph" ? planningHandoff(stage, doc, taskId, listSkillFamilies({ cwd })) + "\n" : "";
       return `${primer}\n${handoff}${buildWorkItemContinuePrompt({ work_item_id: taskId, next_stage: stage }, doc.work_item)}`;
     }
     const data = normalizePipelineData(doc);

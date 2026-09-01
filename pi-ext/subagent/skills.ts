@@ -25,7 +25,7 @@ interface FamilyManifest {
   };
 }
 
-interface CatalogOptions {
+export interface CatalogOptions {
   cwd?: string;
   packagedRoot?: string;
   globalRoot?: string;
@@ -120,7 +120,21 @@ function readManifest(directory: string): FamilyManifest {
   return manifest as FamilyManifest;
 }
 
-function matchingSkillFamilies(evidence: unknown, options: CatalogOptions): string[] {
+export interface SkillFamilyMatch {
+  id: string;
+  matchedBy: string[];
+}
+
+// Extension tokens (".go") require a trailing boundary so ".go" cannot fire
+// inside "foo.gone" or "x.gob"; word tokens keep substring semantics across the
+// lowercased evidence text ("SvelteKit" matches "sveltekit").
+function evidenceTokenMatches(text: string, token: string): boolean {
+  const needle = token.toLowerCase();
+  if (!needle.startsWith(".")) return text.includes(needle);
+  return new RegExp(`${needle.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?![a-z0-9-])`).test(text);
+}
+
+export function evaluateSkillFamilyMatches(evidence: unknown, options: CatalogOptions = {}): SkillFamilyMatch[] {
   const text = JSON.stringify(evidence).toLowerCase();
   const manifests = new Map<string, FamilyManifest>();
   const packagedRoot = options.packagedRoot ?? fileURLToPath(new URL("../task-skills", import.meta.url));
@@ -138,14 +152,15 @@ function matchingSkillFamilies(evidence: unknown, options: CatalogOptions): stri
     };
     visit(root);
   }
-  return [...manifests.entries()].filter(([, manifest]) =>
-    (manifest.appliesTo?.technologies || []).some((term) => text.includes(term.toLowerCase()))
-    || (manifest.appliesTo?.fileExtensions || []).some((extension) => text.includes(extension.toLowerCase())))
-    .map(([id]) => id).sort();
+  return [...manifests.entries()].map(([id, manifest]) => ({
+    id,
+    matchedBy: [...(manifest.appliesTo?.technologies || []), ...(manifest.appliesTo?.fileExtensions || [])]
+      .filter((token) => evidenceTokenMatches(text, token)),
+  })).filter((match) => match.matchedBy.length).sort((a, b) => a.id.localeCompare(b.id));
 }
 
 function requireApplicableFamilies(selected: string[], evidence: unknown, options: CatalogOptions, prefix = ""): void {
-  const missing = matchingSkillFamilies(evidence, options).filter((family) => !selected.includes(family));
+  const missing = evaluateSkillFamilyMatches(evidence, options).map((match) => match.id).filter((family) => !selected.includes(family));
   if (missing.length) throw new Error(`${prefix}missing applicable skill families: ${missing.join(", ")}`);
 }
 

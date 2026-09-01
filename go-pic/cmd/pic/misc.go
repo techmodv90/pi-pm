@@ -320,7 +320,8 @@ func workItemDetailForWeb(db *sql.DB, id string) (map[string]any, bool) {
 	verifications, _ := queryMaps(db, `SELECT * FROM work_item_verification_reports WHERE work_item_id=? ORDER BY datetime(created_at) DESC,rowid DESC`, id)
 	authorizations, _ := queryMaps(db, `SELECT * FROM implementation_authorizations WHERE work_item_id=? ORDER BY created_at DESC,id DESC`, id)
 	ready, _ := rowExists(db, `SELECT 1 FROM work_items wi WHERE wi.id=? AND `+workItemReadySQL, id)
-	return map[string]any{"workItem": item, "ready": ready, "children": children, "descendants": descendants, "dependencies": dependencies, "gates": gates, "artifacts": artifacts, "checkpoints": checkpoints, "instructionPacks": packs, "authorizations": authorizations, "completionReports": completions, "verificationReports": verifications}, true
+	routingEvents, _ := queryMaps(db, `SELECT event_type, created_at AS createdAt, summary, payload_json AS payloadJson FROM work_item_events WHERE work_item_id=? AND event_type='skill_family_routing' AND json_valid(payload_json) ORDER BY datetime(created_at) DESC, rowid DESC LIMIT 10`, id)
+	return map[string]any{"workItem": item, "ready": ready, "children": children, "descendants": descendants, "dependencies": dependencies, "gates": gates, "artifacts": artifacts, "checkpoints": checkpoints, "instructionPacks": packs, "authorizations": authorizations, "completionReports": completions, "verificationReports": verifications, "routingEvents": routingEvents}, true
 }
 
 func handleAPI(w http.ResponseWriter, r *http.Request) {
@@ -472,6 +473,8 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		writeJSONResponse(w, map[string]any{"workItem": item})
 	case len(parts) == 4 && parts[3] == "summary" && r.Method == http.MethodGet:
 		writeJSONResponse(w, projectSummary(db, project))
+	case len(parts) == 4 && parts[3] == "skill-routing" && r.Method == http.MethodGet:
+		writeJSONResponse(w, skillRoutingForWeb(db, project))
 	case len(parts) == 4 && parts[3] == "activity" && r.Method == http.MethodGet:
 		rows, _ := queryMaps(db, `SELECT sa.session_id, sa.task_id AS work_item_id, COALESCE(wi.title, '') AS work_item_title, sa.status, sa.last_skill, sa.updated_at FROM session_activity sa LEFT JOIN work_items wi ON wi.id=sa.task_id WHERE sa.status='active' AND sa.task_id!='' AND datetime(sa.updated_at)>datetime('now','-30 seconds') ORDER BY datetime(sa.updated_at) DESC`)
 		if rows == nil {
@@ -535,6 +538,41 @@ func queryKeyCounts(db *sql.DB, query string) (map[string]int, error) {
 		counts[key] = toInt(row["count"])
 	}
 	return counts, nil
+}
+
+// skillRoutingForWeb aggregates the scheduler's observe-mode skill_family_routing
+// telemetry for the dashboard Routing tab. Every json_extract is guarded with
+// json_valid via CASE (circuit-breaker precedent) so a malformed payload from
+// any writer can never abort the whole query; json_each over a NULL argument
+// simply yields no rows.
+func skillRoutingForWeb(db *sql.DB, project registryProject) map[string]any {
+	var total int
+	_ = db.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE event_type='skill_family_routing'`).Scan(&total)
+	matched, _ := queryMaps(db, `SELECT je.value->>'$.id' AS family, je.value->'$.matched_by' AS matchedBy, COUNT(*) AS count
+		FROM work_item_events, json_each(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.matched_families') END) je
+		WHERE event_type='skill_family_routing' GROUP BY 1,2 ORDER BY COUNT(*) DESC, family`)
+	missing, _ := queryMaps(db, `SELECT je.value AS missing, COUNT(*) AS count
+		FROM work_item_events, json_each(CASE WHEN json_valid(payload_json) THEN json_extract(payload_json,'$.missing_families') END) je
+		WHERE event_type='skill_family_routing' GROUP BY 1 ORDER BY COUNT(*) DESC, missing`)
+	recent, _ := queryMaps(db, `SELECT work_item_id AS workItemId, created_at AS createdAt,
+			json_extract(CASE WHEN json_valid(payload_json) THEN payload_json END,'$.stage') AS stage,
+			json_extract(CASE WHEN json_valid(payload_json) THEN payload_json END,'$.pack_id') AS packId,
+			json_extract(CASE WHEN json_valid(payload_json) THEN payload_json END,'$.selected_families') AS selectedFamilies,
+			json_extract(CASE WHEN json_valid(payload_json) THEN payload_json END,'$.matched_families') AS matchedFamilies,
+			json_extract(CASE WHEN json_valid(payload_json) THEN payload_json END,'$.missing_families') AS missingFamilies,
+			json_extract(CASE WHEN json_valid(payload_json) THEN payload_json END,'$.evidence_sources') AS evidenceSources
+		FROM work_item_events WHERE event_type='skill_family_routing' AND json_valid(payload_json)
+		ORDER BY datetime(created_at) DESC, rowid DESC LIMIT 50`)
+	if matched == nil {
+		matched = []map[string]any{}
+	}
+	if missing == nil {
+		missing = []map[string]any{}
+	}
+	if recent == nil {
+		recent = []map[string]any{}
+	}
+	return map[string]any{"projectId": project.ID, "projectName": project.Name, "totalEvents": total, "familyCounts": matched, "missingCounts": missing, "recentEvents": recent}
 }
 
 func webSearch(registry projectRegistry, query string) map[string]any {

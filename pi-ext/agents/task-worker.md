@@ -7,8 +7,8 @@ prompt_mode: replace
 inherit_context: false
 run_in_background: true
 output_transcript: true
-skills: test-first, verification-gate, testing-anti-patterns, ponytail, logging-best-practices, shadcn-svelte
-model: cliproxy/ds-4-flash
+skills: test-first, verification-gate, testing-anti-patterns, ponytail, logging-best-practices
+model: cliproxy/ox-alpha-free
 ---
 
 <role>

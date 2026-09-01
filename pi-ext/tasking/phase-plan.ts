@@ -129,7 +129,7 @@ export function hasPhasePlan(description = ""): boolean {
 export function buildTaskPlanTemplate(): string {
   return `## Task Plan
 
-The approved Blueprint must contain exactly one fenced \`task-plan-json\` block. Use schema version 3 for new implementation plans. Every node must declare \`skillFamilies\`, using [] when no family applies. Assign each node only the requirement keys it implements. Contract changes must use stable contract keys and approved structured replace, withdraw, or defer operations before materialization; prose precedence and free-form deviations do not resolve conflicts. Populate every field with approved Task-scoped content; use \`Not applicable: <specific reason>\` only when a section genuinely does not apply.
+The approved Blueprint must contain exactly one fenced \`task-plan-json\` block. Use schema version 3 for new implementation plans. Every node must declare \`skillFamilies\` chosen from the available skill family catalog (the \`<skill_family_catalog>\` section of the dispatch handoff when planning through the pipeline; \`pic\`'s packaged catalog otherwise), using [] when no family applies — the catalog id list is authoritative, and unknown ids are rejected. Assign each node only the requirement keys it implements. Contract changes must use stable contract keys and approved structured replace, withdraw, or defer operations before materialization; prose precedence and free-form deviations do not resolve conflicts. Populate every field with approved Task-scoped content; use \`Not applicable: <specific reason>\` only when a section genuinely does not apply.
 
 \`\`\`task-plan-json
 {
