@@ -23,6 +23,9 @@ test("worker and reviewer reports require strict XML envelopes", () => {
   assert.match(halfEscaped.markdown, /&lt;emission&gt;/);
   assert.throws(() => parseTaskCompletionReport(`${worker}\n${worker}`), /one completion_report XML/);
   assert.throws(() => parseTaskCompletionReport("**STATUS:** DONE"), /completion_report XML/);
+  // fast-xml-parser validate() returns a truthy error object on invalid XML; the
+  // strict !== true guard must reject raw unescaped ampersands (live pr-293abf12 case)
+  assert.throws(() => parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>None</files_changed><test_results>go test ./cmd/pic && go vet ./...</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`), /invalid XML/);
 
   const metaBlocked = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="blocked"><files_changed>None</files_changed><test_results>Not run</test_results><issues_discovered>Port unavailable</issues_discovered><deviations>None</deviations><suggestions>None</suggestions><failure_metadata>{"category":"ENVIRONMENTAL_CONSTRAINT","violating_variable":"API_PORT","runtime_value":"95317","system_error_code":"EADDRINUSE","evidence":"listen tcp :95317: bind: address already in use"}</failure_metadata></completion_report>`);
   assert.deepEqual(metaBlocked.failure_metadata, { category: "ENVIRONMENTAL_CONSTRAINT", violating_variable: "API_PORT", runtime_value: "95317", system_error_code: "EADDRINUSE", evidence: "listen tcp :95317: bind: address already in use" });
@@ -36,6 +39,7 @@ test("worker and reviewer reports require strict XML envelopes", () => {
   assert.deepEqual(parseReviewReport(passed), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
   assert.deepEqual(parseReviewReport(`Reviewer output:\n${passed}\nDone.`), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
   assert.throws(() => parseReviewReport("```review-report\n{\"status\":\"passed\"}\n```"), /review_report XML/);
+  assert.throws(() => parseReviewReport(`<review_report status="passed"><notes>go test && go vet passed</notes><findings></findings></review_report>`), /review report contains invalid XML/);
   assert.throws(() => parseReviewReport(`${passed}${passed}`), /review_report XML/);
 });
 

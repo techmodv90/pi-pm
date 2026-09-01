@@ -99,7 +99,7 @@ export function parseTaskCompletionReport(output: string): { status: "done" | "p
   const documents = [...output.matchAll(/<completion_report\b[\s\S]*?<\/completion_report>/g)].map((match) => match[0]);
   if (documents.length !== 1) throw new Error("worker output must contain one completion_report XML document");
   const document = documents[0]!.replace(/<([^<>\s]+)&gt;/g, "&lt;$1&gt;");
-  if (!XMLValidator.validate(document)) throw new Error("worker output contains invalid XML");
+  if (XMLValidator.validate(document) !== true) throw new Error("worker output contains invalid XML");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   let parsed: any;
   try {
@@ -174,7 +174,7 @@ export function parseReviewReport(output: string): { status: "passed" | "failed"
   const end = outputText.lastIndexOf("</review_report>");
   if (start < 0 || end < start || outputText.indexOf("<review_report", start + 1) >= 0) throw new Error("expected one review_report XML document");
   const document = outputText.slice(start, end + "</review_report>".length);
-  if (!XMLValidator.validate(document)) throw new Error("review report contains invalid XML");
+  if (XMLValidator.validate(document) !== true) throw new Error("review report contains invalid XML");
   const report = new XMLParser({ ignoreAttributes: false }).parse(document)?.review_report;
   const reviewStatus = report?.["@_status"];
   if (reviewStatus !== "passed" && reviewStatus !== "failed") throw new Error("invalid review status");
