@@ -93,8 +93,14 @@ test("worker and reviewer reports require strict XML envelopes", () => {
   assert.throws(() => parseTaskCompletionReport(`${worker}\n${worker}`), /one completion_report XML/);
   assert.throws(() => parseTaskCompletionReport("**STATUS:** DONE"), /completion_report XML/);
   // fast-xml-parser validate() returns a truthy error object on invalid XML; the
-  // strict !== true guard must reject raw unescaped ampersands (live pr-293abf12 case)
-  assert.throws(() => parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>None</files_changed><test_results>go test ./cmd/pic && go vet ./...</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`), /invalid XML/);
+  // strict !== true guard still rejects genuinely malformed documents (unclosed
+  // tags below), while bare ampersands are repaired before validation (live
+  // pr-6d36b57b/pr-a12dba81 class: raw `&&` shell commands in text sections)
+  assert.throws(() => parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>None</files_changed><test_results>go test <cmd</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`), /invalid XML/);
+  const ampRepaired = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>None</files_changed><test_results>cd pi-ext && node --experimental-strip-types --test core/blueprint-drafts.test.ts</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`);
+  assert.match(ampRepaired.markdown, /cd pi-ext &amp;&amp; node --experimental-strip-types --test core\/blueprint-drafts\.test\.ts/);
+  const entityPreserved = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>a &amp; b.ts</files_changed><test_results>PASS</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`);
+  assert.match(entityPreserved.markdown, /a &amp; b\.ts/);
 
   const metaBlocked = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="blocked"><files_changed>None</files_changed><test_results>Not run</test_results><issues_discovered>Port unavailable</issues_discovered><deviations>None</deviations><suggestions>None</suggestions><failure_metadata>{"category":"ENVIRONMENTAL_CONSTRAINT","violating_variable":"API_PORT","runtime_value":"95317","system_error_code":"EADDRINUSE","evidence":"listen tcp :95317: bind: address already in use"}</failure_metadata></completion_report>`);
   assert.deepEqual(metaBlocked.failure_metadata, { category: "ENVIRONMENTAL_CONSTRAINT", violating_variable: "API_PORT", runtime_value: "95317", system_error_code: "EADDRINUSE", evidence: "listen tcp :95317: bind: address already in use" });
@@ -108,7 +114,9 @@ test("worker and reviewer reports require strict XML envelopes", () => {
   assert.deepEqual(parseReviewReport(passed), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
   assert.deepEqual(parseReviewReport(`Reviewer output:\n${passed}\nDone.`), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
   assert.throws(() => parseReviewReport("```review-report\n{\"status\":\"passed\"}\n```"), /review_report XML/);
-  assert.throws(() => parseReviewReport(`<review_report status="passed"><notes>go test && go vet passed</notes><findings></findings></review_report>`), /review report contains invalid XML/);
+  assert.throws(() => parseReviewReport(`<review_report status="passed"><notes>go test <broken</notes><findings></findings></review_report>`), /review report contains invalid XML/);
+  const reviewAmp = parseReviewReport(`<review_report status="passed"><notes>go test && go vet passed</notes><findings></findings></review_report>`);
+  assert.equal(reviewAmp.notes, "go test && go vet passed");
   assert.throws(() => parseReviewReport(`${passed}${passed}`), /review_report XML/);
 });
 
