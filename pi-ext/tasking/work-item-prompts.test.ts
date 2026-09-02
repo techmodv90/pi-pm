@@ -367,7 +367,7 @@ test("Blueprint prompt publishes the solution spec with owner-approved seams", (
   const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   assert.match(tool, /decomposition_policy_version[\s\S]{0,120}"verification_seams", "nothing_missing"/);
   const primer = buildStagePrimer({ work_item_id: "wi-b", stage: "blueprint", approved_digests: [] });
-  assert.match(primer, /owner-approved verification_seams \(decomposition_policy_version 2, no task_decomposition_preview\)/);
+  assert.match(primer, /owner-approved verification_seams \(decomposition_policy_version 2, schema_version 2\.1, no task_decomposition_preview\)/);
 });
 
 test("Contract prompt binds the approved Blueprint lineage and classifies obligations", () => {
