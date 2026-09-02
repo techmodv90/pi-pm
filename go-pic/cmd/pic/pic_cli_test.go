@@ -1413,6 +1413,237 @@ func glossaryRriPayload(t *testing.T, requirementTitle, requirementDescription, 
 	return string(payload)
 }
 
+// glossaryApplyPayload is an RRI finalize payload whose resolved report
+// carries one explicitly identified glossary update for approval-time
+// application (REQ-F1-6).
+func glossaryApplyPayload(t *testing.T) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-GLOSSARY-APPLY", "priority": "tier1", "title": "Vertical slice delivery", "description": "Deliver one vertical slice", "acceptanceCriteria": "Given a resolved requirement\nWhen approval runs\nThen the glossary gains the resolved terms"}},
+		"decisions":    []map[string]any{{"key": "glossary_mode", "answer": "Gate marked reports"}},
+		"report": map[string]any{
+			"project_name": "Glossary approval", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-GLOSSARY-APPLY", "requirement": "Vertical slice delivery", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Glossary mode", "options_considered": "Guarded vs legacy", "chosen": "Guarded", "rationale": "Canonical terminology"}},
+			"open_questions": []map[string]any{{"id": "Q1", "question": "Which delivery shape?", "status": "resolved", "priority": "P2", "mode": "hitl", "blocks": false, "resolution": map[string]string{"answer": "One vertical slice", "source": "Owner confirm"}}},
+			"not_yet_specified": []map[string]string{}, "out_of_scope": []map[string]string{},
+			"glossary_updates": []map[string]string{{"term": "Delivery Aggregate", "definition": "The branch-owning delivery aggregate for one approved feature branch.", "avoid": "delivery bucket"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
+}
+
+func TestRriGlossaryApproval(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	contextPath := filepath.Join(root, "CONTEXT.md")
+	original := "# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"
+	if err := os.WriteFile(contextPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assertContextUnchanged := func(want string) {
+		t.Helper()
+		content, err := os.ReadFile(contextPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(content) != want {
+			t.Fatalf("CONTEXT.md = %q, want %q", string(content), want)
+		}
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Glossary approval"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	// The interview checkpoint is disposable and must never touch repository truth.
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	assertContextUnchanged(original)
+	runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryApplyPayload(t))
+	// Publication resolves the interview but still must not modify CONTEXT.md.
+	assertContextUnchanged(original)
+	// A failed approval leaves repository truth unchanged.
+	runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "rri", "missing", "approved")
+	assertContextUnchanged(original)
+	approved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", "current", "approved"))
+	if approved["glossary_updated"] != true {
+		t.Fatalf("approved = %#v", approved)
+	}
+	want := original + "\n**Delivery Aggregate**:\nThe branch-owning delivery aggregate for one approved feature branch.\n_Avoid_: delivery bucket\n"
+	assertContextUnchanged(want)
+
+	// An approved RRI without glossary updates leaves CONTEXT.md untouched.
+	second := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "No glossary updates"))
+	id2 := second["id"].(string)
+	scan2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id2, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id2, "scan", scan2["id"].(string), "accepted")
+	plain, err := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-PLAIN", "priority": "tier1", "title": "Vertical slice delivery", "description": "Deliver one vertical slice", "acceptanceCriteria": "Given a resolved requirement\nWhen approval runs\nThen no glossary write happens"}},
+		"decisions":    []map[string]any{{"key": "glossary_mode", "answer": "Gate marked reports"}},
+		"report": map[string]any{
+			"project_name": "No glossary updates", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-PLAIN", "requirement": "Vertical slice delivery", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Glossary mode", "options_considered": "Guarded vs legacy", "chosen": "Guarded", "rationale": "Canonical terminology"}},
+			"open_questions": []any{}, "not_yet_specified": []map[string]string{}, "out_of_scope": []map[string]string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runPic(t, bin, root, home, "work-item", "rri-finalize", id2, string(plain))
+	approved2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-approve", id2, "rri", "current", "approved"))
+	if approved2["glossary_updated"] != false {
+		t.Fatalf("approved2 = %#v", approved2)
+	}
+	assertContextUnchanged(want)
+}
+
+// Approval-rejection constraint (REQ-F1-6): an RRI artifact whose
+// glossary_updates section fails validation must not be owner-approved
+// silently; the approval fails, reports the invalid data, and CONTEXT.md
+// stays unchanged.
+func TestRriGlossaryApprovalRejectsInvalidUpdates(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	contextPath := filepath.Join(root, "CONTEXT.md")
+	original := "# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"
+	if err := os.WriteFile(contextPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Invalid glossary approval"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+
+	invalidPayloads := []string{
+		// Validation failure: a row without a usable definition.
+		`{"project_name":"Invalid glossary","generated":"2026-09-01","rri_policy_version":2,"glossary_updates":[{"term":"Broken Term","definition":"   "}]}`,
+		// Type failure: glossary_updates present but not an update array.
+		`{"project_name":"Invalid glossary","generated":"2026-09-01","rri_policy_version":2,"glossary_updates":"not-an-array"}`,
+	}
+	for _, payload := range invalidPayloads {
+		saved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", payload))
+		out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "rri", saved["id"].(string), "approved")
+		if !strings.Contains(out, "glossary_updates") {
+			t.Fatalf("approval of invalid glossary_updates must report the invalid data, got: %s", out)
+		}
+		content, err := os.ReadFile(contextPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(content) != original {
+			t.Fatalf("rejected approval modified CONTEXT.md = %q, want %q", string(content), original)
+		}
+	}
+}
+
+// Repository-root constraint (REQ-F1-6): the approval-time glossary write must
+// follow repository truth discovery, not the process working directory, so an
+// approval run from a nested directory updates the canonical root CONTEXT.md
+// and never creates a shadowing copy next to the caller.
+func TestRriGlossaryApprovalFromNestedDirectory(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	contextPath := filepath.Join(root, "CONTEXT.md")
+	original := "# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"
+	if err := os.WriteFile(contextPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "cmd", "pic")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, nested, home, "work-item", "create", "epic", "Nested glossary approval"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, nested, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, nested, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	finalized := asObject(t, runPic(t, bin, nested, home, "work-item", "rri-finalize", id, glossaryApplyPayload(t)))
+	if finalized["artifact_id"] == "" {
+		t.Fatalf("finalized = %#v", finalized)
+	}
+	approved := asObject(t, runPic(t, bin, nested, home, "work-item", "artifact-approve", id, "rri", "current", "approved"))
+	if approved["glossary_updated"] != true {
+		t.Fatalf("approved = %#v", approved)
+	}
+	want := original + "\n**Delivery Aggregate**:\nThe branch-owning delivery aggregate for one approved feature branch.\n_Avoid_: delivery bucket\n"
+	content, err := os.ReadFile(contextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != want {
+		t.Fatalf("root CONTEXT.md = %q, want %q", string(content), want)
+	}
+	if _, err := os.Stat(filepath.Join(nested, "CONTEXT.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("approval from nested cwd must not create %s (stat err=%v)", filepath.Join(nested, "CONTEXT.md"), err)
+	}
+}
+
+// Compensation constraint (REQ-F1-6): when a failed approval cannot restore
+// the pre-write CONTEXT.md, the compensation closure must report its failure
+// instead of leaving repository truth silently changed.
+func TestRriGlossaryApprovalCompensationFailure(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	contextPath := filepath.Join(root, "CONTEXT.md")
+	original := "# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"
+	if err := os.WriteFile(contextPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Glossary compensation"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryApplyPayload(t)))
+	artifactID := finalized["artifact_id"].(string)
+
+	// Run the writer in-process against the project so findRriTruthRoot
+	// resolves the same temp root from this working directory.
+	t.Chdir(root)
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	apply := func() func() error {
+		t.Helper()
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		updated, restore, err := applyRriGlossaryApproval(tx, id, "rri", artifactID)
+		if err != nil || !updated {
+			t.Fatalf("applyRriGlossaryApproval = (%v, %v), want updated write", updated, err)
+		}
+		return restore
+	}
+	// A healthy compensation puts back the exact pre-write content.
+	restore := apply()
+	if err := restore(); err != nil {
+		t.Fatalf("restore() = %v, want nil", err)
+	}
+	content, err := os.ReadFile(contextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != original {
+		t.Fatalf("restored CONTEXT.md = %q, want %q", string(content), original)
+	}
+	// A blocked restore must surface its error instead of swallowing it.
+	restore = apply()
+	if err := os.Chmod(contextPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if restoreErr := restore(); restoreErr == nil {
+		t.Fatal("restore() = nil, want error when the pre-write content cannot be written back")
+	}
+	if err := os.Chmod(contextPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRriGlossaryConflictFailsClosed(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)

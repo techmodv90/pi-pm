@@ -882,6 +882,16 @@ type rriReport struct {
 	OpenQuestions      []rriOpenQuestion       `json:"open_questions"`
 	NotYetSpecified    []rriNotYetSpecifiedRow `json:"not_yet_specified,omitempty"`
 	OutOfScope         []rriOutOfScopeRow      `json:"out_of_scope,omitempty"`
+	GlossaryUpdates    []rriGlossaryUpdate     `json:"glossary_updates,omitempty"`
+}
+
+// rriGlossaryUpdate is one explicitly identified CONTEXT.md glossary entry
+// (REQ-F1-6): the owner approves the RRI artifact before the entry reaches
+// repository truth.
+type rriGlossaryUpdate struct {
+	Term       string `json:"term"`
+	Definition string `json:"definition"`
+	Avoid      string `json:"avoid,omitempty"`
 }
 type rriRequirementRow struct {
 	ReqID       string `json:"req_id"`
@@ -921,6 +931,23 @@ type rriNotYetSpecifiedRow struct {
 type rriOutOfScopeRow struct {
 	Exclusion string `json:"exclusion"`
 	Reason    string `json:"reason"`
+}
+
+// validateRriGlossaryUpdates enforces the glossary-update section shared by
+// RRI finalization and approval-time application: every entry needs a term and
+// a definition, and terms are unique so the approved write is deterministic.
+func validateRriGlossaryUpdates(updates []rriGlossaryUpdate) error {
+	seen := map[string]bool{}
+	for _, row := range updates {
+		if strings.TrimSpace(row.Term) == "" || strings.TrimSpace(row.Definition) == "" {
+			return errors.New("RRI glossary_updates rows require term and definition")
+		}
+		if seen[row.Term] {
+			return fmt.Errorf("RRI glossary_updates contains duplicate term %q", row.Term)
+		}
+		seen[row.Term] = true
+	}
+	return nil
 }
 
 // Marker-gated frontier schema for open_questions: reports carrying rri_policy_version 2
@@ -1050,6 +1077,9 @@ func validateRriReport(report rriReport) error {
 				return errors.New("RRI out_of_scope rows require exclusion and reason")
 			}
 		}
+	}
+	if err := validateRriGlossaryUpdates(report.GlossaryUpdates); err != nil {
+		return err
 	}
 	return nil
 }
@@ -2545,11 +2575,135 @@ func workItemArtifactApprove(db *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err = tx.Commit(); err != nil {
+	// Glossary constraint (REQ-F1-6): the CONTEXT.md update attaches only to
+	// this owner approval mutation, never to interview checkpointing or
+	// publication; a write failure fails the approval transaction so lifecycle
+	// state and repository truth stay aligned.
+	glossaryUpdated, restoreGlossary, err := applyRriGlossaryApproval(tx, args[0], args[1], artifactID)
+	if err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3]})
+	if err = tx.Commit(); err != nil {
+		if restoreGlossary != nil {
+			// A compensation failure means the rolled-back lifecycle state and
+			// CONTEXT.md have diverged, so it must be reported alongside the
+			// commit error rather than swallowed.
+			if restoreErr := restoreGlossary(); restoreErr != nil {
+				return fmt.Errorf("%w (approval rolled back, but restoring the pre-write CONTEXT.md also failed: %v)", err, restoreErr)
+			}
+		}
+		return err
+	}
+	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3], "glossary_updated": glossaryUpdated})
 	return nil
+}
+
+// applyRriGlossaryApproval (REQ-F1-6) is the sole CONTEXT.md glossary writer:
+// it runs only when an owner-approved RRI checkpoint is recorded and applies
+// the approved artifact's explicitly identified glossary_updates with an
+// atomic temp-file rename so unrelated content is preserved. The target is
+// resolved through findRriTruthRoot so an approval run from a nested working
+// directory updates the same canonical repository glossary the terminology
+// guard reads instead of shadowing it. Artifacts without a glossary_updates
+// section skip the write but still approve; artifacts whose section fails
+// validation are rejected. The returned restore closure
+// compensates a commit failure by putting back the exact pre-write content
+// and surfaces its own failure when repository truth cannot be restored.
+func applyRriGlossaryApproval(tx *sql.Tx, workItemID, stage, artifactID string) (bool, func() error, error) {
+	if stage != "rri" {
+		return false, nil, nil
+	}
+	var content string
+	if err := tx.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=? AND work_item_id=? AND stage='rri'`, artifactID, workItemID).Scan(&content); err != nil {
+		return false, nil, err
+	}
+	updates, err := rriArtifactGlossaryUpdates(content)
+	if err != nil {
+		// An artifact that carries a glossary_updates section but fails
+		// validation must not slip through approval silently: reject the
+		// approval instead of skipping the write.
+		return false, nil, fmt.Errorf("invalid glossary_updates in approved RRI artifact: %w", err)
+	}
+	if len(updates) == 0 {
+		// Prose interview checkpoints and artifacts without a glossary_updates
+		// section have no update to apply: the approval proceeds with
+		// repository truth untouched.
+		return false, nil, nil
+	}
+	truthRoot, err := findRriTruthRoot()
+	if err != nil {
+		return false, nil, err
+	}
+	if truthRoot == "" {
+		// Fail closed: without a discovered truth root there is no canonical
+		// glossary to update, and writing next to the working directory would
+		// shadow repository truth instead of updating it.
+		return false, nil, errors.New("RRI glossary approval found no repository truth root (CONTEXT.md) to update")
+	}
+	glossaryPath := filepath.Join(truthRoot, "CONTEXT.md")
+	previous, err := os.ReadFile(glossaryPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, nil, err
+	}
+	existed := err == nil
+	updated := renderRriGlossaryEntries(string(previous), updates)
+	temp := glossaryPath + ".tmp-" + shortID()
+	if err := os.WriteFile(temp, []byte(updated), 0o644); err != nil {
+		return false, nil, err
+	}
+	if err := os.Rename(temp, glossaryPath); err != nil {
+		os.Remove(temp)
+		return false, nil, err
+	}
+	restore := func() error {
+		if existed {
+			return os.WriteFile(glossaryPath, previous, 0o644)
+		}
+		return os.Remove(glossaryPath)
+	}
+	return true, restore, nil
+}
+
+// rriArtifactGlossaryUpdates extracts the explicitly identified glossary
+// updates from an approved RRI artifact. Prose artifacts (interview
+// checkpoints) and reports without the section return no updates; a JSON
+// report whose glossary_updates fails validation returns an error so the
+// caller can reject the approval rather than apply unvalidated terms.
+func rriArtifactGlossaryUpdates(content string) ([]rriGlossaryUpdate, error) {
+	var report map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &report); err != nil {
+		return nil, nil
+	}
+	raw, ok := report["glossary_updates"]
+	if !ok || strings.TrimSpace(string(raw)) == "null" {
+		return nil, nil
+	}
+	var updates []rriGlossaryUpdate
+	if err := json.Unmarshal(raw, &updates); err != nil {
+		return nil, err
+	}
+	if err := validateRriGlossaryUpdates(updates); err != nil {
+		return nil, err
+	}
+	return updates, nil
+}
+
+// renderRriGlossaryEntries appends glossary entries in the canonical CONTEXT.md
+// entry shape (**Term**: / definition / _Avoid_: phrases) after the existing
+// content, leaving every unrelated byte untouched.
+func renderRriGlossaryEntries(existing string, updates []rriGlossaryUpdate) string {
+	var builder strings.Builder
+	builder.WriteString(existing)
+	if existing != "" && !strings.HasSuffix(existing, "\n") {
+		builder.WriteString("\n")
+	}
+	for _, row := range updates {
+		builder.WriteString("\n**" + row.Term + "**:\n" + row.Definition + "\n")
+		if avoid := strings.TrimSpace(row.Avoid); avoid != "" {
+			builder.WriteString("_Avoid_: " + avoid + "\n")
+		}
+	}
+	return builder.String()
 }
 
 // approveWorkItemArtifactTx records one stage checkpoint inside a caller-owned
