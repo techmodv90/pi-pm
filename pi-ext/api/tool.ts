@@ -231,7 +231,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             }
           }
           case "save_rri_interview": {
-            if (!params.id || !params.content) return { content: [{ type: "text", text: "Error: id and final RRI JSON content required" }], details: {}, isError: true };
+            if (!params.id || !params.content || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, content (final RRI JSON), and actor_role=contractor are required" }], details: {}, isError: true };
             try {
               const payload = JSON.parse(params.content) as { report?: unknown };
               if (!payload.report) throw new Error("RRI finalization requires a structured report object");
@@ -240,7 +240,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
               const message = error instanceof Error ? error.message : String(error);
               return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
             }
-            const result = execPic(["work-item", "rri-finalize", params.id, params.content], ctx.cwd);
+            const result = execPic(["work-item", "rri-finalize", params.id, params.content, "--actor-role", params.actor_role], ctx.cwd);
             if (result.error) return { content: [{ type: "text", text: `Error: ${result.error}` }], details: result, isError: true };
             pipelineScheduler.finalizeHandoffs(params.id, "rri");
             return { content: [{ type: "text", text: rriPresentation }], details: { ...result, rriPresentation } };

@@ -1351,9 +1351,17 @@ func trimRriAdrPhraseLeadIn(phrase string) string {
 }
 
 func workItemRriFinalize(db *sql.DB, args []string) error {
-	if len(args) != 2 {
-		return errors.New("usage: pic work-item rri-finalize <id> <payload-json>")
+	if len(args) < 2 {
+		return errors.New("usage: pic work-item rri-finalize <id> <payload-json> --actor-role contractor")
 	}
+	opts, err := parseOptions(args[2:])
+	if err != nil {
+		return err
+	}
+	if err := validateWorkflowActor(opts["actor-role"], "contractor"); err != nil {
+		return err
+	}
+	actorRole := opts["actor-role"]
 	var payload rriFinalization
 	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 {
 		return errors.New("RRI finalization requires valid JSON with requirements, decisions, and report")
@@ -1435,7 +1443,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?, 'rri',?,?,?)`, artifactID, args[0], revision, string(reportJSON), contentHash); err != nil {
 			return err
 		}
-		if err = addEvent(tx, args[0], "rri_report_revised", "contractor", "Owner-confirmed RRI report revised before approval", map[string]any{"artifact_id": artifactID}); err != nil {
+		if err = addEvent(tx, args[0], "rri_report_revised", actorRole, "Owner-confirmed RRI report revised before approval", map[string]any{"artifact_id": artifactID}); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(`DELETE FROM requirements WHERE `+subjectColumn+`=? AND source IN (SELECT id FROM work_item_artifacts WHERE work_item_id=? AND stage='rri')`, args[0], args[0]); err != nil {
@@ -1505,7 +1513,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 	if err = insertRriDeferralDecisions(tx, args[0], artifactID, payload.Report); err != nil {
 		return err
 	}
-	if err = addEvent(tx, args[0], "rri_finalized", "contractor", "Owner-confirmed RRI requirements and decisions persisted", map[string]any{"artifact_id": artifactID, "requirements": len(payload.Requirements), "decisions": len(payload.Decisions)}); err != nil {
+	if err = addEvent(tx, args[0], "rri_finalized", actorRole, "Owner-confirmed RRI requirements and decisions persisted", map[string]any{"artifact_id": artifactID, "requirements": len(payload.Requirements), "decisions": len(payload.Decisions)}); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
