@@ -1015,6 +1015,38 @@ test("Git recovery path parsing normalizes rename destinations", () => {
   assert.deepEqual([...parsePorcelainPaths("R  new.ts\0old.ts\0")], ["new.ts"]);
 });
 
+test("reviewed integration accepts a rebased candidate whose base moved", () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-system-reviewed-rebase-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    // Local hunk in a large file, like a real source patch; distant context so
+    // the sibling line shifts offsets without breaking context matching.
+    const lines = Array.from({ length: 20 }, (_, i) => `pad-${i}`);
+    lines.push("base", "tail-a", "tail-b", "tail-c");
+    writeFileSync(join(repo, "file.txt"), `${lines.join("\n")}\n`);
+    execFileSync("git", ["add", "file.txt"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+    const reviewed = [...lines];
+    reviewed[20] = "reviewed";
+    writeFileSync(join(repo, "file.txt"), `${reviewed.join("\n")}\n`);
+    const patch = join(repo, "reviewed.patch");
+    writeFileSync(join(repo, ".git", "info", "exclude"), "reviewed.patch\n");
+    writeFileSync(patch, execFileSync("git", ["diff", "--binary", "HEAD", "--", "."], { cwd: repo }));
+    execFileSync("git", ["reset", "--hard", "-q", "HEAD"], { cwd: repo });
+    // Sibling integration moves HEAD after the patch was authored: an extra
+    // earlier line shifts hunk offsets and pre-image blob hashes (wi-90859141).
+    writeFileSync(join(repo, "file.txt"), `sibling\n${lines.join("\n")}\n`);
+    execFileSync("git", ["add", "file.txt"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "sibling integration"], { cwd: repo });
+    execFileSync("git", ["apply", "--index", patch], { cwd: repo });
+    assertIndexMatchesReviewedPatch(patch, repo);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("reviewed integration rejects extra edits in a candidate file", () => {
   const repo = mkdtempSync(join(tmpdir(), "task-system-reviewed-index-"));
   try {

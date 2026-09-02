@@ -102,9 +102,27 @@ export function parsePorcelainPaths(output: Buffer | string): Set<string> {
 }
 
 export function assertIndexMatchesReviewedPatch(patch: string, cwd: string): void {
-  const reviewed = readFileSync(patch);
-  const staged = execFileSync("git", ["diff", "--cached", "--binary", "HEAD", "--", "."], { cwd });
-  if (!reviewed.equals(staged)) throw new Error("staged integration differs from reviewed candidate patch");
+  // Reviewed-integration invariant: staged tree must equal HEAD plus the reviewed
+  // patch. Byte-comparing the raw patch against `git diff --cached` rejects a
+  // mechanically rebased candidate when a sibling integration moved HEAD (blob
+  // hashes and hunk offsets shift; bug wi-5dba8c23), so compare trees instead:
+  // three-way apply the patch in a temp index seeded from HEAD and require the
+  // staged tree to match. Extra unreviewed edits still change the tree and fail.
+  const indexDir = mkdtempSync(join(tmpdir(), "task-system-review-index-"));
+  const indexPath = join(indexDir, "index");
+  try {
+    const env = { ...process.env, GIT_INDEX_FILE: indexPath };
+    execFileSync("git", ["read-tree", "HEAD"], { cwd, env });
+    execFileSync("git", ["apply", "--cached", "--3way", patch], { cwd, env, stdio: "pipe" });
+    const reviewedTree = execFileSync("git", ["write-tree"], { cwd, env, encoding: "utf8" }).trim();
+    const stagedTree = execFileSync("git", ["write-tree"], { cwd, encoding: "utf8" }).trim();
+    if (reviewedTree !== stagedTree) throw new Error("staged integration differs from reviewed candidate patch");
+  } catch (error) {
+    if (error instanceof Error && error.message === "staged integration differs from reviewed candidate patch") throw error;
+    throw new Error("staged integration differs from reviewed candidate patch");
+  } finally {
+    rmSync(indexDir, { recursive: true, force: true });
+  }
 }
 
 export function assertCommitMatchesReviewedPatch(patch: string, cwd: string, commitMessage: string, parent: string, commit: string): void {
