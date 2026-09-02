@@ -1,15 +1,18 @@
 package main
 
 import (
-	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+
+	"github.com/earendil-works/task-system/go-pic/internal/tip"
 )
 
 const workItemColumns = `id,type,parent_id,title,description,status,priority,deferred,claimed_at,claimed_by,review_status,review_notes,planning_depth,created_at,decomposition_mode,decomposition_reason,paired_contract_node,source_graph_artifact_id,source_graph_revision,source_graph_content_hash`
@@ -870,12 +873,25 @@ type rriFinalization struct {
 }
 
 type rriReport struct {
-	ProjectName        string              `json:"project_name"`
-	Generated          string              `json:"generated"`
-	RequirementsMatrix []rriRequirementRow `json:"requirements_matrix"`
-	AutoAnswered       []rriAutoAnswerRow  `json:"auto_answered"`
-	DecisionsLog       []rriDecisionRow    `json:"decisions_log"`
-	OpenQuestions      []rriOpenQuestion   `json:"open_questions"`
+	ProjectName        string                  `json:"project_name"`
+	Generated          string                  `json:"generated"`
+	PolicyVersion      int                     `json:"rri_policy_version,omitempty"`
+	RequirementsMatrix []rriRequirementRow     `json:"requirements_matrix"`
+	AutoAnswered       []rriAutoAnswerRow      `json:"auto_answered"`
+	DecisionsLog       []rriDecisionRow        `json:"decisions_log"`
+	OpenQuestions      []rriOpenQuestion       `json:"open_questions"`
+	NotYetSpecified    []rriNotYetSpecifiedRow `json:"not_yet_specified,omitempty"`
+	OutOfScope         []rriOutOfScopeRow      `json:"out_of_scope,omitempty"`
+	GlossaryUpdates    []rriGlossaryUpdate     `json:"glossary_updates,omitempty"`
+}
+
+// rriGlossaryUpdate is one explicitly identified CONTEXT.md glossary entry
+// (REQ-F1-6): the owner approves the RRI artifact before the entry reaches
+// repository truth.
+type rriGlossaryUpdate struct {
+	Term       string `json:"term"`
+	Definition string `json:"definition"`
+	Avoid      string `json:"avoid,omitempty"`
 }
 type rriRequirementRow struct {
 	ReqID       string `json:"req_id"`
@@ -896,13 +912,103 @@ type rriDecisionRow struct {
 	Rationale         string `json:"rationale"`
 }
 type rriOpenQuestion struct {
-	ID       string `json:"id"`
-	Question string `json:"question"`
+	ID         string         `json:"id"`
+	Question   string         `json:"question"`
+	Status     string         `json:"status,omitempty"`
+	Priority   string         `json:"priority,omitempty"`
+	Mode       string         `json:"mode,omitempty"`
+	Blocks     *bool          `json:"blocks,omitempty"`
+	Resolution *rriResolution `json:"resolution,omitempty"`
+}
+type rriResolution struct {
+	Answer string `json:"answer"`
+	Source string `json:"source"`
+}
+type rriNotYetSpecifiedRow struct {
+	Uncertainty    string `json:"uncertainty"`
+	GraduationPath string `json:"graduation_path"`
+}
+type rriOutOfScopeRow struct {
+	Exclusion string `json:"exclusion"`
+	Reason    string `json:"reason"`
+}
+
+// validateRriGlossaryUpdates enforces the glossary-update section shared by
+// RRI finalization and approval-time application: every entry needs a term and
+// a definition, and terms are unique so the approved write is deterministic.
+func validateRriGlossaryUpdates(updates []rriGlossaryUpdate) error {
+	seen := map[string]bool{}
+	for _, row := range updates {
+		if strings.TrimSpace(row.Term) == "" || strings.TrimSpace(row.Definition) == "" {
+			return errors.New("RRI glossary_updates rows require term and definition")
+		}
+		if seen[row.Term] {
+			return fmt.Errorf("RRI glossary_updates contains duplicate term %q", row.Term)
+		}
+		seen[row.Term] = true
+	}
+	return nil
+}
+
+// Marker-gated frontier schema for open_questions: reports carrying rri_policy_version 2
+// require the frontier fields, while pre-marker reports stay valid under the legacy shape.
+var (
+	rriOpenQuestionStatuses   = []string{"open", "resolved", "deferred"}
+	rriOpenQuestionPriorities = []string{"P0", "P1", "P2", "P3"}
+	rriOpenQuestionModes      = []string{"afk", "hitl"}
+)
+
+// marshalRriReport persists the report. Marked reports (rri_policy_version >= 2)
+// must carry both scope sections in the artifact even when empty, but plain
+// json.Marshal drops empty slices via omitempty; legacy reports keep the keys
+// omitted. Merge the scope keys back in for marked reports.
+func marshalRriReport(report rriReport) ([]byte, error) {
+	base, err := json.Marshal(report)
+	if err != nil {
+		return nil, err
+	}
+	if report.PolicyVersion < 2 {
+		return base, nil
+	}
+	var merged map[string]json.RawMessage
+	if err := json.Unmarshal(base, &merged); err != nil {
+		return nil, err
+	}
+	if merged["not_yet_specified"], err = json.Marshal(report.NotYetSpecified); err != nil {
+		return nil, err
+	}
+	if merged["out_of_scope"], err = json.Marshal(report.OutOfScope); err != nil {
+		return nil, err
+	}
+	return json.Marshal(merged)
 }
 
 func validateRriReport(report rriReport) error {
+	if report.PolicyVersion > 2 {
+		return fmt.Errorf("unsupported rri_policy_version %d", report.PolicyVersion)
+	}
 	if strings.TrimSpace(report.ProjectName) == "" || strings.TrimSpace(report.Generated) == "" {
 		return errors.New("RRI report requires project_name and generated")
+	}
+	// Marker-gated required-array parity (OB-F1-7): marked reports must carry
+	// every core array and the failure names the missing section exactly like
+	// the TypeScript validator; legacy reports keep their pre-marker tolerance
+	// for absent sections (nil slices stay valid). A missing array unmarshals
+	// to nil, so nil is the rejected state.
+	if report.PolicyVersion >= 2 {
+		for _, missing := range []struct {
+			present bool
+			name    string
+		}{
+			{report.RequirementsMatrix != nil, "requirements_matrix"},
+			{report.AutoAnswered != nil, "auto_answered"},
+			{report.DecisionsLog != nil, "decisions_log"},
+			{report.OpenQuestions != nil, "open_questions"},
+		} {
+			if !missing.present {
+				return fmt.Errorf("marked RRI report is missing the %s section", missing.name)
+			}
+		}
 	}
 	for _, row := range report.RequirementsMatrix {
 		if row.ReqID == "" || row.Requirement == "" || row.Source == "" || row.Priority == "" || row.Persona == "" {
@@ -923,6 +1029,57 @@ func validateRriReport(report rriReport) error {
 		if row.ID == "" || row.Question == "" {
 			return errors.New("RRI open_questions rows require id and question")
 		}
+		if report.PolicyVersion < 2 {
+			continue
+		}
+		if row.Status == "" {
+			return fmt.Errorf("RRI open_questions row %s requires status", row.ID)
+		}
+		if !contains(rriOpenQuestionStatuses, row.Status) {
+			return fmt.Errorf("RRI open_questions row %s has invalid status %s", row.ID, row.Status)
+		}
+		if row.Priority == "" {
+			return fmt.Errorf("RRI open_questions row %s requires priority", row.ID)
+		}
+		if !contains(rriOpenQuestionPriorities, row.Priority) {
+			return fmt.Errorf("RRI open_questions row %s has invalid priority %s", row.ID, row.Priority)
+		}
+		if row.Mode == "" {
+			return fmt.Errorf("RRI open_questions row %s requires mode", row.ID)
+		}
+		if !contains(rriOpenQuestionModes, row.Mode) {
+			return fmt.Errorf("RRI open_questions row %s has invalid mode %s", row.ID, row.Mode)
+		}
+		if row.Blocks == nil {
+			return fmt.Errorf("RRI open_questions row %s requires blocks", row.ID)
+		}
+		if row.Status != "open" && (row.Resolution == nil || row.Resolution.Answer == "" || row.Resolution.Source == "") {
+			return fmt.Errorf("RRI open_questions row %s requires resolution with answer and source when status is resolved or deferred", row.ID)
+		}
+	}
+	// Scope sections are marker-gated like the open_questions frontier fields:
+	// marked reports must carry both, legacy reports stay valid without them.
+	// A missing section unmarshals to a nil slice, so nil is the rejected state.
+	if report.PolicyVersion >= 2 {
+		if report.NotYetSpecified == nil {
+			return errors.New("marked RRI report requires the not_yet_specified section")
+		}
+		for _, row := range report.NotYetSpecified {
+			if row.Uncertainty == "" || row.GraduationPath == "" {
+				return errors.New("RRI not_yet_specified rows require uncertainty and graduation_path")
+			}
+		}
+		if report.OutOfScope == nil {
+			return errors.New("marked RRI report requires the out_of_scope section")
+		}
+		for _, row := range report.OutOfScope {
+			if row.Exclusion == "" || row.Reason == "" {
+				return errors.New("RRI out_of_scope rows require exclusion and reason")
+			}
+		}
+	}
+	if err := validateRriGlossaryUpdates(report.GlossaryUpdates); err != nil {
+		return err
 	}
 	return nil
 }
@@ -949,13 +1106,280 @@ func validateRriReportConsistency(payload rriFinalization) error {
 	return nil
 }
 
-func workItemRriFinalize(db *sql.DB, args []string) error {
-	if len(args) != 2 {
-		return errors.New("usage: pic work-item rri-finalize <id> <payload-json>")
+// RRI publish gate (REQ-F1-3): for marked frontier reports (rri_policy_version 2)
+// an open P0/P1 question rejects publication and a deferred P0/P1 question
+// requires a non-empty owner deferral reason. Status and priority are checked
+// together, so open P2/P3 rows and legacy pre-marker reports never block.
+func validateRriPublishGate(report rriReport) error {
+	if report.PolicyVersion < 2 {
+		return nil
 	}
+	for _, row := range report.OpenQuestions {
+		if row.Priority != "P0" && row.Priority != "P1" {
+			continue
+		}
+		if row.Status == "open" {
+			return fmt.Errorf("RRI publication blocked: open P0/P1 question %s (%s) remains unresolved: %s", row.ID, row.Priority, row.Question)
+		}
+		if row.Status == "deferred" && (row.Resolution == nil || strings.TrimSpace(row.Resolution.Answer) == "") {
+			return fmt.Errorf("RRI publication blocked: deferred P0/P1 question %s (%s) requires a non-empty owner deferral reason", row.ID, row.Priority)
+		}
+	}
+	return nil
+}
+
+// insertRriDeferralDecisions persists each reasoned deferred P0/P1 question as
+// a durable owner decision row in work_item_owner_decisions (the
+// contract-required deferral home for REQ-F1-3): decision='deferred' with the
+// question/artifact linkage and the owner-recorded reason in notes, so Blueprint
+// review projections reading the show document's owner_decisions collection can
+// surface the deferral. The publish gate guarantees the reason is non-empty.
+func insertRriDeferralDecisions(tx *sql.Tx, workItemID, artifactID string, report rriReport) error {
+	if report.PolicyVersion < 2 {
+		return nil
+	}
+	for _, row := range report.OpenQuestions {
+		if (row.Priority != "P0" && row.Priority != "P1") || row.Status != "deferred" {
+			continue
+		}
+		if _, err := tx.Exec(`INSERT INTO work_item_owner_decisions(id,work_item_id,completion_report_id,decision,question_id,rri_artifact_id,notes,decided_by_role) VALUES(?,?,NULL,'deferred',?,?,?,'owner')`, "wiod-"+shortID(), workItemID, row.ID, artifactID, row.Resolution.Answer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// RRI glossary/ADR conflict guard (REQ-F1-5): marked RRI payloads fail closed
+// when resolved requirement or decision terminology contradicts the repository
+// glossary (CONTEXT.md) or accepted ADR terms (docs/adr/*.md). Comparison
+// normalizes case and whitespace only, so the persisted report keeps its
+// source text; a conflict returns before any artifact, requirement, decision,
+// or event is written, leaving the previous state untouched.
+type rriForbiddenTerm struct {
+	Phrase    string // conflicting terminology in the source document's spelling
+	Canonical string // glossary term whose definition the phrase contradicts (empty for ADR rejections)
+	Source    string // document path the constraint comes from
+}
+
+func validateRriTerminology(payload rriFinalization) error {
+	if payload.Report.PolicyVersion < 2 {
+		return nil
+	}
+	terms, err := loadRriForbiddenTerms()
+	if err != nil {
+		return err
+	}
+	for _, requirement := range payload.Requirements {
+		for _, text := range []string{requirement.Title, requirement.Description, requirement.AcceptanceCriteria} {
+			if err := checkRriTerminology(terms, "requirement", requirement.Key, text); err != nil {
+				return err
+			}
+		}
+	}
+	for _, decision := range payload.Decisions {
+		if err := checkRriTerminology(terms, "decision", decision.Key, decision.Answer); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func checkRriTerminology(terms []rriForbiddenTerm, kind, key, text string) error {
+	normalized := strings.Join(strings.Fields(text), " ")
+	if normalized == "" {
+		return nil
+	}
+	for _, term := range terms {
+		pattern, err := regexp.Compile(`(?i)\b` + regexp.QuoteMeta(strings.Join(strings.Fields(term.Phrase), " ")) + `\b`)
+		if err != nil {
+			return fmt.Errorf("RRI terminology check failed for constraint from %s: %w", term.Source, err)
+		}
+		if !pattern.MatchString(normalized) {
+			continue
+		}
+		if term.Canonical != "" {
+			return fmt.Errorf("RRI save blocked: %s %s uses %q, which contradicts the glossary definition of %s (source: %s)", kind, key, term.Phrase, term.Canonical, term.Source)
+		}
+		return fmt.Errorf("RRI save blocked: %s %s uses %q, which is rejected by accepted ADR %s", kind, key, term.Phrase, term.Source)
+	}
+	return nil
+}
+
+func loadRriForbiddenTerms() ([]rriForbiddenTerm, error) {
+	root, err := findRriTruthRoot()
+	if err != nil || root == "" {
+		return nil, err
+	}
+	var terms []rriForbiddenTerm
+	glossary, err := os.ReadFile(filepath.Join(root, "CONTEXT.md"))
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		return nil, fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+	}
+	if err == nil {
+		terms = append(terms, parseRriGlossaryAvoidTerms(string(glossary), "CONTEXT.md")...)
+	}
+	adrFiles, err := filepath.Glob(filepath.Join(root, "docs", "adr", "*.md"))
+	if err != nil {
+		return nil, fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+	}
+	for _, adrPath := range adrFiles {
+		content, err := os.ReadFile(adrPath)
+		if err != nil {
+			return nil, fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+		}
+		// Only accepted architecture decisions constrain terminology; drafts
+		// and proposed records stay advisory.
+		if !strings.Contains(string(content), "**Status**: accepted") {
+			continue
+		}
+		rel, err := filepath.Rel(root, adrPath)
+		if err != nil {
+			rel = adrPath
+		}
+		terms = append(terms, parseRriAdrRejectedTerms(string(content), rel)...)
+	}
+	return terms, nil
+}
+
+// findRriTruthRoot walks up from the working directory to the first directory
+// carrying the repository glossary (CONTEXT.md) or ADR directory, mirroring the
+// upward resolution of findDB. An empty result means the project defines no
+// repository truth, which leaves marked saves unguarded rather than blocked;
+// truth that exists but cannot be read fails closed in loadRriForbiddenTerms.
+func findRriTruthRoot() (string, error) {
+	dir, err := filepath.Abs(".")
+	if err != nil {
+		return "", err
+	}
+	for current := dir; ; current = filepath.Dir(current) {
+		if _, err := os.Stat(filepath.Join(current, "CONTEXT.md")); err == nil {
+			return current, nil
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+		}
+		adrDir := filepath.Join(current, "docs", "adr")
+		entries, err := os.ReadDir(adrDir)
+		if err == nil {
+			for _, entry := range entries {
+				if strings.HasSuffix(entry.Name(), ".md") {
+					return current, nil
+				}
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return "", fmt.Errorf("RRI terminology check failed to read repository truth: %w", err)
+		}
+		if filepath.Dir(current) == current {
+			return "", nil
+		}
+	}
+}
+
+var (
+	rriGlossaryTermPattern  = regexp.MustCompile(`^\*\*([^*]+)\*\*:\s*$`)
+	rriGlossaryAvoidPattern = regexp.MustCompile(`^_Avoid_:\s*(.+?)\s*$`)
+)
+
+// parseRriGlossaryAvoidTerms extracts every _Avoid_ phrase from CONTEXT.md
+// entries; each phrase is conflicting terminology for the canonical term that
+// owns the entry, so a payload using it contradicts that definition.
+func parseRriGlossaryAvoidTerms(content, source string) []rriForbiddenTerm {
+	var terms []rriForbiddenTerm
+	canonical := ""
+	for _, line := range strings.Split(content, "\n") {
+		if match := rriGlossaryTermPattern.FindStringSubmatch(line); match != nil {
+			canonical = strings.TrimSpace(match[1])
+			continue
+		}
+		match := rriGlossaryAvoidPattern.FindStringSubmatch(line)
+		if match == nil || canonical == "" {
+			continue
+		}
+		for _, phrase := range strings.Split(match[1], ",") {
+			phrase = strings.TrimSpace(phrase)
+			if phrase != "" {
+				terms = append(terms, rriForbiddenTerm{Phrase: phrase, Canonical: canonical, Source: source})
+			}
+		}
+	}
+	return terms
+}
+
+var (
+	rriAdrRejectPattern        = regexp.MustCompile(`(?i)\breject\b`)
+	rriAdrJustificationPattern = regexp.MustCompile(`(?i)\b(?:not\s+sufficient|insufficient)\s+justification\s+for\b`)
+)
+
+// parseRriAdrRejectedTerms extracts the explicit rejected practices from an
+// accepted ADR: a sentence containing "reject" contributes the phrases that
+// follow it, split on " and ", and a sentence stating something "is not
+// sufficient justification for" a practice contributes that practice (the
+// ADR 0002 constraint forbidding speculative abstractions justified only by a
+// single implementation). Parsing stays conservative so ADR prose only adds a
+// constraint when the document states one explicitly, and the two-word
+// minimum keeps generic single-word terms from blocking every RRI save.
+func parseRriAdrRejectedTerms(content, source string) []rriForbiddenTerm {
+	var terms []rriForbiddenTerm
+	for _, sentence := range strings.Split(content, ".") {
+		for _, pattern := range []*regexp.Regexp{rriAdrJustificationPattern, rriAdrRejectPattern} {
+			for _, loc := range pattern.FindAllStringIndex(sentence, -1) {
+				phrase := trimRriAdrPhraseLeadIn(strings.TrimSpace(sentence[loc[1]:]))
+				for _, part := range strings.Split(phrase, " and ") {
+					part = strings.TrimSpace(part)
+					if len(strings.Fields(part)) >= 2 {
+						terms = append(terms, rriForbiddenTerm{Phrase: part, Source: source})
+					}
+				}
+			}
+		}
+	}
+	return terms
+}
+
+// trimRriAdrPhraseLeadIn strips enumerators and articles so the forbidden
+// phrase names the practice itself rather than its grammatical lead-in.
+func trimRriAdrPhraseLeadIn(phrase string) string {
+	for {
+		trimmed := phrase
+		for _, prefix := range []string{"both ", "a ", "an ", "the "} {
+			trimmed = strings.TrimPrefix(trimmed, prefix)
+		}
+		if trimmed == phrase {
+			return phrase
+		}
+		phrase = trimmed
+	}
+}
+
+func workItemRriFinalize(db *sql.DB, args []string) error {
+	if len(args) < 2 {
+		return errors.New("usage: pic work-item rri-finalize <id> <payload-json> --actor-role contractor")
+	}
+	opts, err := parseOptions(args[2:])
+	if err != nil {
+		return err
+	}
+	if err := validateWorkflowActor(opts["actor-role"], "contractor"); err != nil {
+		return err
+	}
+	actorRole := opts["actor-role"]
 	var payload rriFinalization
-	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 || validateRriReport(payload.Report) != nil || validateRriReportConsistency(payload) != nil {
+	if err := json.Unmarshal([]byte(args[1]), &payload); err != nil || len(payload.Requirements) == 0 {
 		return errors.New("RRI finalization requires valid JSON with requirements, decisions, and report")
+	}
+	if err := validateRriReport(payload.Report); err != nil {
+		return err
+	}
+	if err := validateRriReportConsistency(payload); err != nil {
+		return err
+	}
+	if err := validateRriPublishGate(payload.Report); err != nil {
+		return err
+	}
+	// Glossary/ADR conflicts are pure terminology checks, so they run with the
+	// other pre-flight validators before the transaction opens; any conflict
+	// therefore commits no partial state by construction.
+	if err := validateRriTerminology(payload); err != nil {
+		return err
 	}
 	seenRequirements, seenDecisions := map[string]bool{}, map[string]bool{}
 	for _, requirement := range payload.Requirements {
@@ -1008,7 +1432,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		if approved != 0 {
 			return errors.New("RRI finalization already approved; reset planning before revising it")
 		}
-		reportJSON, marshalErr := json.Marshal(payload.Report)
+		reportJSON, marshalErr := marshalRriReport(payload.Report)
 		if marshalErr != nil {
 			return marshalErr
 		}
@@ -1019,13 +1443,19 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 		if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?, 'rri',?,?,?)`, artifactID, args[0], revision, string(reportJSON), contentHash); err != nil {
 			return err
 		}
-		if err = addEvent(tx, args[0], "rri_report_revised", "contractor", "Owner-confirmed RRI report revised before approval", map[string]any{"artifact_id": artifactID}); err != nil {
+		if err = addEvent(tx, args[0], "rri_report_revised", actorRole, "Owner-confirmed RRI report revised before approval", map[string]any{"artifact_id": artifactID}); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(`DELETE FROM requirements WHERE `+subjectColumn+`=? AND source IN (SELECT id FROM work_item_artifacts WHERE work_item_id=? AND stage='rri')`, args[0], args[0]); err != nil {
 			return err
 		}
 		if _, err = tx.Exec(`DELETE FROM owner_decisions WHERE `+subjectColumn+`=? AND related_type='rri'`, args[0]); err != nil {
+			return err
+		}
+		// Deferral rows live in work_item_owner_decisions with decision='deferred',
+		// a value only this RRI path writes (owner acceptance validates
+		// accepted|rejected), so this delete cannot touch review decisions.
+		if _, err = tx.Exec(`DELETE FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred'`, args[0]); err != nil {
 			return err
 		}
 		inherit := 0
@@ -1044,6 +1474,9 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 				return err
 			}
 		}
+		if err = insertRriDeferralDecisions(tx, args[0], artifactID, payload.Report); err != nil {
+			return err
+		}
 		if err = tx.Commit(); err != nil {
 			return err
 		}
@@ -1053,7 +1486,7 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, args[0]).Scan(&revision); err != nil {
 		return err
 	}
-	reportJSON, err := json.Marshal(payload.Report)
+	reportJSON, err := marshalRriReport(payload.Report)
 	if err != nil {
 		return err
 	}
@@ -1077,7 +1510,10 @@ func workItemRriFinalize(db *sql.DB, args []string) error {
 			return err
 		}
 	}
-	if err = addEvent(tx, args[0], "rri_finalized", "contractor", "Owner-confirmed RRI requirements and decisions persisted", map[string]any{"artifact_id": artifactID, "requirements": len(payload.Requirements), "decisions": len(payload.Decisions)}); err != nil {
+	if err = insertRriDeferralDecisions(tx, args[0], artifactID, payload.Report); err != nil {
+		return err
+	}
+	if err = addEvent(tx, args[0], "rri_finalized", actorRole, "Owner-confirmed RRI requirements and decisions persisted", map[string]any{"artifact_id": artifactID, "requirements": len(payload.Requirements), "decisions": len(payload.Decisions)}); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
@@ -2147,11 +2583,135 @@ func workItemArtifactApprove(db *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	if err = tx.Commit(); err != nil {
+	// Glossary constraint (REQ-F1-6): the CONTEXT.md update attaches only to
+	// this owner approval mutation, never to interview checkpointing or
+	// publication; a write failure fails the approval transaction so lifecycle
+	// state and repository truth stay aligned.
+	glossaryUpdated, restoreGlossary, err := applyRriGlossaryApproval(tx, args[0], args[1], artifactID)
+	if err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3]})
+	if err = tx.Commit(); err != nil {
+		if restoreGlossary != nil {
+			// A compensation failure means the rolled-back lifecycle state and
+			// CONTEXT.md have diverged, so it must be reported alongside the
+			// commit error rather than swallowed.
+			if restoreErr := restoreGlossary(); restoreErr != nil {
+				return fmt.Errorf("%w (approval rolled back, but restoring the pre-write CONTEXT.md also failed: %v)", err, restoreErr)
+			}
+		}
+		return err
+	}
+	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3], "glossary_updated": glossaryUpdated})
 	return nil
+}
+
+// applyRriGlossaryApproval (REQ-F1-6) is the sole CONTEXT.md glossary writer:
+// it runs only when an owner-approved RRI checkpoint is recorded and applies
+// the approved artifact's explicitly identified glossary_updates with an
+// atomic temp-file rename so unrelated content is preserved. The target is
+// resolved through findRriTruthRoot so an approval run from a nested working
+// directory updates the same canonical repository glossary the terminology
+// guard reads instead of shadowing it. Artifacts without a glossary_updates
+// section skip the write but still approve; artifacts whose section fails
+// validation are rejected. The returned restore closure
+// compensates a commit failure by putting back the exact pre-write content
+// and surfaces its own failure when repository truth cannot be restored.
+func applyRriGlossaryApproval(tx *sql.Tx, workItemID, stage, artifactID string) (bool, func() error, error) {
+	if stage != "rri" {
+		return false, nil, nil
+	}
+	var content string
+	if err := tx.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=? AND work_item_id=? AND stage='rri'`, artifactID, workItemID).Scan(&content); err != nil {
+		return false, nil, err
+	}
+	updates, err := rriArtifactGlossaryUpdates(content)
+	if err != nil {
+		// An artifact that carries a glossary_updates section but fails
+		// validation must not slip through approval silently: reject the
+		// approval instead of skipping the write.
+		return false, nil, fmt.Errorf("invalid glossary_updates in approved RRI artifact: %w", err)
+	}
+	if len(updates) == 0 {
+		// Prose interview checkpoints and artifacts without a glossary_updates
+		// section have no update to apply: the approval proceeds with
+		// repository truth untouched.
+		return false, nil, nil
+	}
+	truthRoot, err := findRriTruthRoot()
+	if err != nil {
+		return false, nil, err
+	}
+	if truthRoot == "" {
+		// Fail closed: without a discovered truth root there is no canonical
+		// glossary to update, and writing next to the working directory would
+		// shadow repository truth instead of updating it.
+		return false, nil, errors.New("RRI glossary approval found no repository truth root (CONTEXT.md) to update")
+	}
+	glossaryPath := filepath.Join(truthRoot, "CONTEXT.md")
+	previous, err := os.ReadFile(glossaryPath)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, nil, err
+	}
+	existed := err == nil
+	updated := renderRriGlossaryEntries(string(previous), updates)
+	temp := glossaryPath + ".tmp-" + shortID()
+	if err := os.WriteFile(temp, []byte(updated), 0o644); err != nil {
+		return false, nil, err
+	}
+	if err := os.Rename(temp, glossaryPath); err != nil {
+		os.Remove(temp)
+		return false, nil, err
+	}
+	restore := func() error {
+		if existed {
+			return os.WriteFile(glossaryPath, previous, 0o644)
+		}
+		return os.Remove(glossaryPath)
+	}
+	return true, restore, nil
+}
+
+// rriArtifactGlossaryUpdates extracts the explicitly identified glossary
+// updates from an approved RRI artifact. Prose artifacts (interview
+// checkpoints) and reports without the section return no updates; a JSON
+// report whose glossary_updates fails validation returns an error so the
+// caller can reject the approval rather than apply unvalidated terms.
+func rriArtifactGlossaryUpdates(content string) ([]rriGlossaryUpdate, error) {
+	var report map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(content), &report); err != nil {
+		return nil, nil
+	}
+	raw, ok := report["glossary_updates"]
+	if !ok || strings.TrimSpace(string(raw)) == "null" {
+		return nil, nil
+	}
+	var updates []rriGlossaryUpdate
+	if err := json.Unmarshal(raw, &updates); err != nil {
+		return nil, err
+	}
+	if err := validateRriGlossaryUpdates(updates); err != nil {
+		return nil, err
+	}
+	return updates, nil
+}
+
+// renderRriGlossaryEntries appends glossary entries in the canonical CONTEXT.md
+// entry shape (**Term**: / definition / _Avoid_: phrases) after the existing
+// content, leaving every unrelated byte untouched.
+func renderRriGlossaryEntries(existing string, updates []rriGlossaryUpdate) string {
+	var builder strings.Builder
+	builder.WriteString(existing)
+	if existing != "" && !strings.HasSuffix(existing, "\n") {
+		builder.WriteString("\n")
+	}
+	for _, row := range updates {
+		builder.WriteString("\n**" + row.Term + "**:\n" + row.Definition + "\n")
+		if avoid := strings.TrimSpace(row.Avoid); avoid != "" {
+			builder.WriteString("_Avoid_: " + avoid + "\n")
+		}
+	}
+	return builder.String()
 }
 
 // approveWorkItemArtifactTx records one stage checkpoint inside a caller-owned

@@ -243,6 +243,25 @@ test("formatWorkItemChecklist preserves archived checklist evidence", () => {
   assert.equal(formatWorkItemChecklist([{ id: "i-1", content: "Done" }], true), "- [x] (id: i-1) Done\n");
 });
 
+test("contractor RRI prompt loads repository context before questioning", () => {
+  const prompt = buildWorkItemContinuePrompt({ work_item_id: "wi-r", next_stage: "rri" }, { title: "RRI", type: "epic" });
+  // Repository-context reading is the first instruction, before any questioning.
+  const contextAt = prompt.indexOf("root `CONTEXT.md`");
+  const questionsAt = prompt.indexOf("RRI persona lenses");
+  assert.ok(contextAt !== -1 && questionsAt !== -1 && contextAt < questionsAt, "context reading must precede questioning");
+  assert.match(prompt, /docs\/adr\/\*\.md/);
+  assert.match(prompt, /canonical terms/);
+  // Repository context is read-only; missing sources are reported, never invented,
+  // and terminology uncertainty goes to the owner instead of a silent rename.
+  assert.match(prompt, /never write `CONTEXT\.md`, ADRs, or any glossary file/);
+  assert.match(prompt, /report the missing source/);
+  assert.match(prompt, /marked unresolved/);
+  assert.doesNotMatch(prompt, /auto-write/i);
+  // The emitted RRI JSON shape from N01/N02 stays compatible.
+  assert.match(prompt, /"acceptanceCriteria"/);
+  assert.match(prompt, /rri_policy_version.*2/);
+});
+
 test("executable continuation follows TIP execution gates", () => {
   assert.match(buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "implement" }, { title: "Leaf", type: "task" }), /work_on_work_item/);
   assert.match(buildWorkItemContinuePrompt({ work_item_id: "wi-1", next_stage: "task_graph" }, { title: "Leaf", type: "task" }), /exactly one.*existing Work Item/i);

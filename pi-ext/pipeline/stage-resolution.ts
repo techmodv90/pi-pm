@@ -1,5 +1,5 @@
 import type { PipelineRun, PipelineStage } from "./pipeline-types.ts";
-import { normalizePlanningDepth, planStagesForProfile, type PlanningDepth, type PlanningStage } from "../tasking/workflow-modes.ts";
+import { normalizePlanningDepth, planStagesForProfile, type PlanningDepth } from "../tasking/workflow-modes.ts";
 import { getBlockingTaskDependencies } from "../tasking/workflow-gates.ts";
 import { validateSkillFamilies } from "../subagent/skills.ts";
 import { activePackDoneReports, isMutationStage, latestVerificationAfter, reviewRequiresOwner, reviewStatusForCandidate } from "./report-parsing.ts";
@@ -11,7 +11,38 @@ export interface PlanningProfileState {
   resolved: boolean;
 }
 
-export const PLANNING_STAGE_ORDER: string[] = ["scan", "rri", "vision", "blueprint", "contracts", "task_graph"];
+// Stage-taxonomy parity constraint: mirrors the Go workItemStages taxonomy in
+// go-pic/cmd/pic/work_items.go stage for stage, including the supplementary
+// rri_t_scenarios entry, so persisted profiles are never silently stripped of it.
+export const PLANNING_STAGE_ORDER: string[] = ["scan", "rri", "rri_t_scenarios", "vision", "blueprint", "contracts", "task_graph"];
+
+// Supplementary planning stages mirror the Go visibility-only carve-out in
+// work_items.go ("rri_t_scenarios is a supplementary retained scenario
+// artifact: it is reported for owner visibility but never gates the planning
+// workflow"): they stay in the taxonomy and persisted profiles but never
+// produce an approval checkpoint, so predecessor lookups must skip them.
+export const SUPPLEMENTARY_PLANNING_STAGES: string[] = ["rri_t_scenarios"];
+
+// Persisted-profile constraint (fail-closed): a persisted stage array is
+// accepted only when every entry is a supported stage and the entries follow
+// the canonical taxonomy order. Unknown, duplicated, or reordered entries
+// reject the whole profile (returning []) instead of being silently filtered,
+// so a malformed persisted order can never bypass predecessor sequencing or
+// diverge from the Go-computed stage taxonomy.
+function canonicalPersistedStages(parsed: unknown): string[] {
+  if (!Array.isArray(parsed)) return [];
+  let cursor = -1;
+  const stages: string[] = [];
+  for (const entry of parsed) {
+    const index = PLANNING_STAGE_ORDER.indexOf(String(entry));
+    // An unknown stage (-1), a duplicate (equal index), or a reordered entry
+    // (smaller index) all fail the strictly-advancing cursor check at once.
+    if (index <= cursor) return [];
+    cursor = index;
+    stages.push(String(entry));
+  }
+  return stages;
+}
 
 export function persistedProfileDepth(value: unknown): PlanningDepth {
   return normalizePlanningDepth(value);
@@ -29,8 +60,7 @@ export function resolvePlanProfile(data: any): PlanningProfileState {
   if (plan) {
     let stages: string[] = [];
     try {
-      const parsed = JSON.parse(plan.stages_json || "[]");
-      if (Array.isArray(parsed)) stages = parsed.filter((entry: unknown): entry is PlanningStage => PLANNING_STAGE_ORDER.includes(String(entry)));
+      stages = canonicalPersistedStages(JSON.parse(plan.stages_json || "[]"));
     } catch {}
     if (stages.length) {
       return {

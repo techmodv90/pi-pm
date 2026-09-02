@@ -145,7 +145,7 @@ func nextActionHint(stage string) string {
 // ONE transaction, processed in planning-profile order so predecessor checks
 // resolve within the batch. No stage semantics are combined: every decision
 // still binds its own stage, latest artifact revision, and content hash.
-func workItemCheckpointDecide(db *sql.DB, args []string) error {
+func workItemCheckpointDecide(db *sql.DB, args []string) (err error) {
 	if len(args) != 3 || args[1] != "--decisions" {
 		return errors.New("usage: pic work-item checkpoint-decide <id> --decisions <stage>:<accepted|approved>[,...]")
 	}
@@ -200,16 +200,41 @@ func workItemCheckpointDecide(db *sql.DB, args []string) error {
 	}
 	defer tx.Rollback()
 	decisions := []map[string]any{}
+	// Glossary constraint (REQ-F1-6): a batched rri approval is still an owner
+	// approval, so it applies the same CONTEXT.md glossary update as
+	// artifact-approve; any later batch failure or commit failure restores the
+	// pre-write content because the whole transaction rolls back.
+	committed := false
+	var restoreGlossary func() error
+	defer func() {
+		if restoreGlossary != nil && !committed {
+			if restoreErr := restoreGlossary(); restoreErr != nil {
+				// A compensation failure leaves CONTEXT.md out of sync with the
+				// rolled-back lifecycle state, so it must reach the owner.
+				if err == nil {
+					err = fmt.Errorf("approval rolled back, but restoring the pre-write CONTEXT.md failed: %w", restoreErr)
+				} else {
+					err = fmt.Errorf("%w (restoring the pre-write CONTEXT.md also failed: %v)", err, restoreErr)
+				}
+			}
+		}
+	}()
 	for _, stage := range ordered {
 		artifactID, revision, contentHash, err := approveWorkItemArtifactTx(tx, workItemID, stage, "current", selected[stage])
 		if err != nil {
 			return err
+		}
+		if _, restore, applyErr := applyRriGlossaryApproval(tx, workItemID, stage, artifactID); applyErr != nil {
+			return applyErr
+		} else if restore != nil {
+			restoreGlossary = restore
 		}
 		decisions = append(decisions, map[string]any{"stage": stage, "decision": selected[stage], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash})
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
+	committed = true
 	writeJSON(os.Stdout, map[string]any{"work_item_id": workItemID, "decisions": decisions})
 	return nil
 }

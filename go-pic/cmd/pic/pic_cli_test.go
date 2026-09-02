@@ -13,6 +13,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -915,6 +917,60 @@ func TestVisionArtifactRequiresStructuredJSON(t *testing.T) {
 	}
 }
 
+func TestWorkItemRriFinalizeActorRole(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "RRI actor provenance"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	payload, _ := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-ACTOR", "priority": "tier1", "title": "Actor provenance", "description": "Record the validated actor", "acceptanceCriteria": "Given an authorized contractor actor role\nWhen rri-finalize runs\nThen the rri_finalized event records the validated role"}},
+		"decisions":    []map[string]any{{"key": "actor_provenance", "answer": "Record the validated contractor role on rri_finalized"}},
+		"report":       map[string]any{"project_name": "RRI actor provenance", "generated": "2026-08-17", "requirements_matrix": []map[string]string{{"req_id": "REQ-ACTOR", "requirement": "Actor provenance", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}}, "auto_answered": []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Actor provenance", "options_considered": "Hardcoded vs validated role", "chosen": "Validated role", "rationale": "Audit provenance"}}, "open_questions": []map[string]string{}},
+	})
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload)); !strings.Contains(out, "invalid actor role") {
+		t.Fatalf("missing actor role not rejected by validateWorkflowActor: %s", out)
+	}
+	if out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "owner"); !strings.Contains(out, "invalid actor role") {
+		t.Fatalf("non-contractor actor role not rejected: %s", out)
+	}
+	childCmd := exec.Command(bin, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor")
+	childCmd.Dir = root
+	childCmd.Env = append(clearedPiEnv(), "HOME="+home, "PI_TASK_AGENT_NAME=worker-1")
+	// Child agents are rejected by the cmdWorkItem lifecycle guard before
+	// validateWorkflowActor runs; either rejection keeps the lifecycle
+	// state machine closed to child-agent authority.
+	if childOut, childErr := childCmd.CombinedOutput(); childErr == nil || !strings.Contains(string(childOut), "cannot mutate Work Item lifecycle through pic") {
+		t.Fatalf("child-agent rri-finalize not rejected: err=%v out=%s", childErr, childOut)
+	}
+	var artifacts int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri'`, id).Scan(&artifacts); err != nil {
+		t.Fatal(err)
+	}
+	if artifacts != 0 {
+		t.Fatalf("authorization failures wrote %d RRI artifacts", artifacts)
+	}
+
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor"))
+	if finalized["requirements"] != float64(1) || finalized["artifact_id"] == "" {
+		t.Fatalf("finalized = %#v", finalized)
+	}
+	var role string
+	if err = db.QueryRow(`SELECT actor_role FROM work_item_events WHERE work_item_id=? AND event_type='rri_finalized'`, id).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "contractor" {
+		t.Fatalf("rri_finalized actor_role=%q, want contractor", role)
+	}
+}
+
 func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
@@ -928,7 +984,7 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 		"decisions":    []map[string]any{{"key": "release_baseline", "answer": "Require a clean committed baseline"}},
 		"report":       map[string]any{"project_name": "RRI finalization", "generated": "2026-08-17", "requirements_matrix": []map[string]string{{"req_id": "REQ-BASELINE", "requirement": "Clean baseline", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}}, "auto_answered": []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Release baseline", "options_considered": "Clean vs dirty", "chosen": "Clean", "rationale": "Reproducibility"}}, "open_questions": []map[string]string{}},
 	})
-	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload)))
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor"))
 	if finalized["requirements"] != float64(1) || finalized["decisions"] != float64(1) || finalized["artifact_id"] == "" {
 		t.Fatalf("finalized = %#v", finalized)
 	}
@@ -955,7 +1011,7 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&canonicalRevision); err != nil || canonicalRevision != 1 {
 		t.Fatalf("canonical RRI revision 2 count=%d err=%v", canonicalRevision, err)
 	}
-	revised := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload)))
+	revised := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor"))
 	if revised["revised"] != true {
 		t.Fatalf("expected pre-approval RRI revision, got %#v", revised)
 	}
@@ -963,12 +1019,1042 @@ func TestWorkItemRriFinalizePersistsCanonicalInterview(t *testing.T) {
 	if approved["artifact_id"] != revised["artifact_id"] {
 		t.Fatalf("current selector approved %v, want %v", approved["artifact_id"], revised["artifact_id"])
 	}
-	runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload))
+	runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor")
 	var requirementCount, decisionCount int
 	_ = db.QueryRow(`SELECT COUNT(*) FROM requirements WHERE epic_id=?`, id).Scan(&requirementCount)
 	_ = db.QueryRow(`SELECT COUNT(*) FROM owner_decisions WHERE epic_id=?`, id).Scan(&decisionCount)
 	if requirementCount != 1 || decisionCount != 1 {
 		t.Fatalf("duplicate finalization wrote requirements=%d decisions=%d", requirementCount, decisionCount)
+	}
+}
+
+func TestRriReportValidationMarkerGate(t *testing.T) {
+	legacy := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01",
+		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Legacy shape row"}},
+	}
+	if err := validateRriReport(legacy); err != nil {
+		t.Fatalf("legacy open_questions row must stay valid: %v", err)
+	}
+	marked := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01", PolicyVersion: 2,
+		RequirementsMatrix: []rriRequirementRow{}, AutoAnswered: []rriAutoAnswerRow{}, DecisionsLog: []rriDecisionRow{},
+		NotYetSpecified: []rriNotYetSpecifiedRow{}, OutOfScope: []rriOutOfScopeRow{},
+		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Resolved frontier row", Status: "resolved", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true), Resolution: &rriResolution{Answer: "Ship CLI first", Source: "Owner confirm"}}},
+	}
+	if err := validateRriReport(marked); err != nil {
+		t.Fatalf("resolved frontier row with resolution must be accepted: %v", err)
+	}
+	openRow := marked
+	openRow.OpenQuestions = []rriOpenQuestion{{ID: "Q2", Question: "Open frontier row", Status: "open", Priority: "P0", Mode: "afk", Blocks: boolPtr(false)}}
+	if err := validateRriReport(openRow); err != nil {
+		t.Fatalf("open frontier row without resolution must be accepted: %v", err)
+	}
+	cases := []struct {
+		name string
+		row  rriOpenQuestion
+		want string
+	}{{
+		name: "missing status",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No status", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "requires status",
+	}, {
+		name: "invalid status",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Bad status", Status: "parked", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "invalid status",
+	}, {
+		name: "missing priority",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No priority", Status: "open", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "requires priority",
+	}, {
+		name: "invalid priority",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Bad priority", Status: "open", Priority: "P9", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "invalid priority",
+	}, {
+		name: "missing mode",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No mode", Status: "open", Priority: "P1", Blocks: boolPtr(true)},
+		want: "requires mode",
+	}, {
+		name: "invalid mode",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Bad mode", Status: "open", Priority: "P1", Mode: "async", Blocks: boolPtr(true)},
+		want: "invalid mode",
+	}, {
+		name: "missing blocks",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No blocks", Status: "open", Priority: "P1", Mode: "hitl"},
+		want: "requires blocks",
+	}, {
+		name: "resolved without resolution",
+		row:  rriOpenQuestion{ID: "Q1", Question: "No resolution", Status: "resolved", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true)},
+		want: "requires resolution",
+	}, {
+		name: "deferred without source",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Partial resolution", Status: "deferred", Priority: "P2", Mode: "afk", Blocks: boolPtr(true), Resolution: &rriResolution{Answer: "Later"}},
+		want: "requires resolution",
+	}}
+	for _, tc := range cases {
+		report := marked
+		report.OpenQuestions = []rriOpenQuestion{tc.row}
+		err := validateRriReport(report)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: expected error containing %q, got %v", tc.name, tc.want, err)
+		}
+	}
+	unsupported := marked
+	unsupported.PolicyVersion = 3
+	if err := validateRriReport(unsupported); err == nil || !strings.Contains(err.Error(), "unsupported rri_policy_version") {
+		t.Fatalf("expected unsupported rri_policy_version rejection, got %v", err)
+	}
+}
+
+func boolPtr(value bool) *bool { return &value }
+
+// Dual-enforcer parity (REQ-F1-7, OB-F1-7): marker-gated required-array
+// strictness must match the TypeScript validator in reporting/rri-report.ts,
+// including the named missing-array defect in the error message.
+func TestRriPolicy(t *testing.T) {
+	markedBase := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01", PolicyVersion: 2,
+		RequirementsMatrix: []rriRequirementRow{}, AutoAnswered: []rriAutoAnswerRow{},
+		DecisionsLog: []rriDecisionRow{}, OpenQuestions: []rriOpenQuestion{},
+		NotYetSpecified: []rriNotYetSpecifiedRow{}, OutOfScope: []rriOutOfScopeRow{},
+	}
+	if err := validateRriReport(markedBase); err != nil {
+		t.Fatalf("marked complete report must proceed: %v", err)
+	}
+	// Marked reports with a missing required array are rejected, and the defect
+	// names the missing array identically to the TypeScript validator.
+	nilBySection := map[string]func(r *rriReport){
+		"requirements_matrix": func(r *rriReport) { r.RequirementsMatrix = nil },
+		"auto_answered":       func(r *rriReport) { r.AutoAnswered = nil },
+		"decisions_log":       func(r *rriReport) { r.DecisionsLog = nil },
+		"open_questions":      func(r *rriReport) { r.OpenQuestions = nil },
+	}
+	for section, clear := range nilBySection {
+		report := markedBase
+		clear(&report)
+		err := validateRriReport(report)
+		want := "marked RRI report is missing the " + section + " section"
+		if err == nil || err.Error() != want {
+			t.Fatalf("marked report missing %s: expected error %q, got %v", section, want, err)
+		}
+	}
+	// Legacy reports retain their prior tolerated shape: missing arrays stay
+	// valid under legacy rules, matching the TypeScript legacy tolerance.
+	legacy := rriReport{ProjectName: "Project", Generated: "2026-09-01"}
+	if err := validateRriReport(legacy); err != nil {
+		t.Fatalf("legacy report with every array missing must stay valid: %v", err)
+	}
+	legacyPartial := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01",
+		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Legacy shape row"}},
+	}
+	if err := validateRriReport(legacyPartial); err != nil {
+		t.Fatalf("legacy report with some arrays missing must stay valid: %v", err)
+	}
+}
+
+// Stage-order parity (REQ-F1-7): the Go artifact-stage taxonomy must match the
+// TypeScript scheduler's PLANNING_STAGE_ORDER in pi-ext/pipeline/stage-resolution.ts
+// stage for stage, including the supplementary rri_t_scenarios entry.
+func TestRriStageOrder(t *testing.T) {
+	pkgDir, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsSource, err := os.ReadFile(filepath.Join(pkgDir, "..", "..", "..", "pi-ext", "pipeline", "stage-resolution.ts"))
+	if err != nil {
+		t.Fatalf("read TypeScript stage order: %v", err)
+	}
+	match := regexp.MustCompile(`PLANNING_STAGE_ORDER: string\[\] = \[([^\]]*)\]`).FindSubmatch(tsSource)
+	if match == nil {
+		t.Fatal("PLANNING_STAGE_ORDER not found in pi-ext/pipeline/stage-resolution.ts")
+	}
+	var tsOrder []string
+	for _, raw := range strings.Split(string(match[1]), ",") {
+		entry := strings.Trim(strings.TrimSpace(raw), "\"")
+		if entry != "" {
+			tsOrder = append(tsOrder, entry)
+		}
+	}
+	if !reflect.DeepEqual(workItemStages, tsOrder) {
+		t.Fatalf("Go workItemStages %v must match TypeScript PLANNING_STAGE_ORDER %v", workItemStages, tsOrder)
+	}
+	if indexOfStage(workItemStages, "rri_t_scenarios") != indexOfStage(workItemStages, "rri")+1 {
+		t.Fatalf("rri_t_scenarios must directly follow rri in both stage orders: %v", workItemStages)
+	}
+}
+
+func TestRriScopeSections(t *testing.T) {
+	markedBase := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01", PolicyVersion: 2,
+		RequirementsMatrix: []rriRequirementRow{}, AutoAnswered: []rriAutoAnswerRow{},
+		DecisionsLog: []rriDecisionRow{}, OpenQuestions: []rriOpenQuestion{},
+		NotYetSpecified: []rriNotYetSpecifiedRow{},
+		OutOfScope:      []rriOutOfScopeRow{},
+	}
+	if err := validateRriReport(markedBase); err != nil {
+		t.Fatalf("marked report with empty scope sections must be accepted: %v", err)
+	}
+	filled := markedBase
+	filled.NotYetSpecified = []rriNotYetSpecifiedRow{{Uncertainty: "Export formats", GraduationPath: "Resolve with the owner before contracts"}}
+	filled.OutOfScope = []rriOutOfScopeRow{{Exclusion: "Cloud sync", Reason: "Outside the epic scope"}}
+	if err := validateRriReport(filled); err != nil {
+		t.Fatalf("marked report with filled scope sections must be accepted: %v", err)
+	}
+	cases := []struct {
+		name string
+		mut  func(r *rriReport)
+		want string
+	}{{
+		name: "missing not_yet_specified",
+		mut:  func(r *rriReport) { r.NotYetSpecified = nil },
+		want: "requires the not_yet_specified section",
+	}, {
+		name: "missing out_of_scope",
+		mut:  func(r *rriReport) { r.OutOfScope = nil },
+		want: "requires the out_of_scope section",
+	}, {
+		name: "not_yet_specified row without graduation path",
+		mut:  func(r *rriReport) { r.NotYetSpecified = []rriNotYetSpecifiedRow{{Uncertainty: "Export formats"}} },
+		want: "require uncertainty and graduation_path",
+	}, {
+		name: "out_of_scope row without reason",
+		mut:  func(r *rriReport) { r.OutOfScope = []rriOutOfScopeRow{{Exclusion: "Cloud sync"}} },
+		want: "require exclusion and reason",
+	}}
+	for _, tc := range cases {
+		report := markedBase
+		tc.mut(&report)
+		err := validateRriReport(report)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: expected error containing %q, got %v", tc.name, tc.want, err)
+		}
+	}
+	legacy := rriReport{
+		ProjectName: "Project", Generated: "2026-09-01",
+		OpenQuestions: []rriOpenQuestion{{ID: "Q1", Question: "Legacy shape row"}},
+	}
+	if err := validateRriReport(legacy); err != nil {
+		t.Fatalf("legacy report without scope sections must stay valid: %v", err)
+	}
+	// No Destination field exists in the schema: a destination key in the payload
+	// is ignored at unmarshal time and never re-emitted by persistence.
+	var withDestination rriReport
+	if err := json.Unmarshal([]byte(`{"project_name":"Project","generated":"2026-09-01","rri_policy_version":2,"requirements_matrix":[],"auto_answered":[],"decisions_log":[],"open_questions":[],"not_yet_specified":[],"out_of_scope":[],"destination":"Work Item goals"}`), &withDestination); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRriReport(withDestination); err != nil {
+		t.Fatalf("destination payload must validate without a Destination field: %v", err)
+	}
+	if persisted, err := json.Marshal(withDestination); err != nil || strings.Contains(string(persisted), "destination") {
+		t.Fatalf("persisted report must not carry a destination field: %s err=%v", persisted, err)
+	}
+}
+
+func TestWorkItemRriFinalizeMarkedFrontierReportPersists(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Marked RRI finalization"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	payload, _ := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-FRONTIER", "priority": "tier1", "title": "Frontier persistence", "description": "Persist frontier rows", "acceptanceCriteria": "Given a marked RRI payload\nWhen rri-finalize runs\nThen the frontier rows persist"}},
+		"decisions":    []map[string]any{{"key": "frontier_mode", "answer": "Adopt the frontier schema"}},
+		"report": map[string]any{
+			"project_name": "Marked RRI finalization", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-FRONTIER", "requirement": "Frontier persistence", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Frontier mode", "options_considered": "Legacy vs frontier", "chosen": "Frontier", "rationale": "Single contract"}},
+			"open_questions":    []map[string]any{{"id": "Q1", "question": "Ship order", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "CLI first", "source": "Owner confirm"}}},
+			"not_yet_specified": []map[string]string{{"uncertainty": "Export formats", "graduation_path": "Resolve with the owner before contracts"}},
+			"out_of_scope":      []map[string]string{{"exclusion": "Cloud sync", "reason": "Outside the epic scope"}},
+		},
+	})
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor"))
+	if finalized["artifact_id"] == "" {
+		t.Fatalf("finalized = %#v", finalized)
+	}
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var content string
+	if err = db.QueryRow(`SELECT content FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	var persisted map[string]any
+	if err = json.Unmarshal([]byte(content), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted["rri_policy_version"] != float64(2) {
+		t.Fatalf("persisted rri_policy_version = %#v", persisted["rri_policy_version"])
+	}
+	questions := persisted["open_questions"].([]any)
+	row := questions[0].(map[string]any)
+	if row["status"] != "resolved" || row["priority"] != "P1" || row["mode"] != "hitl" || row["blocks"] != true {
+		t.Fatalf("persisted frontier row = %#v", row)
+	}
+	resolution := row["resolution"].(map[string]any)
+	if resolution["answer"] != "CLI first" || resolution["source"] != "Owner confirm" {
+		t.Fatalf("persisted resolution = %#v", resolution)
+	}
+	scopeRows := persisted["not_yet_specified"].([]any)
+	if len(scopeRows) != 1 || scopeRows[0].(map[string]any)["uncertainty"] != "Export formats" || scopeRows[0].(map[string]any)["graduation_path"] != "Resolve with the owner before contracts" {
+		t.Fatalf("persisted not_yet_specified = %#v", scopeRows)
+	}
+	excluded := persisted["out_of_scope"].([]any)
+	if len(excluded) != 1 || excluded[0].(map[string]any)["exclusion"] != "Cloud sync" || excluded[0].(map[string]any)["reason"] != "Outside the epic scope" {
+		t.Fatalf("persisted out_of_scope = %#v", excluded)
+	}
+	if _, hasDestination := persisted["destination"]; hasDestination {
+		t.Fatalf("persisted report must not carry a destination field: %#v", persisted)
+	}
+}
+
+func TestWorkItemRriFinalizeMarkedEmptyScopeSectionsPersist(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Empty scope finalization"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	payload, _ := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-SCOPE-EMPTY", "priority": "tier1", "title": "Scope sections persist", "description": "Persist empty scope sections", "acceptanceCriteria": "Given a marked report with empty scope sections\nWhen rri-finalize runs\nThen both scope keys persist"}},
+		"decisions":    []map[string]any{},
+		"report": map[string]any{
+			"project_name":        "Empty scope finalization", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-SCOPE-EMPTY", "requirement": "Scope sections persist", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{},
+			"open_questions":      []map[string]any{},
+			"not_yet_specified":   []map[string]string{},
+			"out_of_scope":        []map[string]string{},
+		},
+	})
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor"))
+	if finalized["artifact_id"] == "" {
+		t.Fatalf("finalized = %#v", finalized)
+	}
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var content string
+	if err = db.QueryRow(`SELECT content FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	var persisted map[string]any
+	if err = json.Unmarshal([]byte(content), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"not_yet_specified", "out_of_scope"} {
+		rows, ok := persisted[key].([]any)
+		if !ok || len(rows) != 0 {
+			t.Fatalf("persisted %s must remain an empty array, got %#v", key, persisted[key])
+		}
+	}
+}
+
+func TestWorkItemRriFinalizeRejectsMalformedMarkedRows(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Rejected RRI finalization"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	base := map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-FRONTIER", "priority": "tier1", "title": "Frontier persistence", "description": "Persist frontier rows", "acceptanceCriteria": "Given a marked RRI payload\nWhen rri-finalize runs\nThen the frontier rows persist"}},
+		"decisions":    []map[string]any{{"key": "frontier_mode", "answer": "Adopt the frontier schema"}},
+		"report": map[string]any{
+			"project_name": "Rejected RRI finalization", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-FRONTIER", "requirement": "Frontier persistence", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Frontier mode", "options_considered": "Legacy vs frontier", "chosen": "Frontier", "rationale": "Single contract"}},
+			"open_questions": []map[string]any{},
+		},
+	}
+	cases := []struct {
+		name string
+		row  map[string]any
+		want string
+	}{{
+		name: "missing status",
+		row:  map[string]any{"id": "Q1", "question": "No status", "priority": "P1", "mode": "hitl", "blocks": true},
+		want: "requires status",
+	}, {
+		name: "invalid enum",
+		row:  map[string]any{"id": "Q1", "question": "Bad status", "status": "parked", "priority": "P1", "mode": "hitl", "blocks": true},
+		want: "invalid status",
+	}, {
+		name: "resolved without resolution",
+		row:  map[string]any{"id": "Q1", "question": "No resolution", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true},
+		want: "requires resolution",
+	}}
+	for _, tc := range cases {
+		report := cloneJSONMap(t, base["report"])
+		report["open_questions"] = []any{tc.row}
+		payload, _ := json.Marshal(map[string]any{"requirements": base["requirements"], "decisions": base["decisions"], "report": report})
+		out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor")
+		if !strings.Contains(out, tc.want) {
+			t.Fatalf("%s: expected error containing %q, got %s", tc.name, tc.want, out)
+		}
+	}
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var artifacts int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND revision=2`, id).Scan(&artifacts); err != nil || artifacts != 0 {
+		t.Fatalf("rejected finalization persisted artifacts=%d err=%v", artifacts, err)
+	}
+}
+
+func cloneJSONMap(t *testing.T, value any) map[string]any {
+	t.Helper()
+	raw, err := json.Marshal(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result map[string]any
+	if err = json.Unmarshal(raw, &result); err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+// markedRriPayload builds a publishable marked frontier payload with an
+// optional set of open_questions rows so publish-gate tests can vary only the
+// frontier rows under test.
+func markedRriPayload(t *testing.T, title string, questions []any) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-GATE", "priority": "tier1", "title": "Publish gate", "description": "Gate RRI publication", "acceptanceCriteria": "Given a marked RRI payload\nWhen rri-finalize runs\nThen the publish gate applies"}},
+		"decisions":    []map[string]any{{"key": "gate_mode", "answer": "Gate marked reports"}},
+		"report": map[string]any{
+			"project_name": title, "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-GATE", "requirement": "Publish gate", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Gate mode", "options_considered": "Gated vs legacy", "chosen": "Gated", "rationale": "Blocking frontier"}},
+			"open_questions":      questions,
+			"not_yet_specified":   []map[string]string{},
+			"out_of_scope":        []map[string]string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
+}
+
+func glossaryRriPayload(t *testing.T, requirementTitle, requirementDescription, decisionAnswer string) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-GLOSSARY", "priority": "tier1", "title": requirementTitle, "description": requirementDescription, "acceptanceCriteria": "Given a resolved requirement\nWhen save_rri_interview runs\nThen the terminology guard applies"}},
+		"decisions":    []map[string]any{{"key": "glossary_mode", "answer": decisionAnswer}},
+		"report": map[string]any{
+			"project_name": "Glossary guard", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-GLOSSARY", "requirement": requirementTitle, "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Glossary mode", "options_considered": "Guarded vs legacy", "chosen": "Guarded", "rationale": "Canonical terminology"}},
+			"open_questions": []any{}, "not_yet_specified": []map[string]string{}, "out_of_scope": []map[string]string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
+}
+
+// glossaryApplyPayload is an RRI finalize payload whose resolved report
+// carries one explicitly identified glossary update for approval-time
+// application (REQ-F1-6).
+func glossaryApplyPayload(t *testing.T) string {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-GLOSSARY-APPLY", "priority": "tier1", "title": "Vertical slice delivery", "description": "Deliver one vertical slice", "acceptanceCriteria": "Given a resolved requirement\nWhen approval runs\nThen the glossary gains the resolved terms"}},
+		"decisions":    []map[string]any{{"key": "glossary_mode", "answer": "Gate marked reports"}},
+		"report": map[string]any{
+			"project_name": "Glossary approval", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-GLOSSARY-APPLY", "requirement": "Vertical slice delivery", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Glossary mode", "options_considered": "Guarded vs legacy", "chosen": "Guarded", "rationale": "Canonical terminology"}},
+			"open_questions":    []map[string]any{{"id": "Q1", "question": "Which delivery shape?", "status": "resolved", "priority": "P2", "mode": "hitl", "blocks": false, "resolution": map[string]string{"answer": "One vertical slice", "source": "Owner confirm"}}},
+			"not_yet_specified": []map[string]string{}, "out_of_scope": []map[string]string{},
+			"glossary_updates": []map[string]string{{"term": "Delivery Aggregate", "definition": "The branch-owning delivery aggregate for one approved feature branch.", "avoid": "delivery bucket"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(payload)
+}
+
+func TestRriGlossaryApproval(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	contextPath := filepath.Join(root, "CONTEXT.md")
+	original := "# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"
+	if err := os.WriteFile(contextPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assertContextUnchanged := func(want string) {
+		t.Helper()
+		content, err := os.ReadFile(contextPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(content) != want {
+			t.Fatalf("CONTEXT.md = %q, want %q", string(content), want)
+		}
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Glossary approval"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	// The interview checkpoint is disposable and must never touch repository truth.
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	assertContextUnchanged(original)
+	runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryApplyPayload(t), "--actor-role", "contractor")
+	// Publication resolves the interview but still must not modify CONTEXT.md.
+	assertContextUnchanged(original)
+	// A failed approval leaves repository truth unchanged.
+	runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "rri", "missing", "approved")
+	assertContextUnchanged(original)
+	approved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", "current", "approved"))
+	if approved["glossary_updated"] != true {
+		t.Fatalf("approved = %#v", approved)
+	}
+	want := original + "\n**Delivery Aggregate**:\nThe branch-owning delivery aggregate for one approved feature branch.\n_Avoid_: delivery bucket\n"
+	assertContextUnchanged(want)
+
+	// An approved RRI without glossary updates leaves CONTEXT.md untouched.
+	second := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "No glossary updates"))
+	id2 := second["id"].(string)
+	scan2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id2, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id2, "scan", scan2["id"].(string), "accepted")
+	plain, err := json.Marshal(map[string]any{
+		"requirements": []map[string]any{{"key": "REQ-PLAIN", "priority": "tier1", "title": "Vertical slice delivery", "description": "Deliver one vertical slice", "acceptanceCriteria": "Given a resolved requirement\nWhen approval runs\nThen no glossary write happens"}},
+		"decisions":    []map[string]any{{"key": "glossary_mode", "answer": "Gate marked reports"}},
+		"report": map[string]any{
+			"project_name": "No glossary updates", "generated": "2026-09-01", "rri_policy_version": 2,
+			"requirements_matrix": []map[string]string{{"req_id": "REQ-PLAIN", "requirement": "Vertical slice delivery", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
+			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Glossary mode", "options_considered": "Guarded vs legacy", "chosen": "Guarded", "rationale": "Canonical terminology"}},
+			"open_questions": []any{}, "not_yet_specified": []map[string]string{}, "out_of_scope": []map[string]string{},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runPic(t, bin, root, home, "work-item", "rri-finalize", id2, string(plain), "--actor-role", "contractor")
+	approved2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-approve", id2, "rri", "current", "approved"))
+	if approved2["glossary_updated"] != false {
+		t.Fatalf("approved2 = %#v", approved2)
+	}
+	assertContextUnchanged(want)
+}
+
+// Approval-rejection constraint (REQ-F1-6): an RRI artifact whose
+// glossary_updates section fails validation must not be owner-approved
+// silently; the approval fails, reports the invalid data, and CONTEXT.md
+// stays unchanged.
+func TestRriGlossaryApprovalRejectsInvalidUpdates(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	contextPath := filepath.Join(root, "CONTEXT.md")
+	original := "# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"
+	if err := os.WriteFile(contextPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Invalid glossary approval"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+
+	invalidPayloads := []string{
+		// Validation failure: a row without a usable definition.
+		`{"project_name":"Invalid glossary","generated":"2026-09-01","rri_policy_version":2,"glossary_updates":[{"term":"Broken Term","definition":"   "}]}`,
+		// Type failure: glossary_updates present but not an update array.
+		`{"project_name":"Invalid glossary","generated":"2026-09-01","rri_policy_version":2,"glossary_updates":"not-an-array"}`,
+	}
+	for _, payload := range invalidPayloads {
+		saved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", payload))
+		out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "rri", saved["id"].(string), "approved")
+		if !strings.Contains(out, "glossary_updates") {
+			t.Fatalf("approval of invalid glossary_updates must report the invalid data, got: %s", out)
+		}
+		content, err := os.ReadFile(contextPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if string(content) != original {
+			t.Fatalf("rejected approval modified CONTEXT.md = %q, want %q", string(content), original)
+		}
+	}
+}
+
+// Repository-root constraint (REQ-F1-6): the approval-time glossary write must
+// follow repository truth discovery, not the process working directory, so an
+// approval run from a nested directory updates the canonical root CONTEXT.md
+// and never creates a shadowing copy next to the caller.
+func TestRriGlossaryApprovalFromNestedDirectory(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	contextPath := filepath.Join(root, "CONTEXT.md")
+	original := "# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"
+	if err := os.WriteFile(contextPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	nested := filepath.Join(root, "cmd", "pic")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, nested, home, "work-item", "create", "epic", "Nested glossary approval"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, nested, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, nested, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	finalized := asObject(t, runPic(t, bin, nested, home, "work-item", "rri-finalize", id, glossaryApplyPayload(t), "--actor-role", "contractor"))
+	if finalized["artifact_id"] == "" {
+		t.Fatalf("finalized = %#v", finalized)
+	}
+	approved := asObject(t, runPic(t, bin, nested, home, "work-item", "artifact-approve", id, "rri", "current", "approved"))
+	if approved["glossary_updated"] != true {
+		t.Fatalf("approved = %#v", approved)
+	}
+	want := original + "\n**Delivery Aggregate**:\nThe branch-owning delivery aggregate for one approved feature branch.\n_Avoid_: delivery bucket\n"
+	content, err := os.ReadFile(contextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != want {
+		t.Fatalf("root CONTEXT.md = %q, want %q", string(content), want)
+	}
+	if _, err := os.Stat(filepath.Join(nested, "CONTEXT.md")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("approval from nested cwd must not create %s (stat err=%v)", filepath.Join(nested, "CONTEXT.md"), err)
+	}
+}
+
+// Compensation constraint (REQ-F1-6): when a failed approval cannot restore
+// the pre-write CONTEXT.md, the compensation closure must report its failure
+// instead of leaving repository truth silently changed.
+func TestRriGlossaryApprovalCompensationFailure(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	contextPath := filepath.Join(root, "CONTEXT.md")
+	original := "# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"
+	if err := os.WriteFile(contextPath, []byte(original), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Glossary compensation"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryApplyPayload(t), "--actor-role", "contractor"))
+	artifactID := finalized["artifact_id"].(string)
+
+	// Run the writer in-process against the project so findRriTruthRoot
+	// resolves the same temp root from this working directory.
+	t.Chdir(root)
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	apply := func() func() error {
+		t.Helper()
+		tx, err := db.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer tx.Rollback()
+		updated, restore, err := applyRriGlossaryApproval(tx, id, "rri", artifactID)
+		if err != nil || !updated {
+			t.Fatalf("applyRriGlossaryApproval = (%v, %v), want updated write", updated, err)
+		}
+		return restore
+	}
+	// A healthy compensation puts back the exact pre-write content.
+	restore := apply()
+	if err := restore(); err != nil {
+		t.Fatalf("restore() = %v, want nil", err)
+	}
+	content, err := os.ReadFile(contextPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(content) != original {
+		t.Fatalf("restored CONTEXT.md = %q, want %q", string(content), original)
+	}
+	// A blocked restore must surface its error instead of swallowing it.
+	restore = apply()
+	if err := os.Chmod(contextPath, 0o444); err != nil {
+		t.Fatal(err)
+	}
+	if restoreErr := restore(); restoreErr == nil {
+		t.Fatal("restore() = nil, want error when the pre-write content cannot be written back")
+	}
+	if err := os.Chmod(contextPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRriGlossaryConflictFailsClosed(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	// A frontend-phase requirement title contradicts CONTEXT.md's Feature
+	// definition; this mirrors the real repository truth the guard reads.
+	if err := os.WriteFile(filepath.Join(root, "CONTEXT.md"), []byte("# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase, backend phase\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Glossary guard"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Frontend phase delivery", "Deliver the frontend phase first", "Gate marked reports"), "--actor-role", "contractor")
+	if !strings.Contains(out, "frontend phase") || !strings.Contains(out, "CONTEXT.md") || !strings.Contains(out, "Feature") {
+		t.Fatalf("glossary conflict must name the term, canonical definition, and source document, got %s", out)
+	}
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var artifacts, requirements, decisions, events int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&artifacts); err != nil || artifacts != 0 {
+		t.Fatalf("conflicting save persisted artifacts=%d err=%v", artifacts, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM requirements WHERE epic_id=?`, id).Scan(&requirements); err != nil || requirements != 0 {
+		t.Fatalf("conflicting save persisted requirements=%d err=%v", requirements, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM owner_decisions WHERE epic_id=?`, id).Scan(&decisions); err != nil || decisions != 0 {
+		t.Fatalf("conflicting save persisted decisions=%d err=%v", decisions, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='rri_finalized'`, id).Scan(&events); err != nil || events != 0 {
+		t.Fatalf("conflicting save persisted events=%d err=%v", events, err)
+	}
+	// The same payload without the conflicting terminology proceeds normally.
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "Gate marked reports"), "--actor-role", "contractor"))
+	if finalized["requirements"] != float64(1) || finalized["artifact_id"] == "" {
+		t.Fatalf("conflict-free save must proceed normally, got %#v", finalized)
+	}
+}
+
+func TestRriGlossaryDecisionConflictFailsClosed(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	if err := os.WriteFile(filepath.Join(root, "CONTEXT.md"), []byte("# Work Item Planning Context\n\n**Requirement**:\nAn authoritative behavioral obligation.\n_Avoid_: wish\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Decision glossary guard"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "Treat requirements as a wish"), "--actor-role", "contractor")
+	if !strings.Contains(out, "decision glossary_mode") || !strings.Contains(out, "wish") {
+		t.Fatalf("decision conflicts must use the same check with kind decision, got %s", out)
+	}
+}
+
+func TestRriAdrConflictFailsClosed(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	if err := os.MkdirAll(filepath.Join(root, "docs", "adr"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	adr := "# Rejected Planning Shape\n\n**Status**: accepted\n\nWe reject both one oversized Task per slice and removing child Code Review in favor of aggregate QA alone.\n"
+	if err := os.WriteFile(filepath.Join(root, "docs", "adr", "0001-test.md"), []byte(adr), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "ADR guard"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "One oversized Task per slice"), "--actor-role", "contractor")
+	if !strings.Contains(out, "one oversized Task per slice") || !strings.Contains(out, "0001-test.md") {
+		t.Fatalf("ADR conflict must name the phrase and source document, got %s", out)
+	}
+	// An accepted ADR that constrains a practice without the word reject (the
+	// ADR 0002 speculative-abstraction rule) must block a decision endorsing
+	// exactly that practice.
+	seams := "# Codebase Design At Module Seams\n\n**Status**: accepted\n\nAdd a Seam only when behavior actually varies; one implementation alone is not sufficient justification for a speculative abstraction.\n"
+	if err := os.WriteFile(filepath.Join(root, "docs", "adr", "0002-seams.md"), []byte(seams), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out = runPicError(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "adding a speculative abstraction with one implementation"), "--actor-role", "contractor")
+	if !strings.Contains(out, "speculative abstraction") || !strings.Contains(out, "0002-seams.md") {
+		t.Fatalf("accepted ADR constraint without reject wording must block the save, got %s", out)
+	}
+	// A non-accepted ADR stays advisory and must not block, even for phrases
+	// only it rejects.
+	if err := os.WriteFile(filepath.Join(root, "docs", "adr", "0003-draft.md"), []byte("# Draft\n\n**Status**: proposed\n\nWe reject adapter wands as Seam justification.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical slice delivery", "Deliver one vertical slice", "Adapter wands stay out"), "--actor-role", "contractor")
+}
+
+func TestRriGlossaryReportTextPersistsUnchanged(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	if err := os.WriteFile(filepath.Join(root, "CONTEXT.md"), []byte("# Work Item Planning Context\n\n**Feature**:\nA coherent, demonstrable vertical slice of behavior.\n_Avoid_: frontend phase\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Source text preservation"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, glossaryRriPayload(t, "Vertical  Slice   delivery", "Deliver one vertical slice", "Gate marked reports"), "--actor-role", "contractor"))
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var content string
+	if err = db.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=?`, finalized["artifact_id"].(string)).Scan(&content); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(content, `"Vertical  Slice   delivery"`) {
+		t.Fatalf("persisted report must preserve source text despite normalization, got %s", content)
+	}
+}
+
+func TestRriGlossaryParsesRepositoryTruth(t *testing.T) {
+	// The test binary runs in go-pic/cmd/pic, so the repository truth is three
+	// levels up; prove the parsing conventions match the real documents.
+	content, err := os.ReadFile(filepath.Join("..", "..", "..", "CONTEXT.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terms := parseRriGlossaryAvoidTerms(string(content), "CONTEXT.md")
+	var epicAvoid bool
+	for _, term := range terms {
+		if term.Canonical == "Epic" && term.Phrase == "one giant Task" {
+			epicAvoid = true
+		}
+	}
+	if !epicAvoid {
+		t.Fatalf("real CONTEXT.md must yield the Epic avoid terms, got %#v", terms)
+	}
+	adr, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "adr", "0001-vertical-slice-groups-and-bite-sized-tasks.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adrTerms := parseRriAdrRejectedTerms(string(adr), "docs/adr/0001-vertical-slice-groups-and-bite-sized-tasks.md")
+	var oversized bool
+	for _, term := range adrTerms {
+		if term.Phrase == "one oversized Task per slice" {
+			oversized = true
+		}
+	}
+	if !oversized {
+		t.Fatalf("accepted ADR 0001 must yield its rejected phrase, got %#v", adrTerms)
+	}
+}
+
+func TestRriAdrParsesSpeculativeAbstractionConstraint(t *testing.T) {
+	// Accepted ADR 0002 forbids speculative abstractions whose only
+	// justification is a single implementation; the parser must contribute
+	// that constraint even though the sentence never uses the word reject.
+	adr, err := os.ReadFile(filepath.Join("..", "..", "..", "docs", "adr", "0002-codebase-design-at-module-seams.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	adrTerms := parseRriAdrRejectedTerms(string(adr), "docs/adr/0002-codebase-design-at-module-seams.md")
+	var speculative bool
+	for _, term := range adrTerms {
+		if term.Phrase == "speculative abstraction" {
+			speculative = true
+		}
+	}
+	if !speculative {
+		t.Fatalf("accepted ADR 0002 must yield its speculative abstraction constraint, got %#v", adrTerms)
+	}
+}
+
+func TestRriPublishGateBlocksOpenP0P1Questions(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	for _, tc := range []struct {
+		name    string
+		row     map[string]any
+		wantErr string
+	}{
+		{name: "open P0", row: map[string]any{"id": "Q1", "question": "Ship order", "status": "open", "priority": "P0", "mode": "hitl", "blocks": true}, wantErr: "open P0/P1 question Q1 (P0) remains unresolved: Ship order"},
+		{name: "open P1", row: map[string]any{"id": "Q2", "question": "Auth mode", "status": "open", "priority": "P1", "mode": "hitl", "blocks": true}, wantErr: "open P0/P1 question Q2 (P1) remains unresolved: Auth mode"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Publish gate "+tc.name))
+			id := item["id"].(string)
+			scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+			runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+			runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+			out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id, markedRriPayload(t, "Publish gate "+tc.name, []any{tc.row}), "--actor-role", "contractor")
+			if !strings.Contains(out, tc.wantErr) {
+				t.Fatalf("open P0/P1 finalization must name the open question, got %s", out)
+			}
+			db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			var artifacts, decisions, events int
+			if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id).Scan(&artifacts); err != nil || artifacts != 0 {
+				t.Fatalf("rejected publication persisted artifacts=%d err=%v", artifacts, err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM owner_decisions WHERE epic_id=?`, id).Scan(&decisions); err != nil || decisions != 0 {
+				t.Fatalf("rejected publication persisted owner decisions=%d err=%v", decisions, err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=?`, id).Scan(&decisions); err != nil || decisions != 0 {
+				t.Fatalf("rejected publication persisted work-item owner decisions=%d err=%v", decisions, err)
+			}
+			if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='rri_finalized'`, id).Scan(&events); err != nil || events != 0 {
+				t.Fatalf("rejected publication persisted events=%d err=%v", events, err)
+			}
+		})
+	}
+	// Open P2 rows and legacy pre-marker rows must not trip the gate.
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Publish gate low priority"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	openP2 := map[string]any{"id": "Q3", "question": "Nice to have", "status": "open", "priority": "P2", "mode": "hitl", "blocks": false}
+	runPic(t, bin, root, home, "work-item", "rri-finalize", id, markedRriPayload(t, "Publish gate low priority", []any{openP2}), "--actor-role", "contractor")
+}
+
+func TestRriDeferralReasonPersistence(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Deferral persistence"))
+	id := item["id"].(string)
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", "# Disposable interview checkpoint")
+	deferredP1 := map[string]any{"id": "Q1", "question": "Export formats", "status": "deferred", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "Owner deferred formats to the contracts stage", "source": "Owner decision 2026-09-01"}}
+	deferredP2 := map[string]any{"id": "Q2", "question": "Nice to have", "status": "deferred", "priority": "P2", "mode": "afk", "blocks": false, "resolution": map[string]string{"answer": "Skip for now", "source": "Owner note"}}
+	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, markedRriPayload(t, "Deferral persistence", []any{deferredP1, deferredP2}), "--actor-role", "contractor"))
+	artifactID := finalized["artifact_id"].(string)
+	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var decision, questionID, artifactRef, notes string
+	if err = db.QueryRow(`SELECT decision,question_id,rri_artifact_id,notes FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred'`, id).Scan(&decision, &questionID, &artifactRef, &notes); err != nil {
+		t.Fatalf("deferred P1 owner reason must persist durably in work_item_owner_decisions: %v", err)
+	}
+	if questionID != "Q1" || notes != "Owner deferred formats to the contracts stage" || artifactRef != artifactID {
+		t.Fatalf("persisted deferral = decision %q question %q notes %q artifact %q", decision, questionID, notes, artifactRef)
+	}
+	// Only P0/P1 deferrals get the durable deferral record; the P2 deferral stays
+	// report-only so the deferral projection tracks exactly the gated frontier.
+	var count int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred'`, id).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("deferral records=%d err=%v, want exactly the P1 deferral", count, err)
+	}
+	// The deferral is available to planning review projections via the show
+	// document's owner_decisions collection (core.go projects
+	// work_item_owner_decisions there).
+	shown := asObject(t, runPic(t, bin, root, home, "show", id))
+	var projected bool
+	for _, entry := range shown["owner_decisions"].([]any) {
+		row := entry.(map[string]any)
+		if row["decision"] == "deferred" && row["question_id"] == "Q1" && row["notes"] == "Owner deferred formats to the contracts stage" {
+			projected = true
+		}
+	}
+	if !projected {
+		t.Fatalf("show owner_decisions projection must carry the deferral: %#v", shown["owner_decisions"])
+	}
+	// Re-finalizing replaces the deferral rows so a revision cannot strand stale
+	// deferrals: Q1 resolves and a new P0 question defers with its own reason.
+	resolvedQ1 := map[string]any{"id": "Q1", "question": "Export formats", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "CSV first", "source": "Owner"}}
+	deferredP0 := map[string]any{"id": "Q10", "question": "Batch size", "status": "deferred", "priority": "P0", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "Owner deferred batch sizing to the contracts stage", "source": "Owner decision"}}
+	revised := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, markedRriPayload(t, "Deferral persistence revised", []any{resolvedQ1, deferredP0}), "--actor-role", "contractor"))
+	if revised["revised"] != true {
+		t.Fatalf("re-finalization must take the revision path: %#v", revised)
+	}
+	var staleRows int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred' AND question_id='Q1'`, id).Scan(&staleRows); err != nil || staleRows != 0 {
+		t.Fatalf("stale deferral rows after revision=%d err=%v", staleRows, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=? AND decision='deferred' AND question_id='Q10'`, id).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("replacement deferral rows=%d err=%v, want exactly the revised P0 deferral", count, err)
+	}
+	// A deferred P0/P1 row without a real reason still rejects publication.
+	item2 := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Deferral missing reason"))
+	id2 := item2["id"].(string)
+	scan2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id2, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id2, "scan", scan2["id"].(string), "accepted")
+	runPic(t, bin, root, home, "work-item", "artifact-save", id2, "rri", "# Disposable interview checkpoint")
+	blankReason := map[string]any{"id": "Q9", "question": "Auth mode", "status": "deferred", "priority": "P1", "mode": "hitl", "blocks": true, "resolution": map[string]string{"answer": "   ", "source": "Owner"}}
+	out := runPicError(t, bin, root, home, "work-item", "rri-finalize", id2, markedRriPayload(t, "Deferral missing reason", []any{blankReason}), "--actor-role", "contractor")
+	if !strings.Contains(out, "deferred P0/P1 question Q9 (P1) requires a non-empty owner deferral reason") {
+		t.Fatalf("missing deferral reason must produce a concrete error, got %s", out)
+	}
+	var artifacts, deferralRows int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='rri' AND revision=2`, id2).Scan(&artifacts); err != nil || artifacts != 0 {
+		t.Fatalf("rejected deferral persisted artifacts=%d err=%v", artifacts, err)
+	}
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_owner_decisions WHERE work_item_id=?`, id2).Scan(&deferralRows); err != nil || deferralRows != 0 {
+		t.Fatalf("rejected deferral persisted owner decisions=%d err=%v", deferralRows, err)
+	}
+}
+
+func TestInitDBWidensOwnerDecisionsForRriDeferrals(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate a database from a binary predating the RRI deferral widening:
+	// recreate the table in its legacy shape and clear migration records so the
+	// next open re-runs the rebuild exactly as an upgrade would.
+	legacySQL := strings.Replace(workItemOwnerDecisionsTableSQL, "completion_report_id TEXT REFERENCES", "completion_report_id TEXT NOT NULL REFERENCES", 1)
+	legacySQL = strings.Replace(legacySQL, "decision IN ('accepted','rejected','deferred')", "decision IN ('accepted','rejected')", 1)
+	legacySQL = strings.Replace(legacySQL, ", question_id TEXT NOT NULL DEFAULT '', rri_artifact_id TEXT NOT NULL DEFAULT ''", "", 1)
+	if _, err = db.Exec(`PRAGMA foreign_keys=OFF;
+		PRAGMA legacy_alter_table=ON;
+		ALTER TABLE work_item_owner_decisions RENAME TO work_item_owner_decisions__workflow_migration`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(legacySQL); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err = db.Exec(`INSERT INTO work_items(id,type,title) VALUES('wi-deferral-mig','epic','Deferral migration');
+		INSERT INTO work_item_owner_decisions(id,work_item_id,completion_report_id,decision,notes,decided_by_role) VALUES('wiod-legacy','wi-deferral-mig','','rejected','needs changes','owner');
+		DROP TABLE work_item_owner_decisions__workflow_migration;
+		DELETE FROM schema_migrations`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var decision, questionID, artifactRef, notes string
+	if err = db.QueryRow(`SELECT decision,question_id,rri_artifact_id,notes FROM work_item_owner_decisions WHERE id='wiod-legacy'`).Scan(&decision, &questionID, &artifactRef, &notes); err != nil {
+		t.Fatalf("legacy decision row must survive the widening rebuild: %v", err)
+	}
+	if decision != "rejected" || questionID != "" || artifactRef != "" || notes != "needs changes" {
+		t.Fatalf("rebuilt legacy row = decision %q question %q artifact %q notes %q", decision, questionID, artifactRef, notes)
+	}
+	if _, err = db.Exec(`INSERT INTO work_item_owner_decisions(id,work_item_id,completion_report_id,decision,question_id,rri_artifact_id,notes,decided_by_role) VALUES('wiod-deferred','wi-deferral-mig',NULL,'deferred','Q1','wia-rri','Owner deferred formats','owner')`); err != nil {
+		t.Fatalf("widened table must accept RRI deferral rows: %v", err)
 	}
 }
 
@@ -1739,6 +2825,62 @@ func TestReviewFixCapPersistsBlockedOwnerAction(t *testing.T) {
 	}
 	if !foundRoundCap {
 		t.Fatalf("missing durable review_fix_round_cap owner-action event: %#v", events)
+	}
+}
+
+func TestReviewDecisionFixClearsOwnerApprovalBlock(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Review decision fix"))
+	id := item["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	activateTestWorkItemTIP(t, dbPath, id)
+	suffix := strings.TrimPrefix(id, "wi-")
+	// Seed a completed worker candidate (attempt 2) and a completed failed review
+	// that durably requires owner approval, mirroring a reviewer-flagged verdict.
+	runSQLite(t, dbPath, `INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,integrated_patch_path,integrated_patch_hash,artifact_saved_at,completed_at,advanced_at) VALUES('pr-cand','`+id+`','worker',2,'completed','lease-cand',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','candidate.patch','patch-hash',datetime('now'),datetime('now'),datetime('now')); INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,candidate_run_id,candidate_patch_hash,result_json,completed_at) VALUES('pr-rev','`+id+`','review',1,'completed','lease-rev',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','pr-cand','patch-hash','{"review_status":"failed","candidate_run_id":"pr-cand","candidate_patch_hash":"patch-hash","owner_approval_required":true}',datetime('now')); UPDATE work_items SET review_status='failed' WHERE id='`+id+`';`)
+
+	// The blocked review-fix claim is rejected while the flag stands.
+	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--review-fix", "1"); !strings.Contains(out, "requires owner approval") {
+		t.Fatalf("pre-decision claim = %s", out)
+	}
+	// Non-owner actors are rejected.
+	if out := runPicError(t, bin, root, home, "workflow", "review-decision", id, "pr-rev", "fix", "--notes", "n", "--actor-role", "contractor"); !strings.Contains(out, "actor_role=owner") {
+		t.Fatalf("contractor decision = %s", out)
+	}
+	// Only the fix decision is modeled.
+	if out := runPicError(t, bin, root, home, "workflow", "review-decision", id, "pr-rev", "deferred", "--notes", "n", "--actor-role", "owner"); !strings.Contains(out, "supports only decision 'fix'") {
+		t.Fatalf("deferred decision = %s", out)
+	}
+	// A review without the durable flag is not a decision target.
+	runSQLite(t, dbPath, `INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,candidate_run_id,candidate_patch_hash,result_json,completed_at) VALUES('pr-plain','`+id+`','review',2,'completed','lease-plain',datetime('now'),'wip-`+suffix+`',1,'pack-`+suffix+`','pr-cand','patch-hash','{"review_status":"failed","candidate_run_id":"pr-cand","candidate_patch_hash":"patch-hash"}',datetime('now'));`)
+	if out := runPicError(t, bin, root, home, "workflow", "review-decision", id, "pr-plain", "fix", "--notes", "n", "--actor-role", "owner"); !strings.Contains(out, "requires a completed failed review with owner_approval_required") {
+		t.Fatalf("plain failed review decision = %s", out)
+	}
+	// The owner records the fix decision; the durable flag clears.
+	decided := asObject(t, runPic(t, bin, root, home, "workflow", "review-decision", id, "pr-rev", "fix", "--notes", "owner directs a fix of the Important findings", "--actor-role", "owner"))
+	if decided["id"] != "pr-rev" {
+		t.Fatalf("review-decision returned run = %#v", decided)
+	}
+	if !strings.Contains(fmt.Sprint(decided["result_json"]), `"owner_approval_required":false`) {
+		t.Fatalf("flag not cleared: %#v", decided)
+	}
+	events := runPic(t, bin, root, home, "workflow", "events", id).([]any)
+	foundDecision := false
+	for _, ev := range events {
+		obj := asObject(t, ev)
+		if obj["event_type"] == "owner_review_decision" && obj["actor_role"] == "owner" {
+			foundDecision = true
+		}
+	}
+	if !foundDecision {
+		t.Fatalf("missing owner_review_decision audit event: %#v", events)
+	}
+	// The cleared flag plus the event's after_attempt baseline let the review-fix
+	// claim proceed with a fresh cycle instead of staying blocked.
+	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--review-fix", "1"))
+	if claim["review_fix_cycle"] != float64(1) {
+		t.Fatalf("post-decision claim did not start a fresh review-fix epoch: %#v", claim)
 	}
 }
 
