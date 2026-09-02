@@ -1568,6 +1568,13 @@ func workItemArtifactSave(db *sql.DB, args []string) error {
 			return err
 		}
 	}
+	if args[1] == "blueprint" {
+		// Cross-artifact excluded_keys binding needs the approved RRI referent,
+		// so it runs inside the transaction instead of the pure pre-flight above.
+		if err = validateBlueprintExcludedKeysBinding(tx, args[0], args[2]); err != nil {
+			return err
+		}
+	}
 	var revision int
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage=?`, args[0], args[1]).Scan(&revision); err != nil {
 		return err
@@ -1809,13 +1816,15 @@ type verificationSeam struct {
 }
 
 // blueprintSeamSet parses the declared verification seams of a policy-v2
-// Blueprint content blob.
+// Blueprint content blob, including the additive schema_version 2.1 marker.
 func blueprintSeamSet(content string) (map[string]bool, error) {
 	var blueprint struct {
-		DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
+		DecompositionPolicyVersion float64            `json:"decomposition_policy_version"`
+		SchemaVersion              float64            `json:"schema_version"`
 		VerificationSeams          []verificationSeam `json:"verification_seams"`
 	}
-	if err := json.Unmarshal([]byte(content), &blueprint); err != nil || blueprint.DecompositionPolicyVersion != 2 {
+	v21 := blueprint.SchemaVersion == 2.1 && (blueprint.DecompositionPolicyVersion == 0 || blueprint.DecompositionPolicyVersion == 2)
+	if err := json.Unmarshal([]byte(content), &blueprint); err != nil || !(blueprint.DecompositionPolicyVersion == 2 || v21) {
 		return nil, errors.New("approved Blueprint is not decomposition policy v2 with verification seams")
 	}
 	seams := map[string]bool{}
@@ -1847,6 +1856,52 @@ func validateVerificationSeams(seams []verificationSeam) error {
 	return nil
 }
 
+// validateBlueprintExcludedKeysBinding fails a v2.1 Blueprint closed unless
+// every excluded_keys entry matches an exclusion key in the newest approved
+// RRI out_of_scope artifact on the same planning lineage. The v2.1 schema is
+// the additive schema_version marker on policy v2, not a new policy version.
+// It runs inside the caller's transaction at the Blueprint save and approve
+// paths; legacy policy v1 and v2 content pass through unchanged.
+func validateBlueprintExcludedKeysBinding(db databaseQueryer, workItemID, content string) error {
+	var report struct {
+		DecompositionPolicyVersion float64  `json:"decomposition_policy_version"`
+		SchemaVersion              float64  `json:"schema_version"`
+		ExcludedKeys               []string `json:"excluded_keys"`
+	}
+	if err := json.Unmarshal([]byte(content), &report); err != nil {
+		return nil // invalid JSON is rejected by validateBlueprintReport
+	}
+	v21 := report.SchemaVersion == 2.1 && (report.DecompositionPolicyVersion == 0 || report.DecompositionPolicyVersion == 2)
+	if !v21 || len(report.ExcludedKeys) == 0 {
+		return nil
+	}
+	var rriContent string
+	if err := db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='rri' AND c.decision_type='approved' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&rriContent); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("Blueprint policy v2.1 requires an approved RRI out_of_scope referent for excluded_keys")
+		}
+		return err
+	}
+	var rri struct {
+		OutOfScope []struct {
+			Exclusion string `json:"exclusion"`
+		} `json:"out_of_scope"`
+	}
+	if err := json.Unmarshal([]byte(rriContent), &rri); err != nil {
+		return fmt.Errorf("approved RRI out_of_scope referent is unreadable: %w", err)
+	}
+	keys := map[string]bool{}
+	for _, row := range rri.OutOfScope {
+		keys[row.Exclusion] = true
+	}
+	for _, key := range report.ExcludedKeys {
+		if !keys[key] {
+			return fmt.Errorf("Blueprint excluded key %q is not declared in the approved RRI out_of_scope", key)
+		}
+	}
+	return nil
+}
+
 func validateBlueprintReport(content string) error {
 	var report struct {
 		ProjectInfo   map[string]any `json:"project_info"`
@@ -1861,7 +1916,9 @@ func validateBlueprintReport(content string) error {
 			EstimatedEffort int   `json:"estimated_effort_minutes"`
 		} `json:"task_decomposition_preview"`
 		DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
+		SchemaVersion              float64            `json:"schema_version"`
 		VerificationSeams          []verificationSeam `json:"verification_seams"`
+		ExcludedKeys               []string           `json:"excluded_keys"`
 	}
 	if err := json.Unmarshal([]byte(content), &report); err != nil {
 		return errors.New("Blueprint artifact must be valid JSON")
@@ -1879,6 +1936,13 @@ func validateBlueprintReport(content string) error {
 		// Policy v2 is the solution spec plus owner-approved verification seams;
 		// the task_decomposition_preview is retired (Contract's task_graph_summary
 		// keeps the early cost signal).
+		if report.SchemaVersion == 2.1 {
+			for _, key := range report.ExcludedKeys {
+				if strings.TrimSpace(key) == "" {
+					return errors.New("Blueprint policy v2.1 excluded_keys require non-empty keys")
+				}
+			}
+		}
 		return validateVerificationSeams(report.VerificationSeams)
 	}
 	if len(report.Preview.Tasks) == 0 || report.Preview.EstimatedTasks != len(report.Preview.Tasks) || report.Preview.EstimatedEffort < 1 {
@@ -2767,6 +2831,17 @@ func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decis
 		}
 		if _, err = validateTaskGraphArtifact(tx, workItemID, graphContent); err != nil {
 			return "", 0, "", fmt.Errorf("task graph validation failed: %w", err)
+		}
+	}
+	if stage == "blueprint" {
+		// Re-bind at approval: a newer approved RRI between Blueprint save and
+		// approval must not leave stale excluded_keys references unvalidated.
+		var blueprintContent string
+		if err = tx.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=? AND work_item_id=?`, artifactID, workItemID).Scan(&blueprintContent); err != nil {
+			return "", 0, "", err
+		}
+		if err = validateBlueprintExcludedKeysBinding(tx, workItemID, blueprintContent); err != nil {
+			return "", 0, "", err
 		}
 	}
 	if stage == "contracts" {

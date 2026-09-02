@@ -4528,6 +4528,110 @@ func TestBlueprintArtifactPolicySchemas(t *testing.T) {
 	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":3`, 1)); err == nil || !strings.Contains(err.Error(), "unsupported decomposition_policy_version 3") {
 		t.Fatalf("unsupported policy version = %v", err)
 	}
+	// The additive schema_version 2.1 marker gates excluded_keys on top of
+	// policy v2; the decomposition_policy_version field itself stays 2.
+	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1`, 1)); err != nil {
+		t.Fatalf("v2 blueprint with v2.1 marker and no excluded_keys must validate: %v", err)
+	}
+	if err := validateBlueprintReport(v21BlueprintWithExcludedKeys("Cloud sync", "")); err == nil || !strings.Contains(err.Error(), "excluded_keys require non-empty keys") {
+		t.Fatalf("v2.1 blueprint with empty excluded key = %v", err)
+	}
+}
+
+// v21BlueprintWithExcludedKeys splices the additive schema_version 2.1 marker
+// and excluded_keys into the policy-v2 fixture, matching the production marker
+// shape where decomposition_policy_version stays 2.
+func v21BlueprintWithExcludedKeys(keys ...string) string {
+	emcoded, _ := json.Marshal(keys)
+	return strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"excluded_keys":`+string(emcoded), 1)
+}
+
+func TestBlueprintExcludedKeysBinding(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	id := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Excluded Keys Epic"))["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	// Build the approved RRI referent: scan accepted, RRI approved with
+	// out_of_scope rows, vision approved.
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	rri := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", `{"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside the epic scope"},{"exclusion":"Legacy import","reason":"Deferred to a later epic"}]}`))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", rri["id"].(string), "approved")
+	vision := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "vision", validVisionArtifact))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "vision", vision["id"].(string), "approved")
+
+	blueprintRows := func(t *testing.T) int {
+		t.Helper()
+		db, err := openSQLite(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var count int
+		if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='blueprint'`, id).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+
+	// Known RRI exclusion keys save and persist.
+	known := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", v21BlueprintWithExcludedKeys("Cloud sync", "Legacy import")))
+	if known["revision"] != float64(1) {
+		t.Fatalf("first v2.1 blueprint revision = %#v", known["revision"])
+	}
+
+	// Unknown exclusion keys fail closed naming the key and leave no new row.
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", v21BlueprintWithExcludedKeys("Cloud sync", "Phantom export")); !strings.Contains(out, "Phantom export") {
+		t.Fatalf("dangling excluded key error = %s", out)
+	}
+	if rows := blueprintRows(t); rows != 1 {
+		t.Fatalf("failed save persisted %d blueprint rows, want 1", rows)
+	}
+
+	// Legacy policy-v2 content without v2.1 fields still saves unchanged.
+	legacy := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", v2BlueprintArtifact))
+	if legacy["revision"] != float64(2) {
+		t.Fatalf("legacy v2 blueprint revision = %#v", legacy["revision"])
+	}
+
+	// Without an approved RRI referent, nonempty excluded_keys fail closed.
+	orphan := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Orphan Exclusions Epic"))
+	orphanID := orphan["id"].(string)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", orphanID, "blueprint", v21BlueprintWithExcludedKeys("Cloud sync")); !strings.Contains(out, "approved RRI out_of_scope referent") {
+		t.Fatalf("missing referent error = %s", out)
+	}
+
+	// Stale-predecessor lifecycle: a Blueprint saved against an older RRI must
+	// fail closed at approval after a newer RRI retires the exclusion key.
+	stale := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Stale Predecessor Epic"))
+	staleID := stale["id"].(string)
+	staleScan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "scan", staleScan["id"].(string), "accepted")
+	rriV1 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "rri", `{"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside the epic scope"}]}`))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "rri", rriV1["id"].(string), "approved")
+	staleVision := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "vision", validVisionArtifact))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "vision", staleVision["id"].(string), "approved")
+	staleBlueprint := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "blueprint", v21BlueprintWithExcludedKeys("Cloud sync")))
+
+	// Approving a newer RRI drops the vision and blueprint checkpoints but
+	// leaves the artifacts; the unchanged Blueprint must not re-approve.
+	rriV2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "rri", `{"out_of_scope":[{"exclusion":"Local cache","reason":"Deferred to a later epic"}]}`))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "rri", rriV2["id"].(string), "approved")
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "vision", "current", "approved")
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", staleID, "blueprint", staleBlueprint["id"].(string), "approved"); !strings.Contains(out, "Cloud sync") {
+		t.Fatalf("stale blueprint approval error = %s", out)
+	}
+
+	// A corrected Blueprint matching the newer RRI referent still approves.
+	corrected := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "blueprint", v21BlueprintWithExcludedKeys("Local cache")))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "blueprint", corrected["id"].(string), "approved")
+
+	// A policy-v2 Contract binds to an approved v2.1 Blueprint: the seam
+	// authority must accept the v2.1 marker, not only exact policy v2.
+	contractContent := v2ContractArtifact(corrected["id"].(string), int(corrected["revision"].(float64)), corrected["content_hash"].(string))
+	contract := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "contracts", contractContent))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "contracts", contract["id"].(string), "approved")
 }
 
 func TestContractArtifactPolicySchemas(t *testing.T) {
