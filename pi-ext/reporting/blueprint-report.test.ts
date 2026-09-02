@@ -82,9 +82,13 @@ test("Blueprint legacy v2 stays valid forever and never renders v2.1-only sectio
   assert.match(legacy, /VERIFICATION SEAMS/);
 });
 
-test("Blueprint policy v2 carries no user stories and no second testing section", () => {
+test("Blueprint policy v2 tolerates unknown top-level keys per legacy v1/v2 rules", () => {
+  // Amended AC2: unknown top-level keys such as user_stories or testing remain
+  // ignored under legacy v1/v2 tolerance — no runtime forbidden-key rejection,
+  // so approved artifacts keep re-validating under their original rules.
   for (const extra of [{ user_stories: [{ story: "As an owner" }] }, { testing: [{ case: "t" }] }]) {
-    assert.throws(() => parseBlueprintReportJson(JSON.stringify({ ...v21Report, ...extra })), /no user stories and no second testing section/);
-    assert.throws(() => parseBlueprintReportJson(JSON.stringify({ ...v2Report, ...extra })), /no user stories and no second testing section/);
+    for (const base of [v2Report, v21Report]) {
+      assert.doesNotThrow(() => parseBlueprintReportJson(JSON.stringify({ ...base, ...extra })));
+    }
   }
 });

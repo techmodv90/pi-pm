@@ -54,9 +54,6 @@ export function parseBlueprintReportJson(content: string): BlueprintReport {
   for (const row of r.rri_requirements_matrix) if (!row.blueprint_section || !row.requirements?.length || !row.source_questions?.length) throw new Error("Blueprint RRI matrix rows are incomplete");
   if ((r.decomposition_policy_version ?? 1) > 2) throw new Error(`Blueprint decomposition_policy_version ${r.decomposition_policy_version} is unsupported`);
   if (r.decomposition_policy_version === 2) {
-    // The solution spec imports no external weaknesses: user stories are not
-    // duplicated and verification_seams is the single testing section.
-    if ("user_stories" in r || "testing" in r) throw new Error("Blueprint policy v2 carries no user stories and no second testing section");
     // The 2.1 marker is a shape commitment: anything that is not the numeric
     // marker 2.1 (e.g. the string "2.1") is rejected instead of silently
     // degrading the artifact to legacy v2 and dropping its v2.1 sections.
