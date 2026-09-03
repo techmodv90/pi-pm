@@ -4,9 +4,9 @@ import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Markdown, Text } from "@mariozechner/pi-tui";
 import { Type } from "typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
-import { execPic } from "../core/cli-helpers";
-import { buildReviewContext } from "../tasking/settings";
-import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemDebugPrompt, latestRriTScenarios } from "../tasking/work-item-prompts";
+import { execPic } from "../core/cli-helpers.ts";
+import { buildReviewContext } from "../tasking/settings.ts";
+import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemDebugPrompt, latestRriTScenarios } from "../tasking/work-item-prompts.ts";
 import { assertTaskManagerActionAllowed } from "../tasking/agent-capabilities.ts";
 import { parseCanonicalScanReportXml, renderScanReportMarkdown, prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
 import { parseRriReportJson, renderRriReportMarkdown } from "../reporting/rri-report.ts";
@@ -16,6 +16,7 @@ import { parseContractReportJson, renderContractReportMarkdown } from "../report
 import { parseTaskGraphReportJson, renderTaskGraphReportMarkdown } from "../reporting/task-graph-report.ts";
 import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
 import { deleteBlueprintDraft, loadBlueprintDraft, loadLatestBlueprintDraft, saveBlueprintDraft } from "../core/blueprint-drafts.ts";
+import { planAdrFiles, writeAdrFiles, type AdrCandidate } from "../core/blueprint-adr.ts";
 
 import { currentApprovedPlanningArtifact, withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
 import { runnerRepairEvidence, type PipelineScheduler } from "../pipeline/pipeline-scheduler.ts";
@@ -380,11 +381,42 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             if (!params.id || !params.artifact_id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id, draft_id, and actor_role=owner are required" }], details: {}, isError: true };
             const draft = loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id);
             if (!draft.reviewed) return { content: [{ type: "text", text: "Error: Contractor review is required before owner approval" }], details: {}, isError: true };
+            // OB-F2-3: full adr_candidates validation (shape, string fields,
+            // safe slugs) and target-conflict preflight run BEFORE the Go
+            // artifact-save/approve, so malformed or conflicting input can
+            // never leave the canonical Blueprint approved while the tool
+            // returns an error. writeAdrFiles runs only after both Go
+            // operations succeed.
+            let adrPayload: { adr_candidates?: unknown };
+            try { adrPayload = JSON.parse(draft.content); }
+            catch {
+              return { content: [{ type: "text", text: "Error: Blueprint draft content must be valid JSON" }], details: {}, isError: true };
+            }
+            const parsedAdrCandidates = adrPayload.adr_candidates;
+            if (parsedAdrCandidates !== undefined && !Array.isArray(parsedAdrCandidates)) return { content: [{ type: "text", text: "Error: adr_candidates must be an array of {context, choice, reason} objects" }], details: {}, isError: true };
+            const adrCandidates = (parsedAdrCandidates ?? []) as AdrCandidate[];
+            try { planAdrFiles(ctx.cwd, adrCandidates); }
+            catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
+            }
             const saved = execPic(["work-item", "artifact-save", params.id, "blueprint", draft.content], ctx.cwd);
             if (saved.error) return { content: [{ type: "text", text: `Error: ${saved.error}` }], details: saved, isError: true };
             const approved = execPic(["work-item", "artifact-approve", params.id, "blueprint", saved.id, "approved"], ctx.cwd);
+            if (approved.error) return { content: [{ type: "text", text: `Error: ${approved.error}` }], details: { saved, approved }, isError: true };
+            let adrFiles: string[] = [];
+            // Validation already passed before the Go calls; this write only
+            // fails on a mid-approval filesystem change, which must surface as
+            // a concrete approval-side error, not a thrown exception.
+            if (adrCandidates.length > 0) {
+              try { adrFiles = writeAdrFiles(ctx.cwd, adrCandidates); }
+              catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${message}` }], details: { saved, approved }, isError: true };
+              }
+            }
             deleteBlueprintDraft(ctx.cwd, params.id);
-            return { content: [{ type: "text", text: JSON.stringify({ saved, approved }, null, 2) }], details: { saved, approved } };
+            return { content: [{ type: "text", text: JSON.stringify({ saved, approved, adr_files: adrFiles }, null, 2) }], details: { saved, approved, adr_files: adrFiles } };
           }
           case "load_planning_artifact": {
             if (!params.id || !params.stage || !["scan", "rri", "vision", "blueprint", "contracts", "task_graph"].includes(params.stage)) return { content: [{ type: "text", text: "Error: id and a valid planning stage are required" }], details: {}, isError: true };
