@@ -883,7 +883,7 @@ test("detached worker progress cannot throw through a stale session context", ()
 
 test("scheduler worktree provisioning uses the asynchronous launch boundary", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /await prepareSubagentWorktree\(spec\.cwd, spec\.initialPatchPath, claim\.id\)/);
+  assert.match(source, /await prepareSubagentWorktree\(spec\.cwd, spec\.initialPatchPath, claim\.id, spec\.durableWorktreeKey \|\| claim\.id\)/);
   assert.match(source, /spec\.preparedWorktree = prepared\.cwd/);
 });
 
@@ -1487,6 +1487,58 @@ test("a transient-provider exhaustion persists failure_code=transient_provider i
   assert.equal(status.state, "failed");
   assert.equal(status.failure_code, "transient_provider");
   assert.match(status.error, /without consuming a numbered attempt/);
+});
+
+test("pack worktree is retained on report-less worker death and cleaned on deterministic terminals", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-system-retained-"));
+  execFileSync("git", ["init", "-q", "-b", "master"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  writeFileSync(join(repo, "file.txt"), "base\n");
+  execFileSync("git", ["add", "file.txt"], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+  const packKey = "wip-retained-pack";
+  const worktree = join(repo, ".pi", "worktrees", packKey);
+  mkdirSync(join(repo, ".pi", "worktrees"), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-qb", `pi-agent-${packKey}`, worktree], { cwd: repo });
+  writeFileSync(join(worktree, "file.txt"), "partial resume work\n");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+  const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+  const scheduler = new PipelineScheduler(pi) as any;
+  scheduler.cwd = repo;
+  const makeRun = (runId: string, artifactId: string) => {
+    const artifactDir = join(repo, ".pi-subagents", "pipeline", artifactId);
+    mkdirSync(artifactDir, { recursive: true });
+    scheduler.agentRuns.set(runId, { id: artifactId, task_id: "t-1", stage: "worker", lease_token: "lease", async_dir: artifactDir, child_index: 0 });
+  };
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 };
+  const workspace = {
+    assignedWorktree: worktree, childProcessCwd: worktree, bashCwd: worktree,
+    readToolRoot: worktree, editToolRoot: worktree, writeToolRoot: worktree, applyPatchRoot: worktree,
+    gitToplevel: worktree, head: "", statusBefore: "", statusAfter: " M file.txt", diffStatAfter: "file.txt | 2 +-",
+  };
+
+  // Transient death mid-work (no completion report): the pack worktree survives.
+  makeRun("agent-died-1", "pr-died-1");
+  await scheduler.persistAgentResult({ runId: "agent-died-1", agent: "task-worker", task: "work", exitCode: 1, stopReason: "timed_out", messages: [{ role: "assistant", content: [{ type: "text", text: "partial work" }] }], stderr: "", usage, workspace });
+  assert.equal(readFileSync(join(worktree, "file.txt"), "utf8"), "partial resume work\n");
+  assert.equal(scheduler.retainedFailures.get(packKey), "timed_out");
+
+  // Deterministic terminal (report emitted): cleanup exactly as GAP-091/096.
+  makeRun("agent-done-1", "pr-done-1");
+  await scheduler.persistAgentResult({ runId: "agent-done-1", agent: "task-worker", task: "work", exitCode: 0, stopReason: "end", messages: [{ role: "assistant", content: [{ type: "text", text: '<completion_report status="done"><files_changed>file.txt</files_changed><test_results>PASS</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>' }] }], stderr: "", usage, workspace });
+  assert.throws(() => readFileSync(join(worktree, "file.txt"), "utf8"));
+  assert.equal(scheduler.retainedFailures.has(packKey), false);
+});
+
+test("worker launch wiring carries the durable pack key and resume failure mode", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /spec\.durableWorktreeKey = packKey/);
+  assert.match(source, /if \(retainedMode\) spec\.resumeFailureMode = retainedMode/);
+  assert.match(source, /spec\.reusedRetainedWorktree = prepared\.reused/);
+  assert.match(source, /!spec\.reusedRetainedWorktree\) removeSubagentWorktree/);
+  assert.match(source, /if \(!prepared\.reused && spec\.durableWorktreeKey\) this\.retainedFailures\.delete/);
 });
 
 test("worker scope only blocks protected task-system paths", () => {

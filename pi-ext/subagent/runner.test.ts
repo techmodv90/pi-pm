@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { assertManagedAcceptance, buildPiInvocation, classifyRunnerTransientFault, finalAssistantText, getAppendSystemPromptPaths, parseJsonEvent, prepareSubagentWorktree, removeSubagentWorktree, RUNNER_TRANSIENT_RETRIES, startSubagent, startSubagentResilient } from "./runner.ts";
+import { assertManagedAcceptance, buildPiInvocation, classifyRunnerTransientFault, finalAssistantText, getAppendSystemPromptPaths, parseJsonEvent, prepareSubagentWorktree, removeSubagentWorktree, retainWorktreeForResume, RUNNER_TRANSIENT_RETRIES, startSubagent, startSubagentResilient } from "./runner.ts";
 import { AgentRunTracker } from "./tracker.ts";
 
 process.env.PI_TASK_HERDR_PANEL = "0";
@@ -80,6 +80,71 @@ test("inactivity watchdog kills a silent child and classifies provider_stall", a
 test("classifyRunnerTransientFault maps stalled to provider_stall", () => {
   assert.equal(classifyRunnerTransientFault({ stopReason: "stalled" } as any), "provider_stall");
   assert.equal(classifyRunnerTransientFault({ stopReason: "aborted" } as any), "none");
+  // Durable worker worktree constraint (RLB-GAP-001): deadline kills are
+  // throughput faults, transient so the pack worktree is retained and the
+  // in-claim retry resumes with a fresh budget (SQ-1).
+  assert.equal(classifyRunnerTransientFault({ stopReason: "timed_out" } as any), "provider_stall");
+});
+
+test("retainWorktreeForResume retains report-less worker deaths and cleans deterministic terminals", () => {
+  const partialMessages = [{ role: "assistant", content: [{ type: "text", text: "partial work, no report" }] }];
+  const reportMessages = [{ role: "assistant", content: [{ type: "text", text: "done <completion_report status=\"done\"/>" }] }];
+  // Provider stream cut / watchdog / deadline death with no report: retain.
+  assert.equal(retainWorktreeForResume("worker", { exitCode: 1, stopReason: "stalled", messages: partialMessages } as any), true);
+  assert.equal(retainWorktreeForResume("worker", { exitCode: 1, stopReason: "timed_out", messages: partialMessages } as any), true);
+  assert.equal(retainWorktreeForResume("worker", { exitCode: 1, stopReason: "end", messages: partialMessages } as any), true);
+  // Deterministic terminals: report emitted, success, cancellation, non-mutation stage.
+  assert.equal(retainWorktreeForResume("worker", { exitCode: 0, stopReason: "end", messages: reportMessages } as any), false);
+  assert.equal(retainWorktreeForResume("worker", { exitCode: 1, stopReason: "aborted", messages: partialMessages } as any), false);
+  assert.equal(retainWorktreeForResume("review", { exitCode: 1, stopReason: "stalled", messages: partialMessages } as any), false);
+  assert.equal(retainWorktreeForResume(undefined, { exitCode: 1, stopReason: "stalled", messages: partialMessages } as any), false);
+});
+
+test("pack-keyed worktrees are reused without reset and refuse foreign registrations", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-subagent-packwt-"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  writeFileSync(join(repo, "work.go"), "package work\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+  const first = await prepareSubagentWorktree(repo, undefined, "run-1", "wip-pack-1");
+  assert.equal(first.reused, false);
+  writeFileSync(join(first.cwd, "work.go"), "package work\n// partial attempt work\n");
+  const second = await prepareSubagentWorktree(repo, undefined, "run-2", "wip-pack-1");
+  assert.equal(second.reused, true);
+  assert.equal(second.cwd, first.cwd);
+  assert.equal(readFileSync(join(second.cwd, "work.go"), "utf8"), "package work\n// partial attempt work\n");
+  // Unregistered directory with the expected branch name fails closed.
+  const rogue = join(repo, ".pi", "worktrees", "wip-pack-2");
+  mkdirSync(rogue, { recursive: true });
+  await assert.rejects(() => prepareSubagentWorktree(repo, undefined, "run-3", "wip-pack-2"), /non-worktree path|unregistered/);
+  rmSync(rogue, { recursive: true, force: true });
+  // A worktree registered on a foreign branch fails closed.
+  execFileSync("git", ["worktree", "add", "-b", "someone-elses-branch", rogue, "HEAD"], { cwd: repo });
+  await assert.rejects(() => prepareSubagentWorktree(repo, undefined, "run-4", "wip-pack-2"), /foreign-branch/);
+  removeSubagentWorktree(repo, first.cwd, "wip-pack-1");
+  execFileSync("git", ["worktree", "remove", "--force", rogue], { cwd: repo });
+  execFileSync("git", ["branch", "-D", "someone-elses-branch"], { cwd: repo });
+});
+
+test("orphan sweep keeps fresh retained worktrees and prunes only aged ones", async () => {
+  const runner = await import("./runner.ts") as any;
+  const repo = mkdtempSync(join(tmpdir(), "task-subagent-ttl-"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  writeFileSync(join(repo, "work.go"), "package work\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+  const fresh = await prepareSubagentWorktree(repo, undefined, "run-fresh", "wip-pack-fresh");
+  const aged = await prepareSubagentWorktree(repo, undefined, "run-aged", "wip-pack-aged");
+  const stale = new Date(Date.now() - 25 * 60 * 60 * 1000);
+  utimesSync(aged.cwd, stale, stale);
+  runner.cleanupOrphanedSubagentWorktrees(repo, new Set(), runner.ORPHANED_WORKTREE_MAX_AGE_MS);
+  assert.equal(readFileSync(join(fresh.cwd, "work.go"), "utf8"), "package work\n");
+  assert.throws(() => readFileSync(join(aged.cwd, "work.go"), "utf8"));
+  removeSubagentWorktree(repo, fresh.cwd, "wip-pack-fresh");
 });
 
 test("startSubagent publishes finalizing before terminal completion", async () => {
@@ -562,6 +627,37 @@ test("startSubagent passes every resolved skill directory to Pi", async () => {
   }) as any);
   await handle.result;
   assert.deepEqual(args.flatMap((arg, index) => arg === "--skill" ? [args[index + 1]] : []), ["/skills/baseline", "/skills/languages/golang"]);
+});
+
+test("startSubagent prepends the resume preamble and no-stash discipline for durable worktrees", async () => {
+  const child = Object.assign(new EventEmitter(), { stdout: new EventEmitter(), stderr: new EventEmitter(), kill: () => true });
+  const cwd = mkdtempSync(join(tmpdir(), "task-subagent-resume-"));
+  execFileSync("git", ["init", "-q"], { cwd });
+  const worktree = join(cwd, ".pi", "worktrees", "wip-preamble-pack");
+  mkdirSync(worktree, { recursive: true });
+  execFileSync("git", ["init", "-q"], { cwd: worktree });
+  writeFileSync(join(worktree, "partial.txt"), "partial\n");
+  let taskArg = "";
+  const handle = startSubagent({
+    agent: { name: "task-worker", description: "", systemPrompt: "", source: "packaged", filePath: "worker.md" },
+    task: "implement the thing",
+    cwd,
+    stage: "worker",
+    acceptance: "checked",
+    durableWorktreeKey: "wip-preamble-pack",
+    resumeFailureMode: "prior attempt died before emitting its completion report",
+    preparedWorktree: worktree,
+  }, undefined, ((_command: any, invocationArgs: string[]) => {
+    taskArg = invocationArgs.find((arg) => arg.startsWith("Task: ")) || "";
+    setImmediate(() => child.emit("close", 0));
+    return child;
+  }) as any);
+  await handle.result;
+  assert.match(taskArg, /^Task: RESUME: A prior attempt of this task died in the retained worktree \(prior attempt died before emitting its completion report\)/);
+  assert.match(taskArg, /partial\.txt/); // git status sample from the retained worktree
+  assert.match(taskArg, /fresh deadline budget/);
+  assert.match(taskArg, /NEVER run git stash or git stash pop/);
+  assert.match(taskArg, /implement the thing/);
 });
 
 test("read-only agent verdict is invalidated when it mutates repository state", async () => {

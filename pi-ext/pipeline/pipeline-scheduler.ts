@@ -2,7 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { promisify } from "node:util";
-import { join } from "node:path";
+import { join, basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { execPic, execPicText, withGitWriteLock } from "../core/cli-helpers.ts";
@@ -13,7 +13,7 @@ import { loadLatestBlueprintDraft } from "../core/blueprint-drafts.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
 import { buildTaskVerifyPrompt, buildWorkItemContinuePrompt, buildPlanningHandoffXml, CANONICAL_SCAN_REPORT_XML_FORMAT } from "../tasking/work-item-prompts.ts";
 import { discoverAgents } from "../subagent/agents.ts";
-import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, startSubagentResilient, type SubagentHandle } from "../subagent/runner.ts";
+import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, retainWorktreeForResume, startSubagentResilient, type SubagentHandle } from "../subagent/runner.ts";
 
 import type { SubagentResult } from "../subagent/types.ts";
 import { parsePicShow, type PicShowDocument } from "./pic-show.ts";
@@ -153,6 +153,10 @@ export class PipelineScheduler {
   private readonly pi: ExtensionAPI;
   private agentRuns = new Map<string, PipelineRun>();
   private agentHandles = new Map<string, SubagentHandle>();
+  // Durable worker worktree constraint (RLB-GAP-001): failure modes of retained
+  // pack worktrees, keyed by worktree key (instruction pack id), consumed by the
+  // next launch of the same pack as the resume preamble source.
+  private retainedFailures = new Map<string, string>();
 
   constructor(pi: ExtensionAPI) { this.pi = pi; }
 
@@ -217,14 +221,29 @@ export class PipelineScheduler {
       // reconciliation completion (pipeline-complete --result-json) can surface
       // durable failure_code=transient_provider instead of a generic failure.
       writeFileSync(join(run.async_dir, "status.json"), JSON.stringify({ state: completed ? "completed" : "failed", error: result.errorMessage || result.stderr || "", failure_code: completed ? "" : result.failureCode || "", steps: [{ status, model: result.model || "" }] }), { mode: 0o600 });
-      if (result.workspace?.assignedWorktree) removeSubagentWorktree(this.cwd, result.workspace.assignedWorktree, result.runId);
+      // Durable worker worktree constraint (RLB-GAP-001): a mutation-stage child
+      // that died before emitting its completion report retains its pack-keyed
+      // worktree for resume; deterministic outcomes (report emitted, success,
+      // cancellation, parse-invalid output with exit 0) clean up exactly as
+      // GAP-091/096 required. Worktree ownership is keyed by the branch key,
+      // which equals the worktree directory name (claim id or instruction pack).
+      const assignedWorktree = result.workspace?.assignedWorktree;
+      if (assignedWorktree) {
+        const worktreeKey = basename(assignedWorktree);
+        if (retainWorktreeForResume(run.stage, result)) {
+          this.retainedFailures.set(worktreeKey, result.failureCode || result.stopReason || "prior attempt died before emitting its completion report");
+        } else {
+          this.retainedFailures.delete(worktreeKey);
+          removeSubagentWorktree(this.cwd, assignedWorktree, worktreeKey);
+        }
+      }
       this.agentHandles.delete(result.runId);
       this.agentRuns.delete(result.runId);
       this.queueReconcile();
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       if (run.async_dir) writeFileSync(join(run.async_dir, "status.json"), JSON.stringify({ state: "failed", error: message, failure_code: result.failureCode || "", steps: [{ status: "failed", error: message }] }), { mode: 0o600 });
-      if (result.workspace?.assignedWorktree) try { removeSubagentWorktree(this.cwd, result.workspace.assignedWorktree, result.runId); } catch {}
+      if (result.workspace?.assignedWorktree) try { removeSubagentWorktree(this.cwd, result.workspace.assignedWorktree, basename(result.workspace.assignedWorktree)); } catch {}
       this.agentHandles.delete(result.runId);
       this.agentRuns.delete(result.runId);
       if (this.context) this.reportError(error, this.context);
@@ -611,6 +630,14 @@ export class PipelineScheduler {
         if (stage === "worker") {
           spec.initialPatchPath = initialPatchPaths.get(taskId);
           spec.sessionPath = workerSessionPath(this.cwd, activePack?.id || claim.instruction_pack_id || taskId);
+          // Durable worker worktree constraint (RLB-GAP-001): worker-stage spawns
+          // (including review-fix relaunches) key their worktree by instruction
+          // pack so a transient failure retains the partial work for the retry;
+          // review/scan stages stay run-keyed and clean up per GAP-091/096.
+          const packKey = activePack?.id || claim.instruction_pack_id || taskId;
+          spec.durableWorktreeKey = packKey;
+          const retainedMode = this.retainedFailures.get(packKey);
+          if (retainedMode) spec.resumeFailureMode = retainedMode;
         }
         if (stage === "review") {
           const candidate = this.pipelineRuns(taskId).find((entry) => entry.id === claim.candidate_run_id);
@@ -624,7 +651,7 @@ export class PipelineScheduler {
         if (spec.isolation === "worktree") {
           let prepared;
           try {
-            prepared = await prepareSubagentWorktree(spec.cwd, spec.initialPatchPath, claim.id);
+            prepared = await prepareSubagentWorktree(spec.cwd, spec.initialPatchPath, claim.id, spec.durableWorktreeKey || claim.id);
           } catch (error) {
             if (stage === "review") {
               const candidate = this.pipelineRuns(taskId).find((entry) => entry.id === claim.candidate_run_id);
@@ -637,6 +664,10 @@ export class PipelineScheduler {
           }
           spec.runId = prepared.runId;
           spec.preparedWorktree = prepared.cwd;
+          spec.reusedRetainedWorktree = prepared.reused;
+          // Fresh creation after a deterministic terminal: no retained worktree
+          // exists for this pack anymore, so drop the stale failure-mode note.
+          if (!prepared.reused && spec.durableWorktreeKey) this.retainedFailures.delete(spec.durableWorktreeKey);
         }
         let runId = "";
         let handle: SubagentHandle;
@@ -647,7 +678,10 @@ export class PipelineScheduler {
                 this.reportProgress(runId, taskId, stage, update.event, finalAssistantText(update.result.messages));
               });
         } catch (error) {
-          if (spec.preparedWorktree && spec.runId) removeSubagentWorktree(this.cwd, spec.preparedWorktree, spec.runId);
+          // Durable worker worktree constraint (RLB-GAP-001): a reused retained
+          // worktree keeps its partial work on spawn failure; only fresh
+          // creations are cleaned up.
+          if (spec.preparedWorktree && spec.runId && !spec.reusedRetainedWorktree) removeSubagentWorktree(this.cwd, spec.preparedWorktree, basename(spec.preparedWorktree));
           throw error;
         }
         runId = handle.id;
