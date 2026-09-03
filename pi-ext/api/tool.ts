@@ -15,7 +15,7 @@ import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../repo
 import { parseContractReportJson, renderContractReportMarkdown } from "../reporting/contract-report.ts";
 import { parseTaskGraphReportJson, renderTaskGraphReportMarkdown } from "../reporting/task-graph-report.ts";
 import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
-import { deleteBlueprintDraft, loadBlueprintDraft, loadLatestBlueprintDraft, saveBlueprintDraft } from "../core/blueprint-drafts.ts";
+import { deleteBlueprintDraft, deletePlanReviewState, loadBlueprintDraft, loadLatestBlueprintDraft, planApprovalGate, planReviewCliAvailable, recoverPlanReviewResult, requestPlanReview, saveBlueprintDraft, writeBlueprintPlan } from "../core/blueprint-drafts.ts";
 import { planAdrFiles, writeAdrFiles, type AdrCandidate } from "../core/blueprint-adr.ts";
 
 import { currentApprovedPlanningArtifact, withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -373,14 +373,48 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
               ? ["architecture", "design", "requirements", "verification_seams", "nothing_missing"]
               : ["architecture", "design", "requirements", "task_decomposition", "nothing_missing"];
             if (!checks.every((key) => checkpoint[key] === true)) return { content: [{ type: "text", text: `Error: all five Blueprint checks must pass; set each to true: ${checks.join(", ")}` }], details: {}, isError: true };
+            // OB-F3-1 stable review projection: persist the reviewed render at
+            // the stable plan path before owner review. Rendering failures
+            // surface as the checkpoint error and a failed persistence write
+            // never removes the prior plan file (atomic rename inside
+            // writeBlueprintPlan).
+            let planMarkdown: string;
+            try { planMarkdown = renderBlueprintReportMarkdown(parseBlueprintReportJson(draft.content)); }
+            catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
+            }
+            try { writeBlueprintPlan(ctx.cwd, params.id, planMarkdown); }
+            catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Error: ${message}` }], details: { error: message }, isError: true };
+            }
             const reviewed = saveBlueprintDraft(ctx.cwd, params.id, draft.content, checkpoint);
-            blueprintPresentation = renderBlueprintReportMarkdown(parseBlueprintReportJson(draft.content)).replaceAll("- [ ]", "- [x]");
-            return { content: [{ type: "text", text: `${blueprintPresentation}\n\nContractor checkpoint passed. Draft ${reviewed.draftId} is ready for owner approval.` }], details: { draft_id: reviewed.draftId, reviewed: true } };
+            blueprintPresentation = planMarkdown.replaceAll("- [ ]", "- [x]");
+            // OB-F3-4 review entry: hand the reviewed render to the Plannotator
+            // Pi extension through the asynchronous plannotator:request
+            // plan-review event. An unavailable extension is a guarded fallback
+            // that never fabricates an annotation outcome; zero annotations
+            // approve with no dispositions recorded, and the standalone CLI is
+            // informational only.
+            const planReview = await requestPlanReview(pi.events, ctx.cwd, params.id, planMarkdown);
+            const reviewNote = planReview.status === "pending"
+              ? `Plan review requested through the Plannotator Pi extension (review ${planReview.reviewId}); annotations are optional — zero annotations approve with no dispositions recorded.`
+              : `Plan review entry unavailable (${planReview.error || "extension did not respond"}); proceeding without annotations. The standalone plannotator CLI is not required (CLI on PATH: ${planReviewCliAvailable() ? "yes" : "no"}).`;
+            return { content: [{ type: "text", text: `${blueprintPresentation}\n\nContractor checkpoint passed. Draft ${reviewed.draftId} is ready for owner approval.\nPlan review: ${planReview.planPath}\n${reviewNote}` }], details: { draft_id: reviewed.draftId, reviewed: true, plan_path: planReview.planPath, plan_review: planReview } };
           }
           case "approve_blueprint_draft": {
             if (!params.id || !params.artifact_id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id, draft_id, and actor_role=owner are required" }], details: {}, isError: true };
             const draft = loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id);
             if (!draft.reviewed) return { content: [{ type: "text", text: "Error: Contractor review is required before owner approval" }], details: {}, isError: true };
+            // OB-F3-4 hard gate: recover the persisted Plannotator review
+            // result before approval. A pending review or a rejected review
+            // with entered annotations blocks approval until the revision loop
+            // resolves it; an approved review, a guarded unavailable runtime,
+            // or a never-requested review passes with zero dispositions.
+            const planReview = await recoverPlanReviewResult(pi.events, ctx.cwd, params.id);
+            const gate = planApprovalGate(planReview);
+            if (!gate.ok) return { content: [{ type: "text", text: `Error: ${gate.reason}` }], details: { plan_review: planReview }, isError: true };
             // OB-F2-3: full adr_candidates validation (shape, string fields,
             // safe slugs) and target-conflict preflight run BEFORE the Go
             // artifact-save/approve, so malformed or conflicting input can
@@ -416,6 +450,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
               }
             }
             deleteBlueprintDraft(ctx.cwd, params.id);
+            deletePlanReviewState(ctx.cwd, params.id);
             return { content: [{ type: "text", text: JSON.stringify({ saved, approved, adr_files: adrFiles }, null, 2) }], details: { saved, approved, adr_files: adrFiles } };
           }
           case "load_planning_artifact": {
@@ -623,6 +658,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         )) {
           deleteRriDraft(rriDraftRoot(ctx.cwd), params.id);
           deleteBlueprintDraft(ctx.cwd, params.id);
+          deletePlanReviewState(ctx.cwd, params.id);
         }
         if (!result.error && params.action === "create_work_item" && ["epic", "feature"].includes(params.work_item_type || "")) {
           const workflow = execPic(["work-item", "workflow-status", result.id], ctx.cwd);
