@@ -1714,8 +1714,8 @@ func validateContractReport(content string) error {
 			Tips    int `json:"tip_count"`
 			Minutes int `json:"estimated_minutes"`
 		} `json:"task_graph_summary"`
-		NotIncluded []string                 `json:"not_included"`
-		Obligations []tip.ContractObligation `json:"obligations"`
+		NotIncluded     []string                 `json:"not_included"`
+		Obligations     []tip.ContractObligation `json:"obligations"`
 		SourceBlueprint struct {
 			ArtifactID  string `json:"artifact_id"`
 			Revision    int    `json:"revision"`
@@ -1916,9 +1916,17 @@ func validateBlueprintReport(content string) error {
 			EstimatedEffort int   `json:"estimated_effort_minutes"`
 		} `json:"task_decomposition_preview"`
 		DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
-		SchemaVersion              float64            `json:"schema_version"`
+		SchemaVersion              json.RawMessage    `json:"schema_version"`
 		VerificationSeams          []verificationSeam `json:"verification_seams"`
 		ExcludedKeys               []string           `json:"excluded_keys"`
+		// v2.1 sections kept raw so absent, null, and non-array values are
+		// distinguishable and each shape failure names its field, mirroring the
+		// TS parseBlueprintReportJson v2.1 pre-flight (the sole other enforcer).
+		ImplementationDecisions json.RawMessage `json:"implementation_decisions"`
+		AdrCandidates           json.RawMessage `json:"adr_candidates"`
+		Deferrals               json.RawMessage `json:"deferrals"`
+		NotYetSpecified         json.RawMessage `json:"not_yet_specified"`
+		OutOfScope              json.RawMessage `json:"out_of_scope"`
 	}
 	if err := json.Unmarshal([]byte(content), &report); err != nil {
 		return errors.New("Blueprint artifact must be valid JSON")
@@ -1936,11 +1944,12 @@ func validateBlueprintReport(content string) error {
 		// Policy v2 is the solution spec plus owner-approved verification seams;
 		// the task_decomposition_preview is retired (Contract's task_graph_summary
 		// keeps the early cost signal).
-		if report.SchemaVersion == 2.1 {
-			for _, key := range report.ExcludedKeys {
-				if strings.TrimSpace(key) == "" {
-					return errors.New("Blueprint policy v2.1 excluded_keys require non-empty keys")
-				}
+		if len(report.SchemaVersion) > 0 && !isV21SchemaVersion(report.SchemaVersion) {
+			return fmt.Errorf("Blueprint policy v2.1 schema_version must be the numeric marker 2.1, got %s", string(report.SchemaVersion))
+		}
+		if isV21SchemaVersion(report.SchemaVersion) {
+			if err := validateBlueprintV21Sections(&report); err != nil {
+				return err
 			}
 		}
 		return validateVerificationSeams(report.VerificationSeams)
@@ -1949,6 +1958,154 @@ func validateBlueprintReport(content string) error {
 		return errors.New("Blueprint requires complete stack, file structure, RRI matrix, and task preview")
 	}
 	return nil
+}
+
+// isV21SchemaVersion reports whether the raw schema_version value is the
+// numeric 2.1 marker: a marked artifact commits to carrying every v2.1
+// section in shape, while an absent or null value keeps legacy v2 rules.
+func isV21SchemaVersion(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var marker any
+	if err := json.Unmarshal(raw, &marker); err != nil {
+		return false
+	}
+	value, ok := marker.(float64)
+	return ok && value == 2.1
+}
+
+// blueprintV21StringRows enforces the shared row shape for the v2.1 scope
+// sections: object rows whose declared fields are non-empty strings.
+func blueprintV21StringRows(rows []json.RawMessage, name string, fields []string) error {
+	for _, raw := range rows {
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &row); err != nil {
+			return fmt.Errorf("Blueprint policy v2.1 %s rows must be objects", name)
+		}
+		for _, field := range fields {
+			value, ok := row[field]
+			if !ok || len(value) == 0 || string(value) == "null" {
+				return fmt.Errorf("Blueprint policy v2.1 %s.%s must be a non-empty string", name, field)
+			}
+			var s string
+			if err := json.Unmarshal(value, &s); err != nil || strings.TrimSpace(s) == "" {
+				return fmt.Errorf("Blueprint policy v2.1 %s.%s must be a non-empty string", name, field)
+			}
+		}
+	}
+	return nil
+}
+
+// blueprintV21Array requires a present, non-null JSON array for a v2.1
+// section, mirroring the TS "must be an array" presence gate.
+func blueprintV21Array(raw json.RawMessage, name string) ([]json.RawMessage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, fmt.Errorf("Blueprint policy v2.1 %s must be an array", name)
+	}
+	var rows []json.RawMessage
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("Blueprint policy v2.1 %s must be an array", name)
+	}
+	return rows, nil
+}
+
+// validateBlueprintV21Sections mirrors the TS parseBlueprintReportJson v2.1
+// shape rules so the Go CLI and TS wrapper reject the same malformed
+// canonical saves (corrective bug wi-dbeba706): implementation_decisions
+// must be a non-empty array of objects with non-empty decision/rationale and
+// a non-empty alternatives_considered array of non-empty strings, and every
+// other v2.1 section must be a present array with well-shaped rows.
+func validateBlueprintV21Sections(report *struct {
+	ProjectInfo   map[string]any `json:"project_info"`
+	Goals         map[string]any `json:"goals"`
+	Architecture  map[string]any `json:"architecture"`
+	TechStack     []any          `json:"tech_stack"`
+	FileStructure []any          `json:"file_structure"`
+	Requirements  []any          `json:"rri_requirements_matrix"`
+	Preview       struct {
+		EstimatedTasks  int   `json:"estimated_tasks"`
+		Tasks           []any `json:"tasks"`
+		EstimatedEffort int   `json:"estimated_effort_minutes"`
+	} `json:"task_decomposition_preview"`
+	DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
+	SchemaVersion              json.RawMessage    `json:"schema_version"`
+	VerificationSeams          []verificationSeam `json:"verification_seams"`
+	ExcludedKeys               []string           `json:"excluded_keys"`
+	ImplementationDecisions    json.RawMessage    `json:"implementation_decisions"`
+	AdrCandidates              json.RawMessage    `json:"adr_candidates"`
+	Deferrals                  json.RawMessage    `json:"deferrals"`
+	NotYetSpecified            json.RawMessage    `json:"not_yet_specified"`
+	OutOfScope                 json.RawMessage    `json:"out_of_scope"`
+}) error {
+	decisions, err := blueprintV21Array(report.ImplementationDecisions, "implementation_decisions")
+	if err != nil {
+		return err
+	}
+	if len(decisions) == 0 {
+		return errors.New("Blueprint policy v2.1 implementation_decisions must be a non-empty array")
+	}
+	for _, raw := range decisions {
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &row); err != nil {
+			return errors.New("Blueprint policy v2.1 implementation_decisions rows must be objects")
+		}
+		for _, field := range []string{"decision", "rationale"} {
+			value, ok := row[field]
+			if !ok || len(value) == 0 || string(value) == "null" {
+				return fmt.Errorf("Blueprint policy v2.1 implementation_decisions.%s must be a non-empty string", field)
+			}
+			var s string
+			if err := json.Unmarshal(value, &s); err != nil || strings.TrimSpace(s) == "" {
+				return fmt.Errorf("Blueprint policy v2.1 implementation_decisions.%s must be a non-empty string", field)
+			}
+		}
+		alternativesRaw, ok := row["alternatives_considered"]
+		if !ok || len(alternativesRaw) == 0 || string(alternativesRaw) == "null" {
+			return errors.New("Blueprint policy v2.1 implementation_decisions.alternatives_considered must be a non-empty array of non-empty strings")
+		}
+		var alternatives []any
+		if err := json.Unmarshal(alternativesRaw, &alternatives); err != nil || len(alternatives) == 0 {
+			return errors.New("Blueprint policy v2.1 implementation_decisions.alternatives_considered must be a non-empty array of non-empty strings")
+		}
+		for _, alternative := range alternatives {
+			s, ok := alternative.(string)
+			if !ok || strings.TrimSpace(s) == "" {
+				return errors.New("Blueprint policy v2.1 implementation_decisions.alternatives_considered must be a non-empty array of non-empty strings")
+			}
+		}
+	}
+	for _, key := range report.ExcludedKeys {
+		if strings.TrimSpace(key) == "" {
+			return errors.New("Blueprint policy v2.1 excluded_keys require non-empty keys")
+		}
+	}
+	deferrals, err := blueprintV21Array(report.Deferrals, "deferrals")
+	if err != nil {
+		return err
+	}
+	if err := blueprintV21StringRows(deferrals, "deferrals", []string{"question", "resolution"}); err != nil {
+		return err
+	}
+	notYet, err := blueprintV21Array(report.NotYetSpecified, "not_yet_specified")
+	if err != nil {
+		return err
+	}
+	if err := blueprintV21StringRows(notYet, "not_yet_specified", []string{"uncertainty", "graduation_path"}); err != nil {
+		return err
+	}
+	outOfScope, err := blueprintV21Array(report.OutOfScope, "out_of_scope")
+	if err != nil {
+		return err
+	}
+	if err := blueprintV21StringRows(outOfScope, "out_of_scope", []string{"exclusion", "reason"}); err != nil {
+		return err
+	}
+	adrCandidates, err := blueprintV21Array(report.AdrCandidates, "adr_candidates")
+	if err != nil {
+		return err
+	}
+	return blueprintV21StringRows(adrCandidates, "adr_candidates", []string{"context", "choice", "reason"})
 }
 
 // approvedCheckpointDecision names the owner decision that makes a checkpoint
@@ -2250,7 +2407,6 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 // Owner-only bounded amendment: exact old→new substitutions across approved planning
 // lineage. Resolves the dual-source-of-truth hazard of injecting corrected values
 // (e.g. a port change) while frozen artifacts still state the old value, without a full re-scope.
-
 
 // dryRunCascadeRows previews the exact rows one child-owned table contributes
 // to a planning reset: every row whose ownerColumn holds a materialized

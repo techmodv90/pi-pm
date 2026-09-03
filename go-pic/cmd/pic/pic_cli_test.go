@@ -1325,12 +1325,12 @@ func TestWorkItemRriFinalizeMarkedEmptyScopeSectionsPersist(t *testing.T) {
 		"requirements": []map[string]any{{"key": "REQ-SCOPE-EMPTY", "priority": "tier1", "title": "Scope sections persist", "description": "Persist empty scope sections", "acceptanceCriteria": "Given a marked report with empty scope sections\nWhen rri-finalize runs\nThen both scope keys persist"}},
 		"decisions":    []map[string]any{},
 		"report": map[string]any{
-			"project_name":        "Empty scope finalization", "generated": "2026-09-01", "rri_policy_version": 2,
+			"project_name": "Empty scope finalization", "generated": "2026-09-01", "rri_policy_version": 2,
 			"requirements_matrix": []map[string]string{{"req_id": "REQ-SCOPE-EMPTY", "requirement": "Scope sections persist", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
 			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{},
-			"open_questions":      []map[string]any{},
-			"not_yet_specified":   []map[string]string{},
-			"out_of_scope":        []map[string]string{},
+			"open_questions":    []map[string]any{},
+			"not_yet_specified": []map[string]string{},
+			"out_of_scope":      []map[string]string{},
 		},
 	})
 	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor"))
@@ -1438,9 +1438,9 @@ func markedRriPayload(t *testing.T, title string, questions []any) string {
 			"project_name": title, "generated": "2026-09-01", "rri_policy_version": 2,
 			"requirements_matrix": []map[string]string{{"req_id": "REQ-GATE", "requirement": "Publish gate", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
 			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Gate mode", "options_considered": "Gated vs legacy", "chosen": "Gated", "rationale": "Blocking frontier"}},
-			"open_questions":      questions,
-			"not_yet_specified":   []map[string]string{},
-			"out_of_scope":        []map[string]string{},
+			"open_questions":    questions,
+			"not_yet_specified": []map[string]string{},
+			"out_of_scope":      []map[string]string{},
 		},
 	})
 	if err != nil {
@@ -3877,9 +3877,9 @@ func TestInstructionPackRendersContractInterfaces(t *testing.T) {
 	node := tip.TaskPlanDocumentNode{
 		Key: "T01", Type: "task", Name: "Persist", RequirementKeys: []string{"REQ-001"},
 		Provides: []string{"OBL-001"}, Consumes: []string{"OBL-002"}, EvidenceFor: []string{"OBL-001"}, ObligationKeys: []string{"OBL-001"},
-		Files: []string{"a.go"},
-		Constraints: map[string]any{"scope_roots": []any{"."}},
-		Verification: []any{map[string]any{"command": "go test ./..."}},
+		Files:         []string{"a.go"},
+		Constraints:   map[string]any{"scope_roots": []any{"."}},
+		Verification:  []any{map[string]any{"command": "go test ./..."}},
 		BusinessRules: []any{"rule"}, ValidationRules: []any{"v"}, ErrorHandling: []any{"e"}, StateTransitions: []any{"s"}, ContractObligations: []any{"o"},
 	}
 	packBytes, _, err := tip.MaterializedInstructionPack(node, 3, map[string]tip.RequirementSnapshot{"REQ-001": {RequirementKey: "REQ-001", Title: "R", AcceptanceCriteria: "Given\nWhen\nThen"}})
@@ -4142,7 +4142,10 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer verifyDB.Close()
-	resetChecks := []struct{ query string; want int }{
+	resetChecks := []struct {
+		query string
+		want  int
+	}{
 		{`SELECT COUNT(*) FROM work_items WHERE id='` + childID + `'`, 0},
 		{`SELECT COUNT(*) FROM work_items WHERE id='wi-bug-child'`, 1},
 		{`SELECT COUNT(*) FROM work_items WHERE id='wi-grandchild'`, 1},
@@ -4530,20 +4533,103 @@ func TestBlueprintArtifactPolicySchemas(t *testing.T) {
 	}
 	// The additive schema_version 2.1 marker gates excluded_keys on top of
 	// policy v2; the decomposition_policy_version field itself stays 2.
-	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1`, 1)); err != nil {
+	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"implementation_decisions":`+v21BlueprintDecisions+`,"deferrals":[],"not_yet_specified":[],"out_of_scope":[],"adr_candidates":[]`, 1)); err != nil {
 		t.Fatalf("v2 blueprint with v2.1 marker and no excluded_keys must validate: %v", err)
+	}
+	// The marker is a shape commitment: a marked artifact without the required
+	// implementation_decisions section is rejected, mirroring TS.
+	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1`, 1)); err == nil || !strings.Contains(err.Error(), "implementation_decisions must be an array") {
+		t.Fatalf("v2.1 blueprint without implementation_decisions = %v", err)
+	}
+	// An empty implementation_decisions array is equally rejected.
+	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"implementation_decisions":[],"deferrals":[],"not_yet_specified":[],"out_of_scope":[],"adr_candidates":[]`, 1)); err == nil || !strings.Contains(err.Error(), "implementation_decisions must be a non-empty array") {
+		t.Fatalf("v2.1 blueprint with empty implementation_decisions = %v", err)
 	}
 	if err := validateBlueprintReport(v21BlueprintWithExcludedKeys("Cloud sync", "")); err == nil || !strings.Contains(err.Error(), "excluded_keys require non-empty keys") {
 		t.Fatalf("v2.1 blueprint with empty excluded key = %v", err)
 	}
 }
 
-// v21BlueprintWithExcludedKeys splices the additive schema_version 2.1 marker
-// and excluded_keys into the policy-v2 fixture, matching the production marker
-// shape where decomposition_policy_version stays 2.
+// v21BlueprintDecisions is the well-shaped implementation_decisions every
+// v2.1-marked fixture carries, since the marker commits the artifact to all
+// v2.1 sections (Go/TS shape parity, wi-dbeba706).
+const v21BlueprintDecisions = `[{"decision":"Mirror TS v2.1 shape validation","rationale":"Dual-enforcer parity","alternatives_considered":["Owner deferral","TS-only guard"]}]`
+
+// v21BlueprintFull builds a v2.1-marked blueprint carrying every v2.1 section
+// with the given raw implementation_decisions JSON, so shape variants can be
+// probed against the Go validator (corrective bug wi-dbeba706).
+func v21BlueprintFull(decisions string) string {
+	extra := `"schema_version":2.1,` +
+		`"implementation_decisions":` + decisions + `,` +
+		`"adr_candidates":[{"context":"Shape parity","choice":"Mirror TS shape rules","reason":"Canonical saves must reject the same malformed sections"}],` +
+		`"excluded_keys":["Cloud sync"],` +
+		`"deferrals":[{"question":"SQ-1","resolution":"Owner decision at Blueprint"}],` +
+		`"not_yet_specified":[],` +
+		`"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside epic scope"}]`
+	return strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,`+extra, 1)
+}
+
+func TestBlueprintV21ShapeParity(t *testing.T) {
+	validDecisions := `[{"decision":"Mirror TS v2.1 shape validation","rationale":"Dual-enforcer parity","alternatives_considered":["Owner deferral","TS-only guard"]}]`
+	if err := validateBlueprintReport(v21BlueprintFull(validDecisions)); err != nil {
+		t.Fatalf("complete v2.1 blueprint must validate: %v", err)
+	}
+	if err := validateBlueprintReport(v2BlueprintArtifact); err != nil {
+		t.Fatalf("legacy markerless v2 blueprint must keep validating: %v", err)
+	}
+	cases := []struct {
+		name      string
+		mutate    func(content string) string
+		wantError string
+	}{
+		{"empty decisions", func(c string) string { return strings.Replace(c, validDecisions, "[]", 1) }, "implementation_decisions must be a non-empty array"},
+		{"missing decisions", func(c string) string {
+			return strings.Replace(c, `"implementation_decisions":`+validDecisions+`,`, "", 1)
+		}, "implementation_decisions must be an array"},
+		{"null decisions", func(c string) string { return strings.Replace(c, validDecisions, "null", 1) }, "implementation_decisions must be an array"},
+		{"non-object decision row", func(c string) string { return strings.Replace(c, validDecisions, `[["decision"]]`, 1) }, "implementation_decisions rows must be objects"},
+		{"empty decision", func(c string) string {
+			return strings.Replace(c, `"decision":"Mirror TS v2.1 shape validation"`, `"decision":""`, 1)
+		}, "implementation_decisions.decision must be a non-empty string"},
+		{"missing rationale", func(c string) string { return strings.Replace(c, `"rationale":"Dual-enforcer parity",`, "", 1) }, "implementation_decisions.rationale must be a non-empty string"},
+		{"empty alternatives", func(c string) string { return strings.Replace(c, `["Owner deferral","TS-only guard"]`, "[]", 1) }, "alternatives_considered must be a non-empty array of non-empty strings"},
+		{"non-string alternative", func(c string) string { return strings.Replace(c, `["Owner deferral","TS-only guard"]`, `["a",3]`, 1) }, "alternatives_considered must be a non-empty array of non-empty strings"},
+		{"missing out_of_scope", func(c string) string {
+			return strings.Replace(c, `"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside epic scope"}],`, "", 1)
+		}, "out_of_scope must be an array"},
+		{"null out_of_scope", func(c string) string {
+			return strings.Replace(c, `"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside epic scope"}]`, `"out_of_scope":null`, 1)
+		}, "out_of_scope must be an array"},
+		{"string schema marker", func(c string) string { return strings.Replace(c, `"schema_version":2.1`, `"schema_version":"2.1"`, 1) }, "schema_version must be the numeric marker 2.1"},
+		{"null schema marker", func(c string) string { return strings.Replace(c, `"schema_version":2.1`, `"schema_version":null`, 1) }, "schema_version must be the numeric marker 2.1"},
+		{"deferral row missing resolution", func(c string) string {
+			return strings.Replace(c, `"resolution":"Owner decision at Blueprint"`, `"resolution":" "`, 1)
+		}, "deferrals.resolution must be a non-empty string"},
+		{"adr row missing reason", func(c string) string {
+			return strings.Replace(c, `"reason":"Canonical saves must reject the same malformed sections"`, `"reason":" "`, 1)
+		}, "adr_candidates.reason must be a non-empty string"},
+		{"out_of_scope row empty exclusion", func(c string) string { return strings.Replace(c, `"exclusion":"Cloud sync"`, `"exclusion":" "`, 1) }, "out_of_scope.exclusion must be a non-empty string"},
+		{"not_yet_specified row empty graduation path", func(c string) string {
+			return strings.Replace(c, `"not_yet_specified":[]`, `"not_yet_specified":[{"uncertainty":"u","graduation_path":" "}]`, 1)
+		}, "not_yet_specified.graduation_path must be a non-empty string"},
+	}
+	base := v21BlueprintFull(validDecisions)
+	for _, tc := range cases {
+		err := validateBlueprintReport(tc.mutate(base))
+		if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+			t.Fatalf("%s: err = %v, want containing %q", tc.name, err, tc.wantError)
+		}
+	}
+}
+
+// v21BlueprintWithExcludedKeys splices the additive schema_version 2.1 marker,
+// the required implementation_decisions, and excluded_keys into the policy-v2
+// fixture, matching the production marker shape where
+// decomposition_policy_version stays 2.
 func v21BlueprintWithExcludedKeys(keys ...string) string {
 	emcoded, _ := json.Marshal(keys)
-	return strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"excluded_keys":`+string(emcoded), 1)
+	scope := `"deferrals":[],"not_yet_specified":[],"out_of_scope":[],"adr_candidates":[]`
+	return strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"implementation_decisions":`+v21BlueprintDecisions+`,"excluded_keys":`+string(emcoded)+`,`+scope, 1)
 }
 
 func TestBlueprintExcludedKeysBinding(t *testing.T) {
@@ -4579,6 +4665,16 @@ func TestBlueprintExcludedKeysBinding(t *testing.T) {
 	known := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", v21BlueprintWithExcludedKeys("Cloud sync", "Legacy import")))
 	if known["revision"] != float64(1) {
 		t.Fatalf("first v2.1 blueprint revision = %#v", known["revision"])
+	}
+
+	// Malformed v2.1 implementation_decisions fail closed with a field error
+	// and leave no new artifact row (Go/TS shape parity, wi-dbeba706).
+	malformed := strings.Replace(v21BlueprintWithExcludedKeys("Cloud sync"), v21BlueprintDecisions, "[]", 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", malformed); !strings.Contains(out, "implementation_decisions must be a non-empty array") {
+		t.Fatalf("malformed implementation_decisions save = %q", out)
+	}
+	if rows := blueprintRows(t); rows != 1 {
+		t.Fatalf("blueprint rows after malformed save = %d, want 1", rows)
 	}
 
 	// Unknown exclusion keys fail closed naming the key and leave no new row.
