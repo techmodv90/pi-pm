@@ -1924,10 +1924,10 @@ func validateBlueprintReport(content string) error {
 		DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
 		SchemaVersion              json.RawMessage    `json:"schema_version"`
 		VerificationSeams          []verificationSeam `json:"verification_seams"`
-		ExcludedKeys               []string           `json:"excluded_keys"`
 		// v2.1 sections kept raw so absent, null, and non-array values are
 		// distinguishable and each shape failure names its field, mirroring the
 		// TS parseBlueprintReportJson v2.1 pre-flight (the sole other enforcer).
+		ExcludedKeys            json.RawMessage `json:"excluded_keys"`
 		ImplementationDecisions json.RawMessage `json:"implementation_decisions"`
 		AdrCandidates           json.RawMessage `json:"adr_candidates"`
 		Deferrals               json.RawMessage `json:"deferrals"`
@@ -1954,6 +1954,18 @@ func validateBlueprintReport(content string) error {
 			return fmt.Errorf("Blueprint policy v2.1 schema_version must be the numeric marker 2.1, got %s", string(report.SchemaVersion))
 		}
 		if isV21SchemaVersion(report.SchemaVersion) {
+			// REQ-7 shape commitment: retired planning sections (user stories, a
+			// testing section) must not ride along on a v2.1 solution spec, while
+			// legacy v1/v2 tolerance for unknown top-level keys is preserved.
+			var topLevel map[string]json.RawMessage
+			if err := json.Unmarshal([]byte(content), &topLevel); err != nil {
+				return errors.New("Blueprint artifact must be valid JSON")
+			}
+			for _, name := range []string{"user_stories", "testing"} {
+				if _, ok := topLevel[name]; ok {
+					return fmt.Errorf("Blueprint policy v2.1 forbids the retired %s section", name)
+				}
+			}
 			if err := validateBlueprintV21Sections(&report); err != nil {
 				return err
 			}
@@ -2037,7 +2049,7 @@ func validateBlueprintV21Sections(report *struct {
 	DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
 	SchemaVersion              json.RawMessage    `json:"schema_version"`
 	VerificationSeams          []verificationSeam `json:"verification_seams"`
-	ExcludedKeys               []string           `json:"excluded_keys"`
+	ExcludedKeys               json.RawMessage    `json:"excluded_keys"`
 	ImplementationDecisions    json.RawMessage    `json:"implementation_decisions"`
 	AdrCandidates              json.RawMessage    `json:"adr_candidates"`
 	Deferrals                  json.RawMessage    `json:"deferrals"`
@@ -2081,8 +2093,16 @@ func validateBlueprintV21Sections(report *struct {
 			}
 		}
 	}
-	for _, key := range report.ExcludedKeys {
-		if strings.TrimSpace(key) == "" {
+	// excluded_keys presence mirrors the TS "must be an array" gate: the 2.1
+	// marker commits to every v2.1 section, so a missing or null excluded_keys
+	// is rejected instead of decoding to an empty Go slice.
+	excludedRaw, err := blueprintV21Array(report.ExcludedKeys, "excluded_keys")
+	if err != nil {
+		return err
+	}
+	for _, raw := range excludedRaw {
+		var key string
+		if err := json.Unmarshal(raw, &key); err != nil || strings.TrimSpace(key) == "" {
 			return errors.New("Blueprint policy v2.1 excluded_keys require non-empty keys")
 		}
 	}

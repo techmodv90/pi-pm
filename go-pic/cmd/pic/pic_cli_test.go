@@ -4575,9 +4575,16 @@ func TestBlueprintArtifactPolicySchemas(t *testing.T) {
 		t.Fatalf("unsupported policy version = %v", err)
 	}
 	// The additive schema_version 2.1 marker gates excluded_keys on top of
-	// policy v2; the decomposition_policy_version field itself stays 2.
-	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"implementation_decisions":`+v21BlueprintDecisions+`,"deferrals":[],"not_yet_specified":[],"out_of_scope":[],"adr_candidates":[]`, 1)); err != nil {
-		t.Fatalf("v2 blueprint with v2.1 marker and no excluded_keys must validate: %v", err)
+	// policy v2; the decomposition_policy_version field itself stays 2. The
+	// marker commits to the complete v2.1 shape, so excluded_keys must be a
+	// present array (parity with the TS parser), not absent or null.
+	v21NoExcluded := strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"implementation_decisions":`+v21BlueprintDecisions+`,"deferrals":[],"not_yet_specified":[],"out_of_scope":[],"adr_candidates":[]`, 1)
+	if err := validateBlueprintReport(v21NoExcluded); err == nil || !strings.Contains(err.Error(), "excluded_keys must be an array") {
+		t.Fatalf("v2.1 blueprint without excluded_keys = %v", err)
+	}
+	v21NullExcluded := strings.Replace(v21NoExcluded, v21BlueprintDecisions+`,"deferrals"`, v21BlueprintDecisions+`,"excluded_keys":null,"deferrals"`, 1)
+	if err := validateBlueprintReport(v21NullExcluded); err == nil || !strings.Contains(err.Error(), "excluded_keys must be an array") {
+		t.Fatalf("v2.1 blueprint with null excluded_keys = %v", err)
 	}
 	// The marker is a shape commitment: a marked artifact without the required
 	// implementation_decisions section is rejected, mirroring TS.
@@ -4655,6 +4662,12 @@ func TestBlueprintV21ShapeParity(t *testing.T) {
 		{"not_yet_specified row empty graduation path", func(c string) string {
 			return strings.Replace(c, `"not_yet_specified":[]`, `"not_yet_specified":[{"uncertainty":"u","graduation_path":" "}]`, 1)
 		}, "not_yet_specified.graduation_path must be a non-empty string"},
+		{"user stories section", func(c string) string {
+			return strings.Replace(c, `{`, `{"user_stories":[{"story":"As an owner"}],`, 1)
+		}, "forbids the retired user_stories section"},
+		{"second testing section", func(c string) string {
+			return strings.Replace(c, `{`, `{"testing":[{"case":"t"}],`, 1)
+		}, "forbids the retired testing section"},
 	}
 	base := v21BlueprintFull(validDecisions)
 	for _, tc := range cases {
@@ -4662,6 +4675,12 @@ func TestBlueprintV21ShapeParity(t *testing.T) {
 		if err == nil || !strings.Contains(err.Error(), tc.wantError) {
 			t.Fatalf("%s: err = %v, want containing %q", tc.name, err, tc.wantError)
 		}
+	}
+	// Legacy v1/v2 tolerance for unknown top-level keys is preserved: retired
+	// sections are rejected only under the v2.1 shape commitment.
+	legacy := strings.Replace(v2BlueprintArtifact, `{`, `{"user_stories":[{"story":"As an owner"}],"testing":[{"case":"t"}],`, 1)
+	if err := validateBlueprintReport(legacy); err != nil {
+		t.Fatalf("legacy v2 blueprint with retired sections must keep validating: %v", err)
 	}
 }
 
