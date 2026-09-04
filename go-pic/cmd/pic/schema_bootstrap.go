@@ -195,7 +195,31 @@ func schemaMigrationSteps() []schemaMigration {
 			return applyLegacyPackBackfills(db)
 		}},
 		{version: 8, name: "decomposition_policy_projection", apply: applyDecompositionProjectionColumns},
+		{version: 9, name: "blueprint_annotation_evidence", apply: applyBlueprintAnnotationEvidenceColumn},
 	}
+}
+
+// applyBlueprintAnnotationEvidenceColumn adds the blueprint disposition
+// evidence column (OB-F3-3) to workflow_checkpoints on databases created
+// before the annotation review loop. The ALTER is guarded by columnExists so a
+// re-run against an already-widened table (the older-binary test path clears
+// schema_migrations records) stays idempotent, and by tableExists so partial
+// baseline shapes without the table are left to the canonical statement pass.
+func applyBlueprintAnnotationEvidenceColumn(db schemaDB) error {
+	if !tableExists(db, "workflow_checkpoints") {
+		return nil
+	}
+	present, err := columnExists(db, "workflow_checkpoints", "dispositions_json")
+	if err != nil {
+		return err
+	}
+	if present {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE workflow_checkpoints ADD COLUMN dispositions_json TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("blueprint annotation evidence migration: %w", err)
+	}
+	return nil
 }
 
 // applyDecompositionProjectionColumns adds the decomposition policy v2

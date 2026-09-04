@@ -5244,3 +5244,103 @@ func TestRejectedCheckpointsDoNotSupplyPlanningAuthority(t *testing.T) {
 	runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, "contracts", validContractArtifact)
 	runPic(t, bin, root, home, "work-item", "artifact-approve", fallbackID, "contracts", "current", "approved")
 }
+
+// querySQLiteColumn runs one SQLite query through the sqlite3 CLI and returns
+// its trimmed stdout, so tests can assert persisted evidence without mocks.
+func querySQLiteColumn(t *testing.T, dbPath string, query string) string {
+	t.Helper()
+	out, err := exec.Command("sqlite3", dbPath, query).CombinedOutput()
+	if err != nil {
+		t.Fatalf("sqlite query %q failed: %v\n%s", query, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestBlueprintAnnotationEvidence (OB-F3-2/OB-F3-3, go-artifact-approve seam):
+// a real temporary SQLite database proves that terminal annotation dispositions
+// are recorded as durable approval evidence inside the approval checkpoint,
+// that incomplete evidence is rejected before any canonical mutation, and that
+// the Go PI_TASK_AGENT_NAME rejection still defends approval behind the new
+// gate.
+func TestBlueprintAnnotationEvidence(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Annotation Evidence"))
+	id := epic["id"].(string)
+	for _, stage := range []string{"scan", "rri", "vision"} {
+		content := stage + " content"
+		if stage == "vision" {
+			content = validVisionArtifact
+		}
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, content))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	blueprint := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", validBlueprintArtifact))
+	blueprintID := blueprint["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	// Incomplete evidence (empty evidence, bad resolution, duplicates) is
+	// rejected before any canonical save or checkpoint mutation.
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", `[{"annotation":"tighten seam 2","resolution":"addressed","evidence":""}]`); !strings.Contains(out, "nonempty evidence") {
+		t.Fatalf("empty evidence disposition = %s", out)
+	}
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", `[{"annotation":"tighten seam 2","resolution":"noted","evidence":"e"}]`); !strings.Contains(out, "addressed or waived") {
+		t.Fatalf("nonterminal resolution = %s", out)
+	}
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", `[{"annotation":"a","resolution":"addressed","evidence":"e"},{"annotation":"a","resolution":"waived","evidence":"dup"}]`); !strings.Contains(out, "duplicate disposition") {
+		t.Fatalf("duplicate disposition = %s", out)
+	}
+	if count := querySQLiteColumn(t, dbPath, `SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id='`+id+`' AND stage='blueprint'`); count != "0" {
+		t.Fatalf("rejected evidence attempts must not record a checkpoint, got %s", count)
+	}
+
+	// Successful approval records both terminal dispositions as durable
+	// evidence attached to the approved Blueprint checkpoint.
+	valid := `[{"annotation":"tighten seam 2","resolution":"addressed","evidence":"seam 2 rewritten"},{"annotation":"rename the gate","resolution":"waived","evidence":"owner deferred naming"}]`
+	approved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", valid))
+	if approved["dispositions_recorded"] != float64(2) {
+		t.Fatalf("approved dispositions = %#v", approved)
+	}
+	evidence := querySQLiteColumn(t, dbPath, `SELECT dispositions_json FROM workflow_checkpoints WHERE work_item_id='`+id+`' AND stage='blueprint' AND decision_type='approved'`)
+	for _, fragment := range []string{"tighten seam 2", "addressed", "seam 2 rewritten", "rename the gate", "waived", "owner deferred naming"} {
+		if !strings.Contains(evidence, fragment) {
+			t.Fatalf("checkpoint evidence %q missing %q", evidence, fragment)
+		}
+	}
+
+	// Immutable evidence: the same artifact revision can never be approved
+	// again, so no duplicate evidence rows can accumulate behind the checkpoint.
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", valid); !strings.Contains(out, "UNIQUE constraint failed") {
+		t.Fatalf("re-approval of the same revision = %s", out)
+	}
+
+	// Revised blueprint round: each approval binds its own complete evidence.
+	revised := strings.Replace(validBlueprintArtifact, "Reliable workflow", "Revised reliable workflow", 1)
+	blueprint2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", revised))
+	approved2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprint2["id"].(string), "approved", "--dispositions-json", `[{"annotation":"tighten seam 2","resolution":"addressed","evidence":"seam 2 rewritten"}]`))
+	if approved2["dispositions_recorded"] != float64(1) {
+		t.Fatalf("revised approval dispositions = %#v", approved2)
+	}
+	// Evidence survives and remains queryable after cleanup: the approved
+	// Blueprint checkpoint still carries its dispositions even though no
+	// runtime draft or plan file remains (revision 2's save invalidates the
+	// revision 1 checkpoint by the established downstream-invalidation rules,
+	// so exactly the current approval's evidence row remains).
+	rows := querySQLiteColumn(t, dbPath, `SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id='`+id+`' AND stage='blueprint' AND decision_type='approved' AND dispositions_json!=''`)
+	if rows != "1" {
+		t.Fatalf("durable evidence checkpoints = %s", rows)
+	}
+
+	// Child-agent rejection: the existing Go PI_TASK_AGENT_NAME defense still
+	// rejects the approval regardless of any actor_role the child supplies.
+	child := exec.Command(bin, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--actor-role", "owner", "--dispositions-json", valid)
+	child.Dir = root
+	child.Env = append(clearedPiEnv(), "HOME="+home, "PI_TASK_AGENT_NAME=task-reviewer")
+	if out, err := child.CombinedOutput(); err == nil || !strings.Contains(string(out), "cannot mutate Work Item lifecycle") {
+		t.Fatalf("child-agent approval attempt: err=%v out=%s", err, out)
+	}
+}

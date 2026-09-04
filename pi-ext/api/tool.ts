@@ -15,7 +15,7 @@ import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../repo
 import { parseContractReportJson, renderContractReportMarkdown } from "../reporting/contract-report.ts";
 import { parseTaskGraphReportJson, renderTaskGraphReportMarkdown } from "../reporting/task-graph-report.ts";
 import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
-import { deleteBlueprintDraft, deletePlanReviewState, loadBlueprintDraft, loadLatestBlueprintDraft, planApprovalGate, planReviewCliAvailable, recoverPlanReviewResult, requestPlanReview, saveBlueprintDraft, writeBlueprintPlan } from "../core/blueprint-drafts.ts";
+import { annotationDispositionGate, deleteBlueprintDraft, deleteBlueprintDispositions, deleteBlueprintPlan, deletePlanReviewState, loadBlueprintDispositions, loadBlueprintDraft, loadLatestBlueprintDraft, planApprovalGate, planReviewAnnotations, planReviewCliAvailable, recoverPlanReviewResult, requestPlanReview, saveBlueprintDispositions, saveBlueprintDraft, validateBlueprintDispositions, writeBlueprintPlan } from "../core/blueprint-drafts.ts";
 import { planAdrFiles, writeAdrFiles, type AdrCandidate } from "../core/blueprint-adr.ts";
 
 import { currentApprovedPlanningArtifact, withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
@@ -161,6 +161,11 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         reason: Type.Optional(Type.String({ description: "Owner-recorded reason for a bounded planning amendment" })),
         substitutions: Type.Optional(Type.Array(Type.Object({ old: Type.String(), new: Type.String() }), { description: "Exact old→new string pairs for amend_work_item_planning; every occurrence across approved planning artifacts, requirements, and owner decisions is replaced" })),
         stage: Type.Optional(StringEnum(["scan", "rri", "vision", "blueprint", "contracts", "task_graph"] as const)),
+        dispositions: Type.Optional(Type.Array(Type.Object({
+          annotation: Type.String({ description: "Exact annotation text from the persisted plan review feedback" }),
+          resolution: StringEnum(["addressed", "waived"] as const),
+          evidence: Type.String({ description: "Owner-recorded evidence for the terminal resolution" }),
+        }), { description: "Terminal dispositions resolving recorded plan-review annotations; required while any annotation remains unresolved" })),
         artifact_id: Type.Optional(Type.String({ description: "Immutable Work Item artifact ID" })),
         completion_report_id: Type.Optional(Type.String({ description: "Current integrated Completion Report ID" })),
         verification_report_id: Type.Optional(Type.String({ description: "Current aggregate Verification Report ID" })),
@@ -414,7 +419,34 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             // or a never-requested review passes with zero dispositions.
             const planReview = await recoverPlanReviewResult(pi.events, ctx.cwd, params.id);
             const gate = planApprovalGate(planReview);
-            if (!gate.ok) return { content: [{ type: "text", text: `Error: ${gate.reason}` }], details: { plan_review: planReview }, isError: true };
+            // OB-F3-2/OB-F3-3 persisted-state hard gate: a still-pending review
+            // blocks approval outright (no annotations exist to resolve); a
+            // rejected review falls through to the disposition gate, where the
+            // annotations derived from the persisted feedback are recorded into
+            // the persisted disposition store and the unresolved count is
+            // recomputed from persistence before any canonical save. A pending
+            // annotation returns a gate error with no save and no cleanup, so
+            // the draft, plan file, and recorded dispositions all stay
+            // recoverable for the next attempt.
+            const annotations = planReviewAnnotations(planReview);
+            let dispositions = loadBlueprintDispositions(ctx.cwd, params.id);
+            if (!gate.ok && annotations.length === 0) return { content: [{ type: "text", text: `Error: ${gate.reason}` }], details: { plan_review: planReview }, isError: true };
+            if (params.dispositions !== undefined) {
+              try {
+                const validated = validateBlueprintDispositions(params.dispositions);
+                for (const entry of validated) {
+                  if (!annotations.includes(entry.annotation)) {
+                    throw new Error(`Disposition annotation "${entry.annotation}" does not match a recorded plan-review annotation`);
+                  }
+                }
+                dispositions = saveBlueprintDispositions(ctx.cwd, params.id, validated);
+              } catch (error) {
+                const message = error instanceof Error ? error.message : String(error);
+                return { content: [{ type: "text", text: `Error: ${message}` }], details: { annotations, dispositions }, isError: true };
+              }
+            }
+            const dispositionGate = annotationDispositionGate(annotations, dispositions);
+            if (!dispositionGate.ok) return { content: [{ type: "text", text: `Error: ${dispositionGate.reason}` }], details: { annotations, dispositions }, isError: true };
             // OB-F2-3: full adr_candidates validation (shape, string fields,
             // safe slugs) and target-conflict preflight run BEFORE the Go
             // artifact-save/approve, so malformed or conflicting input can
@@ -436,7 +468,13 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             }
             const saved = execPic(["work-item", "artifact-save", params.id, "blueprint", draft.content], ctx.cwd);
             if (saved.error) return { content: [{ type: "text", text: `Error: ${saved.error}` }], details: saved, isError: true };
-            const approved = execPic(["work-item", "artifact-approve", params.id, "blueprint", saved.id, "approved"], ctx.cwd);
+            // Durable evidence ordering (OB-F3-3): the Go approval commits the
+            // terminal dispositions onto the Blueprint checkpoint in the same
+            // transaction, before any temporary file is deleted; a failed save
+            // or approval leaves zero evidence and preserves temporary files.
+            const approveArgs = ["work-item", "artifact-approve", params.id, "blueprint", saved.id, "approved"];
+            if (dispositionGate.resolved.length > 0) approveArgs.push("--dispositions-json", JSON.stringify(dispositionGate.resolved));
+            const approved = execPic(approveArgs, ctx.cwd);
             if (approved.error) return { content: [{ type: "text", text: `Error: ${approved.error}` }], details: { saved, approved }, isError: true };
             let adrFiles: string[] = [];
             // Validation already passed before the Go calls; this write only
@@ -451,6 +489,8 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             }
             deleteBlueprintDraft(ctx.cwd, params.id);
             deletePlanReviewState(ctx.cwd, params.id);
+            deleteBlueprintDispositions(ctx.cwd, params.id);
+            deleteBlueprintPlan(ctx.cwd, params.id);
             return { content: [{ type: "text", text: JSON.stringify({ saved, approved, adr_files: adrFiles }, null, 2) }], details: { saved, approved, adr_files: adrFiles } };
           }
           case "load_planning_artifact": {

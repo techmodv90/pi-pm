@@ -2791,15 +2791,36 @@ func workItemScanRejection(db *sql.DB, args []string) error {
 }
 
 func workItemArtifactApprove(db *sql.DB, args []string) error {
-	if len(args) != 4 || !contains(workItemStages, args[1]) {
-		return errors.New("usage: pic work-item artifact-approve <id> <stage> <artifact-id> <accepted|approved>")
+	usage := "usage: pic work-item artifact-approve <id> <stage> <artifact-id> <accepted|approved> [--dispositions-json <json>]"
+	hasDispositions := len(args) == 6 && args[4] == "--dispositions-json"
+	if (len(args) != 4 && !hasDispositions) || !contains(workItemStages, args[1]) {
+		return errors.New(usage)
+	}
+	// Blueprint disposition evidence constraint (OB-F3-2/OB-F3-3): terminal
+	// annotation dispositions {annotation, resolution: addressed|waived,
+	// evidence} are validated BEFORE any transaction opens, so incomplete
+	// evidence can never mutate lifecycle state, and the evidence commits
+	// atomically with the approval checkpoint — a failed save or approval rolls
+	// back the evidence mutation together with everything else.
+	dispositionsJSON := ""
+	dispositionCount := 0
+	if hasDispositions {
+		if args[1] != "blueprint" {
+			return errors.New("--dispositions-json is only supported for the blueprint stage")
+		}
+		count, err := validateAnnotationDispositions(args[5])
+		if err != nil {
+			return err
+		}
+		dispositionsJSON = args[5]
+		dispositionCount = count
 	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	artifactID, revision, contentHash, err := approveWorkItemArtifactTx(tx, args[0], args[1], args[2], args[3])
+	artifactID, revision, contentHash, err := approveWorkItemArtifactTx(tx, args[0], args[1], args[2], args[3], dispositionsJSON)
 	if err != nil {
 		return err
 	}
@@ -2822,8 +2843,48 @@ func workItemArtifactApprove(db *sql.DB, args []string) error {
 		}
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3], "glossary_updated": glossaryUpdated})
+	result := map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3], "glossary_updated": glossaryUpdated}
+	if dispositionsJSON != "" {
+		result["dispositions_recorded"] = dispositionCount
+	}
+	writeJSON(os.Stdout, result)
 	return nil
+}
+
+// validateAnnotationDispositions enforces the terminal disposition evidence
+// surface: a JSON array of {annotation, resolution: addressed|waived, evidence}
+// with nonempty annotation and evidence, deduplicated by annotation identity so
+// the checkpoint evidence stays immutable and idempotent by disposition
+// identity. Validation runs before any database mutation.
+func validateAnnotationDispositions(raw string) (int, error) {
+	var entries []struct {
+		Annotation string `json:"annotation"`
+		Resolution string `json:"resolution"`
+		Evidence   string `json:"evidence"`
+	}
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return 0, errors.New("annotation dispositions must be a JSON array of {annotation, resolution, evidence}")
+	}
+	if len(entries) == 0 {
+		return 0, errors.New("annotation dispositions must not be empty")
+	}
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Annotation) == "" {
+			return 0, errors.New("each annotation disposition requires a nonempty annotation")
+		}
+		if entry.Resolution != "addressed" && entry.Resolution != "waived" {
+			return 0, errors.New("annotation disposition resolution must be addressed or waived")
+		}
+		if strings.TrimSpace(entry.Evidence) == "" {
+			return 0, errors.New("each annotation disposition requires nonempty evidence")
+		}
+		if seen[entry.Annotation] {
+			return 0, fmt.Errorf("duplicate disposition for annotation %q", entry.Annotation)
+		}
+		seen[entry.Annotation] = true
+	}
+	return len(entries), nil
 }
 
 // applyRriGlossaryApproval (REQ-F1-6) is the sole CONTEXT.md glossary writer:
@@ -2937,8 +2998,11 @@ func renderRriGlossaryEntries(existing string, updates []rriGlossaryUpdate) stri
 // approveWorkItemArtifactTx records one stage checkpoint inside a caller-owned
 // transaction so batched owner decisions (checkpoint-decide) share the exact
 // validation and predecessor rules of single approvals. artifactRef may be
-// "current" to bind the stage's latest artifact revision.
-func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decision string) (string, int, string, error) {
+// "current" to bind the stage's latest artifact revision. dispositionsJSON
+// carries the terminal blueprint annotation dispositions recorded as durable
+// approval evidence inside the SAME transaction; empty for every other caller,
+// so a failure in any caller rolls the evidence mutation back with the approval.
+func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decision, dispositionsJSON string) (string, int, string, error) {
 	expectedDecision := "approved"
 	if stage == "scan" {
 		expectedDecision = "accepted"
@@ -3011,7 +3075,7 @@ func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decis
 			return "", 0, "", err
 		}
 	}
-	if _, err = tx.Exec(`INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES(?,?,?,?,?,?,?)`, "wic-"+shortID(), workItemID, stage, artifactID, revision, contentHash, decision); err != nil {
+	if _, err = tx.Exec(`INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type,dispositions_json) VALUES(?,?,?,?,?,?,?,?)`, "wic-"+shortID(), workItemID, stage, artifactID, revision, contentHash, decision, dispositionsJSON); err != nil {
 		return "", 0, "", err
 	}
 	return artifactID, revision, contentHash, nil

@@ -220,7 +220,7 @@ func workItemCheckpointDecide(db *sql.DB, args []string) (err error) {
 		}
 	}()
 	for _, stage := range ordered {
-		artifactID, revision, contentHash, err := approveWorkItemArtifactTx(tx, workItemID, stage, "current", selected[stage])
+		artifactID, revision, contentHash, err := approveWorkItemArtifactTx(tx, workItemID, stage, "current", selected[stage], "")
 		if err != nil {
 			return err
 		}

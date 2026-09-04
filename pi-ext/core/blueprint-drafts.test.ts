@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
-import { blueprintPlanPath, deleteBlueprintDraft, deletePlanReviewState, loadBlueprintDraft, loadLatestBlueprintDraft, loadPlanReviewState, planApprovalGate, PLANNOTATOR_REQUEST_CHANNEL, recoverPlanReviewResult, requestPlanReview, saveBlueprintDraft, writeBlueprintPlan, type PlannotatorEvents } from "./blueprint-drafts.ts";
+import { annotationDispositionGate, blueprintPlanPath, deleteBlueprintDraft, deleteBlueprintDispositions, deletePlanReviewState, loadBlueprintDispositions, loadBlueprintDraft, loadLatestBlueprintDraft, loadPlanReviewState, planApprovalGate, planReviewAnnotations, PLANNOTATOR_REQUEST_CHANNEL, recoverPlanReviewResult, requestPlanReview, saveBlueprintDispositions, saveBlueprintDraft, validateBlueprintDispositions, writeBlueprintPlan, type BlueprintAnnotationDisposition, type PlannotatorEvents } from "./blueprint-drafts.ts";
 import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../reporting/blueprint-report.ts";
 import { registerTaskManagerTool } from "../api/tool.ts";
 
@@ -207,6 +207,125 @@ test("recoverPlanReviewResult resolves the outcome and the gate enforces entered
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ── Annotation dispositions (OB-F3-2 / OB-F3-3) ───────────────────────
+
+test("validateBlueprintDispositions accepts only terminal dispositions with evidence and dedupes by annotation identity", () => {
+  const valid = validateBlueprintDispositions([
+    { annotation: "tighten seam 2", resolution: "addressed", evidence: "seam 2 rewritten" },
+    { annotation: " rename the gate ", resolution: "waived", evidence: "owner deferred naming" },
+  ]);
+  assert.deepEqual(valid.map((entry) => entry.annotation), ["tighten seam 2", "rename the gate"]);
+  assert.throws(() => validateBlueprintDispositions([]), /nonempty array/);
+  assert.throws(() => validateBlueprintDispositions([{ annotation: "a", resolution: "addressed", evidence: "" }]), /requires \{annotation/);
+  assert.throws(() => validateBlueprintDispositions([{ annotation: "a", resolution: "noted", evidence: "e" }]), /addressed\|waived|requires/);
+  assert.throws(() => validateBlueprintDispositions([{ annotation: "", resolution: "addressed", evidence: "e" }]), /requires/);
+  assert.throws(() => validateBlueprintDispositions([{ annotation: "a", resolution: "addressed", evidence: "e" }, { annotation: "a", resolution: "waived", evidence: "f" }]), /Duplicate disposition/);
+});
+
+test("the disposition store merges idempotently by annotation identity and is derived from persisted review feedback", () => {
+  const root = tempRoot("pic-blueprint-dispositions-");
+  try {
+    assert.deepEqual(loadBlueprintDispositions(root, "wi-abc123"), []);
+    const first = saveBlueprintDispositions(root, "wi-abc123", [{ annotation: "tighten seam 2", resolution: "addressed", evidence: "seam 2 rewritten" }]);
+    assert.equal(loadBlueprintDispositions(root, "wi-abc123").length, 1);
+    const merged = saveBlueprintDispositions(root, "wi-abc123", [
+      { annotation: "tighten seam 2", resolution: "addressed", evidence: "seam 2 rewritten" },
+      { annotation: "rename the gate", resolution: "waived", evidence: "owner deferred naming" },
+    ]);
+    assert.deepEqual(merged, first.concat([{ annotation: "rename the gate", resolution: "waived", evidence: "owner deferred naming" }]));
+    assert.equal(loadBlueprintDispositions(root, "wi-abc123").length, 2, "resubmitting an identical disposition must stay idempotent");
+
+    // Annotations come from the persisted review feedback, never from memory.
+    assert.deepEqual(planReviewAnnotations(undefined), []);
+    assert.deepEqual(planReviewAnnotations({ workItemId: "wi-abc123", planPath: "p", status: "approved", updatedAt: "" }), []);
+    assert.deepEqual(planReviewAnnotations({ workItemId: "wi-abc123", planPath: "p", status: "rejected", feedback: "tighten seam 2\nrename the gate", updatedAt: "" }), ["tighten seam 2", "rename the gate"]);
+    assert.deepEqual(planReviewAnnotations({ workItemId: "wi-abc123", planPath: "p", status: "rejected", feedback: "one blob", updatedAt: "" }), ["one blob"]);
+
+    // The gate recomputes the pending count from the persisted pair.
+    const pending = annotationDispositionGate(["tighten seam 2", "rename the gate"], first);
+    assert.equal(pending.ok, false);
+    assert.match(pending.ok ? "" : pending.reason, /1 unresolved annotation pending disposition: rename the gate/);
+    assert.throws(() => { throw new Error(pending.ok ? "" : pending.reason); }, /rename the gate/);
+    const resolved = annotationDispositionGate(["tighten seam 2", "rename the gate"], merged);
+    assert.equal(resolved.ok, true);
+    assert.equal(resolved.ok ? resolved.resolved.length : -1, 2);
+    // A stale store entry from a superseded review is never recorded as evidence.
+    const stale = annotationDispositionGate(["tighten seam 2"], merged);
+    assert.equal(stale.ok, true);
+    assert.equal(stale.ok ? stale.resolved.length : -1, 1);
+    deleteBlueprintDispositions(root, "wi-abc123");
+    assert.deepEqual(loadBlueprintDispositions(root, "wi-abc123"), []);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("approve_blueprint_draft resolves annotations through persisted dispositions, records durable evidence, and cleans up last", async () => {
+  let outcome: unknown = { status: "completed", approved: false, feedback: "tighten seam 2\nrename the gate" };
+  const bus = fakePlannotatorEvents(planReviewResponder(() => outcome));
+  const tool = captureTaskManagerTool(bus);
+  await withPicStub("ok", async (picLog) => {
+    const root = tempRoot("pic-blueprint-tool-dispositions-");
+    try {
+      const draft = saveBlueprintDraft(root, "wi-dispositions", BLUEPRINT_JSON, V1_CHECKPOINT);
+      await requestPlanReview(bus, root, "wi-dispositions", "# PLAN", { timeoutMs: 50 });
+      // OB-F3-1 projection from the review loop: the reviewed render sits at
+      // the stable plan path awaiting the approval cleanup.
+      writeBlueprintPlan(root, "wi-dispositions", "# PLAN render");
+      const planFile = join(root, ".pi", "artifacts", "plans", "wi-dispositions.md");
+      assert.equal(existsSync(planFile), true);
+
+      // Attempt 1: one annotation resolved, one still pending. The gate
+      // rejects with the pending count, no artifact-save runs, and every
+      // review artifact (plan file, draft, recorded disposition) is retained.
+      const partial = await runTool(tool, { action: "approve_blueprint_draft", id: "wi-dispositions", artifact_id: draft.draftId, actor_role: "owner", dispositions: [{ annotation: "tighten seam 2", resolution: "addressed", evidence: "seam 2 rewritten" }] }, root);
+      assert.equal(partial.isError, true, "an unresolved annotation must block approval");
+      assert.match(partial.content[0]!.text, /1 unresolved annotation pending disposition: rename the gate/);
+      assert.equal(existsSync(picLog), false, "the hard gate must run before any Go artifact-save or artifact-approve call");
+      assert.equal(existsSync(planFile), true, "the plan file must be retained across a rejected attempt");
+      assert.equal(loadBlueprintDispositions(root, "wi-dispositions").length, 1, "the recorded disposition must be retained across attempts");
+
+      // Incomplete evidence is rejected before any canonical save.
+      const incomplete = await runTool(tool, { action: "approve_blueprint_draft", id: "wi-dispositions", artifact_id: draft.draftId, actor_role: "owner", dispositions: [{ annotation: "rename the gate", resolution: "waived", evidence: "   " }] }, root);
+      assert.equal(incomplete.isError, true);
+      assert.match(incomplete.content[0]!.text, /evidence/);
+      assert.equal(existsSync(picLog), false);
+
+      // A disposition that matches no recorded annotation fails closed.
+      const mismatch = await runTool(tool, { action: "approve_blueprint_draft", id: "wi-dispositions", artifact_id: draft.draftId, actor_role: "owner", dispositions: [{ annotation: "unknown note", resolution: "addressed", evidence: "e" }] }, root);
+      assert.equal(mismatch.isError, true);
+      assert.match(mismatch.content[0]!.text, /does not match a recorded plan-review annotation/);
+      assert.equal(existsSync(picLog), false);
+
+      // Attempt 2: the remaining annotation is waived. Approval proceeds: the
+      // merged terminal dispositions ride the Go approval as durable evidence
+      // BEFORE the temp plan file, draft, review state, and store are deleted.
+      outcome = { status: "completed", approved: false, feedback: "tighten seam 2\nrename the gate" };
+      const resolved = await runTool(tool, { action: "approve_blueprint_draft", id: "wi-dispositions", artifact_id: draft.draftId, actor_role: "owner", dispositions: [{ annotation: "rename the gate", resolution: "waived", evidence: "owner deferred naming" }] }, root);
+      assert.equal(resolved.isError, undefined, `unexpected approval error: ${resolved.content[0]?.text}`);
+      const calls = readFileSync(picLog, "utf8").trim().split("\n");
+      assert.match(calls[0]!, / artifact-save /);
+      assert.match(calls[1]!, / artifact-approve /);
+      const approveCall = calls[1]!;
+      const dispositionsArg = approveCall.slice(approveCall.indexOf("--dispositions-json") + "--dispositions-json ".length);
+      const recorded = JSON.parse(dispositionsArg) as BlueprintAnnotationDisposition[];
+      assert.deepEqual(recorded.map((entry) => [entry.annotation, entry.resolution]), [["tighten seam 2", "addressed"], ["rename the gate", "waived"]], "the merged terminal dispositions must reach the Go approval as evidence");
+      assert.match(approveCall, /seam 2 rewritten/);
+      assert.match(approveCall, /owner deferred naming/);
+
+      // Cleanup ordering: evidence reached Go first, then every temporary
+      // artifact was deleted while the disposition record had already been
+      // handed to the durable store.
+      assert.equal(existsSync(planFile), false, "the temp markdown must be deleted after successful approval");
+      assert.equal(loadPlanReviewState(root, "wi-dispositions"), undefined, "the review state must be cleared after approval");
+      assert.deepEqual(loadBlueprintDispositions(root, "wi-dispositions"), [], "the disposition store is cleared; the durable record lives on the approval checkpoint");
+      assert.equal(existsSync(join(root, ".pi", "runtime", "blueprint", "wi-dispositions.json")), false, "the draft must be deleted after successful approval");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
 });
 
 // ── Tool-level seam: registerTaskManagerTool's execute path ─────────────────

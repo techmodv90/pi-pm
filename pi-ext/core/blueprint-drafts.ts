@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { accessSync, chmodSync, constants as fsConstants, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { accessSync, chmodSync, constants as fsConstants, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { deleteRuntimeDraft, loadLatestRuntimeDraft, loadRuntimeDraft, saveRuntimeDraft } from "./runtime-drafts.ts";
 
@@ -200,4 +200,93 @@ export function planReviewCliAvailable(): boolean {
     try { accessSync(join(dir, "plannotator"), fsConstants.X_OK); return true; } catch { /* not in this directory */ }
   }
   return false;
+}
+
+// ── Annotation dispositions (OB-F3-2 / OB-F3-3) ─────────────────────────
+
+export type AnnotationResolution = "addressed" | "waived";
+
+export interface BlueprintAnnotationDisposition {
+  annotation: string;
+  resolution: AnnotationResolution;
+  evidence: string;
+}
+
+const BLUEPRINT_DISPOSITIONS_DRAFT_STAGE = "blueprint-dispositions";
+
+// Disposition evidence surface constraint: only terminal resolutions
+// {annotation, resolution: addressed|waived, evidence} are accepted, with
+// nonempty annotation and evidence, deduplicated by annotation identity, so
+// incomplete evidence can never reach canonical save.
+export function validateBlueprintDispositions(input: unknown): BlueprintAnnotationDisposition[] {
+  if (!Array.isArray(input) || input.length === 0) throw new Error("Blueprint annotation dispositions must be a nonempty array of {annotation, resolution, evidence}");
+  const seen = new Set<string>();
+  return input.map((entry) => {
+    const disposition = entry as Partial<BlueprintAnnotationDisposition> | null;
+    const annotation = typeof disposition?.annotation === "string" ? disposition.annotation.trim() : "";
+    const evidence = typeof disposition?.evidence === "string" ? disposition.evidence.trim() : "";
+    if (!annotation || !evidence || (disposition?.resolution !== "addressed" && disposition?.resolution !== "waived")) {
+      throw new Error("Each annotation disposition requires {annotation, resolution: addressed|waived, evidence}");
+    }
+    if (seen.has(annotation)) throw new Error(`Duplicate disposition for annotation: ${annotation}`);
+    seen.add(annotation);
+    return { annotation, resolution: disposition.resolution, evidence };
+  });
+}
+
+// Disposition store: the persisted review record the approval gate recomputes
+// from on every attempt. Merging is idempotent by annotation identity (the
+// newest terminal resolution replaces an older one); the durable immutable
+// evidence copy is written to the approval checkpoint by the Go CLI.
+export function saveBlueprintDispositions(root: string, workItemId: string, dispositions: BlueprintAnnotationDisposition[]): BlueprintAnnotationDisposition[] {
+  const merged = new Map<string, BlueprintAnnotationDisposition>();
+  for (const entry of loadBlueprintDispositions(root, workItemId)) merged.set(entry.annotation, entry);
+  for (const entry of validateBlueprintDispositions(dispositions)) merged.set(entry.annotation, entry);
+  const state = [...merged.values()];
+  saveRuntimeDraft(root, BLUEPRINT_DISPOSITIONS_DRAFT_STAGE, workItemId, state);
+  return state;
+}
+
+export function loadBlueprintDispositions(root: string, workItemId: string): BlueprintAnnotationDisposition[] {
+  try {
+    const draft = loadLatestRuntimeDraft<BlueprintAnnotationDisposition[]>(root, BLUEPRINT_DISPOSITIONS_DRAFT_STAGE, workItemId);
+    return Array.isArray(draft.state) ? draft.state : [];
+  } catch {
+    return [];
+  }
+}
+
+export function deleteBlueprintDispositions(root: string, workItemId: string): void {
+  deleteRuntimeDraft(root, BLUEPRINT_DISPOSITIONS_DRAFT_STAGE, workItemId);
+}
+
+// Annotation identity constraint: annotations are derived from the persisted
+// review feedback, never from approval-call memory — each nonempty feedback
+// line is one annotation identity; unsplit feedback is one annotation.
+export function planReviewAnnotations(state: PlanReviewState | undefined): string[] {
+  if (!state || state.status !== "rejected" || !state.feedback?.trim()) return [];
+  const lines = state.feedback.split("\n").map((line) => line.trim()).filter(Boolean);
+  return lines.length > 0 ? lines : [state.feedback.trim()];
+}
+
+// Persisted-state hard gate (OB-F3-2): recomputed on every approval attempt
+// from the persisted review annotations plus the persisted disposition store —
+// never from memory or actor_role. Every annotation must carry a terminal
+// disposition before canonical save; the resolved set passed to the Go evidence
+// write is the intersection with the current annotations so stale entries from
+// a superseded review are never recorded as evidence.
+export function annotationDispositionGate(annotations: string[], dispositions: BlueprintAnnotationDisposition[]): { ok: true; resolved: BlueprintAnnotationDisposition[] } | { ok: false; reason: string } {
+  const resolvedByAnnotation = new Map(dispositions.map((entry) => [entry.annotation, entry]));
+  const pending = annotations.filter((annotation) => !resolvedByAnnotation.has(annotation));
+  if (pending.length > 0) {
+    return { ok: false, reason: `${pending.length} unresolved annotation${pending.length === 1 ? "" : "s"} pending disposition: ${pending.join("; ")}; record an addressed or waived disposition with evidence for each annotation` };
+  }
+  return { ok: true, resolved: dispositions.filter((entry) => annotations.includes(entry.annotation)) };
+}
+
+// Temp plan cleanup constraint (REQ-F3-3): the review markdown is temporary
+// and is deleted after successful approval; the durable disposition evidence
+// lives on the approval checkpoint, so cleanup never loses the review record.
+export function deleteBlueprintPlan(root: string, workItemId: string): void {
+  rmSync(blueprintPlanPath(root, workItemId), { force: true });
 }
