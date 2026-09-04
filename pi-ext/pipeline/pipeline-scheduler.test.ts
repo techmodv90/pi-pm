@@ -1206,6 +1206,38 @@ test("integration publication does not run commit-spawning post-commit hooks", (
   }
 });
 
+test("empty reviewed candidate patch integrates as a verification-only no-op", () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-system-review-empty-patch-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    writeFileSync(join(repo, "file.txt"), "base\n");
+    execFileSync("git", ["add", "file.txt"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+    // Verification-only gate candidates deliver evidence reports, not source
+    // changes: the reviewed patch is 0 bytes and integration must checkpoint
+    // without applying (git apply rejects empty input, wi-cef960fd gate seam).
+    const patch = join(repo, "reviewed.patch");
+    const commitMessage = "task-system: integrate reviewed worker run-1";
+    writeFileSync(join(repo, ".git", "info", "exclude"), "reviewed.patch\n.pi/tasks.db*\n.pi-subagents/\n");
+    writeFileSync(patch, "");
+    const originalHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+    let checkpoints = 0;
+    finalizeReviewedIntegration({ patch, cwd: repo, commitMessage, integrated: false, checkpoint: () => { checkpoints++; } });
+    assert.equal(checkpoints, 1);
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(), originalHead);
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).trim(), "");
+    // A dirty tree still refuses the no-op: unreviewed edits must never be
+    // laundered through an empty candidate.
+    writeFileSync(join(repo, "file.txt"), "unreviewed\n");
+    assert.throws(() => finalizeReviewedIntegration({ patch, cwd: repo, commitMessage, integrated: false, checkpoint: () => { checkpoints++; } }));
+    assert.equal(checkpoints, 1);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("integration publication does not run dirtying post-commit hooks", () => {
   const repo = mkdtempSync(join(tmpdir(), "task-system-review-dirty-hook-"));
   try {

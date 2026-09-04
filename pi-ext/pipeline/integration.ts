@@ -170,20 +170,26 @@ export function recoverReviewedPatch(patch: string, cwd: string, commitMessage: 
 
 export function finalizeReviewedIntegration(options: { patch: string; cwd: string; commitMessage: string; integrated: boolean; checkpoint: () => void }): void {
   if (options.integrated) return;
+  // Verification-only candidates (e.g. gate seams) deliver evidence reports, not
+  // source changes: their reviewed patch is 0 bytes, git apply rejects empty
+  // input, so integration is the checkpoint record itself with nothing to commit.
+  if (statSync(options.patch).size === 0) {
+    assertCleanGit(options.cwd);
+    options.checkpoint();
+    return;
+  }
   const originalHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: options.cwd, encoding: "utf8" }).trim();
   let recovering = false;
-  if (statSync(options.patch).size > 0) {
+  try {
+    assertCleanGit(options.cwd);
+    execFileSync("git", ["apply", "--index", "--check", options.patch], { cwd: options.cwd, stdio: "pipe" });
+    execFileSync("git", ["apply", "--index", options.patch], { cwd: options.cwd, stdio: "pipe" });
+  } catch (applyError) {
     try {
-      assertCleanGit(options.cwd);
-      execFileSync("git", ["apply", "--index", "--check", options.patch], { cwd: options.cwd, stdio: "pipe" });
-      execFileSync("git", ["apply", "--index", options.patch], { cwd: options.cwd, stdio: "pipe" });
-    } catch (applyError) {
-      try {
-        execFileSync("git", ["apply", "--reverse", "--check", options.patch], { cwd: options.cwd, stdio: "pipe" });
-        recovering = true;
-      } catch {
-        throw applyError;
-      }
+      execFileSync("git", ["apply", "--reverse", "--check", options.patch], { cwd: options.cwd, stdio: "pipe" });
+      recovering = true;
+    } catch {
+      throw applyError;
     }
   }
   if (recovering && recoverReviewedPatch(options.patch, options.cwd, options.commitMessage)) {
