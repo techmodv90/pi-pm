@@ -1083,6 +1083,10 @@ func TestRriReportValidationMarkerGate(t *testing.T) {
 		row:  rriOpenQuestion{ID: "Q1", Question: "No blocks", Status: "open", Priority: "P1", Mode: "hitl"},
 		want: "requires blocks",
 	}, {
+		name: "open with empty resolution object",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Open with empty resolution", Status: "open", Priority: "P0", Mode: "afk", Blocks: boolPtr(false), Resolution: &rriResolution{}},
+		want: "requires resolution answer and source",
+	}, {
 		name: "resolved without resolution",
 		row:  rriOpenQuestion{ID: "Q1", Question: "No resolution", Status: "resolved", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true)},
 		want: "requires resolution",
@@ -1107,6 +1111,35 @@ func TestRriReportValidationMarkerGate(t *testing.T) {
 }
 
 func boolPtr(value bool) *bool { return &value }
+
+// Typed unmarshalling rejects non-string open_questions id and question values
+// before any validator runs, mirroring the field-type checks in
+// reporting/rri-report.ts so the renderer never sees a non-string row field.
+func TestRriOpenQuestionFieldTypesRejectedByUnmarshal(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "numeric id",
+			raw:  `{"project_name":"Project","generated":"2026-09-01","open_questions":[{"id":7,"question":"Numeric id"}]}`,
+			want: "cannot unmarshal number into Go struct field",
+		},
+		{
+			name: "boolean question",
+			raw:  `{"project_name":"Project","generated":"2026-09-01","open_questions":[{"id":"Q1","question":false}]}`,
+			want: "cannot unmarshal bool into Go struct field",
+		},
+	}
+	for _, tc := range cases {
+		var report rriReport
+		err := json.Unmarshal([]byte(tc.raw), &report)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: expected typed unmarshal rejection, got %v", tc.name, err)
+		}
+	}
+}
 
 // Dual-enforcer parity (REQ-F1-7, OB-F1-7): marker-gated required-array
 // strictness must match the TypeScript validator in reporting/rri-report.ts,
@@ -1389,6 +1422,10 @@ func TestWorkItemRriFinalizeRejectsMalformedMarkedRows(t *testing.T) {
 		row:  map[string]any{"id": "Q1", "question": "Bad status", "status": "parked", "priority": "P1", "mode": "hitl", "blocks": true},
 		want: "invalid status",
 	}, {
+		name: "non-string question",
+		row:  map[string]any{"id": "Q1", "question": false, "status": "open", "priority": "P0", "mode": "afk", "blocks": false},
+		want: "requires valid JSON",
+	}, {
 		name: "resolved without resolution",
 		row:  map[string]any{"id": "Q1", "question": "No resolution", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true},
 		want: "requires resolution",
@@ -1410,6 +1447,12 @@ func TestWorkItemRriFinalizeRejectsMalformedMarkedRows(t *testing.T) {
 	var artifacts int
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND revision=2`, id).Scan(&artifacts); err != nil || artifacts != 0 {
 		t.Fatalf("rejected finalization persisted artifacts=%d err=%v", artifacts, err)
+	}
+	// No artifact at any revision may appear from the rejected payload: the
+	// validation failures above must leave canonical persistence unchanged.
+	var anyArtifacts int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, id).Scan(&anyArtifacts); err != nil || anyArtifacts != 2 {
+		t.Fatalf("rejected finalization left unexpected artifacts=%d err=%v", anyArtifacts, err)
 	}
 }
 

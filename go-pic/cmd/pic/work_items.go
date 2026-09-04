@@ -1053,7 +1053,13 @@ func validateRriReport(report rriReport) error {
 		if row.Blocks == nil {
 			return fmt.Errorf("RRI open_questions row %s requires blocks", row.ID)
 		}
-		if row.Status != "open" && (row.Resolution == nil || row.Resolution.Answer == "" || row.Resolution.Source == "") {
+		// Any present resolution must be well-formed regardless of status,
+		// mirroring the TypeScript parser: open rows reject malformed present
+		// resolutions that the status-gated check alone would have accepted.
+		if row.Resolution != nil && (row.Resolution.Answer == "" || row.Resolution.Source == "") {
+			return fmt.Errorf("RRI open_questions row %s requires resolution answer and source to be non-empty strings", row.ID)
+		}
+		if row.Status != "open" && row.Resolution == nil {
 			return fmt.Errorf("RRI open_questions row %s requires resolution with answer and source when status is resolved or deferred", row.ID)
 		}
 	}

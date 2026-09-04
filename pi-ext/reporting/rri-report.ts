@@ -45,7 +45,11 @@ function cell(value: string): string { return value.replaceAll("|", "\\|").repla
 function validateRriOpenQuestions(report: Partial<RriReport>): void {
   const marked = isMarkedRriReport(report);
   for (const row of report.open_questions ?? []) {
-    if (!row || !row.id || !row.question) throw new Error("RRI report contains an incomplete row");
+    // Field-type validation mirrors Go typed unmarshalling: id and question
+    // must be non-empty strings before rendering, or cell() would crash on a
+    // non-string value that the truthiness guard would otherwise accept.
+    if (!row || typeof row.id !== "string" || !row.id) throw new Error("RRI open_questions rows require id to be a non-empty string");
+    if (typeof row.question !== "string" || !row.question) throw new Error("RRI open_questions rows require question to be a non-empty string");
     if (!marked) continue;
     if (!row.status) throw new Error(`RRI open_questions row ${row.id} requires status`);
     if (!RRI_QUESTION_STATUSES.includes(row.status)) throw new Error(`RRI open_questions row ${row.id} has invalid status ${row.status}`);
