@@ -250,7 +250,12 @@ export function saveBlueprintDispositions(root: string, workItemId: string, disp
 export function loadBlueprintDispositions(root: string, workItemId: string): BlueprintAnnotationDisposition[] {
   try {
     const draft = loadLatestRuntimeDraft<BlueprintAnnotationDisposition[]>(root, BLUEPRINT_DISPOSITIONS_DRAFT_STAGE, workItemId);
-    return Array.isArray(draft.state) ? draft.state : [];
+    // Persisted-state integrity (REQ-8): only terminal dispositions with
+    // nonempty evidence may leave the store. A malformed persisted entry is
+    // dropped here so it can never be treated as resolved annotation
+    // evidence; the approval gate then fails closed on the unresolved
+    // annotation instead of trusting corrupted state.
+    return validateBlueprintDispositions(draft.state);
   } catch {
     return [];
   }
@@ -276,6 +281,16 @@ export function planReviewAnnotations(state: PlanReviewState | undefined): strin
 // write is the intersection with the current annotations so stale entries from
 // a superseded review are never recorded as evidence.
 export function annotationDispositionGate(annotations: string[], dispositions: BlueprintAnnotationDisposition[]): { ok: true; resolved: BlueprintAnnotationDisposition[] } | { ok: false; reason: string } {
+  // Fail-closed revalidation (REQ-8): every loaded disposition is revalidated
+  // before gate evaluation, so a malformed or evidence-free entry — including
+  // one passed straight from in-memory callers — fails the gate instead of
+  // satisfying an annotation. An empty store is legitimate (zero-disposition
+  // approval) and skips validation.
+  if (dispositions.length > 0) {
+    try { validateBlueprintDispositions(dispositions); } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) };
+    }
+  }
   const resolvedByAnnotation = new Map(dispositions.map((entry) => [entry.annotation, entry]));
   const pending = annotations.filter((annotation) => !resolvedByAnnotation.has(annotation));
   if (pending.length > 0) {

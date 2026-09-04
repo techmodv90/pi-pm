@@ -6,6 +6,7 @@ import test from "node:test";
 import { annotationDispositionGate, blueprintPlanPath, deleteBlueprintDraft, deleteBlueprintDispositions, deletePlanReviewState, loadBlueprintDispositions, loadBlueprintDraft, loadLatestBlueprintDraft, loadPlanReviewState, planApprovalGate, planReviewAnnotations, PLANNOTATOR_REQUEST_CHANNEL, recoverPlanReviewResult, requestPlanReview, saveBlueprintDispositions, saveBlueprintDraft, validateBlueprintDispositions, writeBlueprintPlan, type BlueprintAnnotationDisposition, type PlannotatorEvents } from "./blueprint-drafts.ts";
 import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../reporting/blueprint-report.ts";
 import { registerTaskManagerTool } from "../api/tool.ts";
+import { saveRuntimeDraft } from "./runtime-drafts.ts";
 
 function tempRoot(prefix = "pic-blueprint-"): string {
   return mkdtempSync(join(tmpdir(), prefix));
@@ -322,6 +323,39 @@ test("approve_blueprint_draft resolves annotations through persisted disposition
       assert.equal(loadPlanReviewState(root, "wi-dispositions"), undefined, "the review state must be cleared after approval");
       assert.deepEqual(loadBlueprintDispositions(root, "wi-dispositions"), [], "the disposition store is cleared; the durable record lives on the approval checkpoint");
       assert.equal(existsSync(join(root, ".pi", "runtime", "blueprint", "wi-dispositions.json")), false, "the draft must be deleted after successful approval");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+});
+
+test("approve_blueprint_draft fails closed on malformed persisted disposition evidence and never invokes the Go CLI", async () => {
+  // Gate-level fail-closed: an entry whose annotation identity matches but
+  // whose evidence is missing must never count as a resolution.
+  const corruptGate = annotationDispositionGate(["tighten seam 2"], [{ annotation: "tighten seam 2", resolution: "waived", evidence: "" }]);
+  assert.equal(corruptGate.ok, false);
+  assert.match(corruptGate.ok ? "" : corruptGate.reason, /evidence/);
+
+  let outcome: unknown = { status: "completed", approved: false, feedback: "tighten seam 2" };
+  const bus = fakePlannotatorEvents(planReviewResponder(() => outcome));
+  const tool = captureTaskManagerTool(bus);
+  await withPicStub("ok", async (picLog) => {
+    const root = tempRoot("pic-blueprint-tool-corrupt-");
+    try {
+      const draft = saveBlueprintDraft(root, "wi-corrupt", BLUEPRINT_JSON, V1_CHECKPOINT);
+      await requestPlanReview(bus, root, "wi-corrupt", "# PLAN", { timeoutMs: 50 });
+      writeBlueprintPlan(root, "wi-corrupt", "# PLAN render");
+      const planFile = join(root, ".pi", "artifacts", "plans", "wi-corrupt.md");
+      // Simulated store corruption: a persisted entry that claims the
+      // annotation is resolved but carries no evidence. The store loader must
+      // not let such an entry satisfy the annotation gate.
+      saveRuntimeDraft(root, "blueprint-dispositions", "wi-corrupt", [{ annotation: "tighten seam 2", resolution: "waived", evidence: "" }]);
+      const result = await runTool(tool, { action: "approve_blueprint_draft", id: "wi-corrupt", artifact_id: draft.draftId, actor_role: "owner" }, root);
+      assert.equal(result.isError, true, "malformed persisted evidence must fail closed");
+      assert.match(result.content[0]!.text, /evidence/);
+      assert.equal(existsSync(picLog), false, "no artifact-save may run while the persisted store is malformed");
+      assert.equal(existsSync(planFile), true, "review artifacts must be retained across the rejected attempt");
+      assert.equal(loadPlanReviewState(root, "wi-corrupt")?.status, "rejected", "the review identity and unresolved state must be retained");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
