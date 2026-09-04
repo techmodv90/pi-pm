@@ -2,7 +2,7 @@
 name: task-worker
 description: Task-system implementation agent that executes one approved Task Instruction Pack, self-tests the result, and returns a Completion or Issue Report.
 tools: read, bash, edit, write
-thinking: medium
+thinking: high
 prompt_mode: replace
 inherit_context: false
 run_in_background: true
