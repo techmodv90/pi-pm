@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { execPic, hasDb } from "./cli-helpers";
+import { execPic, hasDb } from "./cli-helpers.ts";
 
 /**
  * Update footer status with in-progress tasks.

@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { execPic, execPicText } from "../core/cli-helpers";
-import { buildReviewInstructions, formatWorkItemChecklist } from "./work-item-prompts";
+import { execPic, execPicText } from "../core/cli-helpers.ts";
+import { buildReviewInstructions, formatWorkItemChecklist } from "./work-item-prompts.ts";
 import { normalizeWorkflowMode, workflowModeBadge } from "./workflow-modes.ts";
 
 // ── Model metadata helpers ─────────────────────────────────────

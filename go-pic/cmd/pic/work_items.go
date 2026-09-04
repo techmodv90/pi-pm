@@ -1053,7 +1053,13 @@ func validateRriReport(report rriReport) error {
 		if row.Blocks == nil {
 			return fmt.Errorf("RRI open_questions row %s requires blocks", row.ID)
 		}
-		if row.Status != "open" && (row.Resolution == nil || row.Resolution.Answer == "" || row.Resolution.Source == "") {
+		// Any present resolution must be well-formed regardless of status,
+		// mirroring the TypeScript parser: open rows reject malformed present
+		// resolutions that the status-gated check alone would have accepted.
+		if row.Resolution != nil && (row.Resolution.Answer == "" || row.Resolution.Source == "") {
+			return fmt.Errorf("RRI open_questions row %s requires resolution answer and source to be non-empty strings", row.ID)
+		}
+		if row.Status != "open" && row.Resolution == nil {
 			return fmt.Errorf("RRI open_questions row %s requires resolution with answer and source when status is resolved or deferred", row.ID)
 		}
 	}
@@ -1568,6 +1574,13 @@ func workItemArtifactSave(db *sql.DB, args []string) error {
 			return err
 		}
 	}
+	if args[1] == "blueprint" {
+		// Cross-artifact excluded_keys binding needs the approved RRI referent,
+		// so it runs inside the transaction instead of the pure pre-flight above.
+		if err = validateBlueprintExcludedKeysBinding(tx, args[0], args[2]); err != nil {
+			return err
+		}
+	}
 	var revision int
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage=?`, args[0], args[1]).Scan(&revision); err != nil {
 		return err
@@ -1707,8 +1720,8 @@ func validateContractReport(content string) error {
 			Tips    int `json:"tip_count"`
 			Minutes int `json:"estimated_minutes"`
 		} `json:"task_graph_summary"`
-		NotIncluded []string                 `json:"not_included"`
-		Obligations []tip.ContractObligation `json:"obligations"`
+		NotIncluded     []string                 `json:"not_included"`
+		Obligations     []tip.ContractObligation `json:"obligations"`
 		SourceBlueprint struct {
 			ArtifactID  string `json:"artifact_id"`
 			Revision    int    `json:"revision"`
@@ -1809,13 +1822,15 @@ type verificationSeam struct {
 }
 
 // blueprintSeamSet parses the declared verification seams of a policy-v2
-// Blueprint content blob.
+// Blueprint content blob, including the additive schema_version 2.1 marker.
 func blueprintSeamSet(content string) (map[string]bool, error) {
 	var blueprint struct {
-		DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
+		DecompositionPolicyVersion float64            `json:"decomposition_policy_version"`
+		SchemaVersion              float64            `json:"schema_version"`
 		VerificationSeams          []verificationSeam `json:"verification_seams"`
 	}
-	if err := json.Unmarshal([]byte(content), &blueprint); err != nil || blueprint.DecompositionPolicyVersion != 2 {
+	v21 := blueprint.SchemaVersion == 2.1 && (blueprint.DecompositionPolicyVersion == 0 || blueprint.DecompositionPolicyVersion == 2)
+	if err := json.Unmarshal([]byte(content), &blueprint); err != nil || !(blueprint.DecompositionPolicyVersion == 2 || v21) {
 		return nil, errors.New("approved Blueprint is not decomposition policy v2 with verification seams")
 	}
 	seams := map[string]bool{}
@@ -1847,6 +1862,52 @@ func validateVerificationSeams(seams []verificationSeam) error {
 	return nil
 }
 
+// validateBlueprintExcludedKeysBinding fails a v2.1 Blueprint closed unless
+// every excluded_keys entry matches an exclusion key in the newest approved
+// RRI out_of_scope artifact on the same planning lineage. The v2.1 schema is
+// the additive schema_version marker on policy v2, not a new policy version.
+// It runs inside the caller's transaction at the Blueprint save and approve
+// paths; legacy policy v1 and v2 content pass through unchanged.
+func validateBlueprintExcludedKeysBinding(db databaseQueryer, workItemID, content string) error {
+	var report struct {
+		DecompositionPolicyVersion float64  `json:"decomposition_policy_version"`
+		SchemaVersion              float64  `json:"schema_version"`
+		ExcludedKeys               []string `json:"excluded_keys"`
+	}
+	if err := json.Unmarshal([]byte(content), &report); err != nil {
+		return nil // invalid JSON is rejected by validateBlueprintReport
+	}
+	v21 := report.SchemaVersion == 2.1 && (report.DecompositionPolicyVersion == 0 || report.DecompositionPolicyVersion == 2)
+	if !v21 || len(report.ExcludedKeys) == 0 {
+		return nil
+	}
+	var rriContent string
+	if err := db.QueryRow(`SELECT a.content FROM workflow_checkpoints c JOIN work_item_artifacts a ON a.id=c.artifact_id AND a.revision=c.artifact_revision AND a.content_hash=c.content_hash WHERE c.work_item_id=? AND c.stage='rri' AND c.decision_type='approved' ORDER BY c.artifact_revision DESC LIMIT 1`, workItemID).Scan(&rriContent); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return errors.New("Blueprint policy v2.1 requires an approved RRI out_of_scope referent for excluded_keys")
+		}
+		return err
+	}
+	var rri struct {
+		OutOfScope []struct {
+			Exclusion string `json:"exclusion"`
+		} `json:"out_of_scope"`
+	}
+	if err := json.Unmarshal([]byte(rriContent), &rri); err != nil {
+		return fmt.Errorf("approved RRI out_of_scope referent is unreadable: %w", err)
+	}
+	keys := map[string]bool{}
+	for _, row := range rri.OutOfScope {
+		keys[row.Exclusion] = true
+	}
+	for _, key := range report.ExcludedKeys {
+		if !keys[key] {
+			return fmt.Errorf("Blueprint excluded key %q is not declared in the approved RRI out_of_scope", key)
+		}
+	}
+	return nil
+}
+
 func validateBlueprintReport(content string) error {
 	var report struct {
 		ProjectInfo   map[string]any `json:"project_info"`
@@ -1861,7 +1922,17 @@ func validateBlueprintReport(content string) error {
 			EstimatedEffort int   `json:"estimated_effort_minutes"`
 		} `json:"task_decomposition_preview"`
 		DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
+		SchemaVersion              json.RawMessage    `json:"schema_version"`
 		VerificationSeams          []verificationSeam `json:"verification_seams"`
+		ExcludedKeys               []string           `json:"excluded_keys"`
+		// v2.1 sections kept raw so absent, null, and non-array values are
+		// distinguishable and each shape failure names its field, mirroring the
+		// TS parseBlueprintReportJson v2.1 pre-flight (the sole other enforcer).
+		ImplementationDecisions json.RawMessage `json:"implementation_decisions"`
+		AdrCandidates           json.RawMessage `json:"adr_candidates"`
+		Deferrals               json.RawMessage `json:"deferrals"`
+		NotYetSpecified         json.RawMessage `json:"not_yet_specified"`
+		OutOfScope              json.RawMessage `json:"out_of_scope"`
 	}
 	if err := json.Unmarshal([]byte(content), &report); err != nil {
 		return errors.New("Blueprint artifact must be valid JSON")
@@ -1879,12 +1950,168 @@ func validateBlueprintReport(content string) error {
 		// Policy v2 is the solution spec plus owner-approved verification seams;
 		// the task_decomposition_preview is retired (Contract's task_graph_summary
 		// keeps the early cost signal).
+		if len(report.SchemaVersion) > 0 && !isV21SchemaVersion(report.SchemaVersion) {
+			return fmt.Errorf("Blueprint policy v2.1 schema_version must be the numeric marker 2.1, got %s", string(report.SchemaVersion))
+		}
+		if isV21SchemaVersion(report.SchemaVersion) {
+			if err := validateBlueprintV21Sections(&report); err != nil {
+				return err
+			}
+		}
 		return validateVerificationSeams(report.VerificationSeams)
 	}
 	if len(report.Preview.Tasks) == 0 || report.Preview.EstimatedTasks != len(report.Preview.Tasks) || report.Preview.EstimatedEffort < 1 {
 		return errors.New("Blueprint requires complete stack, file structure, RRI matrix, and task preview")
 	}
 	return nil
+}
+
+// isV21SchemaVersion reports whether the raw schema_version value is the
+// numeric 2.1 marker: a marked artifact commits to carrying every v2.1
+// section in shape, while an absent or null value keeps legacy v2 rules.
+func isV21SchemaVersion(raw json.RawMessage) bool {
+	if len(raw) == 0 || string(raw) == "null" {
+		return false
+	}
+	var marker any
+	if err := json.Unmarshal(raw, &marker); err != nil {
+		return false
+	}
+	value, ok := marker.(float64)
+	return ok && value == 2.1
+}
+
+// blueprintV21StringRows enforces the shared row shape for the v2.1 scope
+// sections: object rows whose declared fields are non-empty strings.
+func blueprintV21StringRows(rows []json.RawMessage, name string, fields []string) error {
+	for _, raw := range rows {
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &row); err != nil {
+			return fmt.Errorf("Blueprint policy v2.1 %s rows must be objects", name)
+		}
+		for _, field := range fields {
+			value, ok := row[field]
+			if !ok || len(value) == 0 || string(value) == "null" {
+				return fmt.Errorf("Blueprint policy v2.1 %s.%s must be a non-empty string", name, field)
+			}
+			var s string
+			if err := json.Unmarshal(value, &s); err != nil || strings.TrimSpace(s) == "" {
+				return fmt.Errorf("Blueprint policy v2.1 %s.%s must be a non-empty string", name, field)
+			}
+		}
+	}
+	return nil
+}
+
+// blueprintV21Array requires a present, non-null JSON array for a v2.1
+// section, mirroring the TS "must be an array" presence gate.
+func blueprintV21Array(raw json.RawMessage, name string) ([]json.RawMessage, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, fmt.Errorf("Blueprint policy v2.1 %s must be an array", name)
+	}
+	var rows []json.RawMessage
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		return nil, fmt.Errorf("Blueprint policy v2.1 %s must be an array", name)
+	}
+	return rows, nil
+}
+
+// validateBlueprintV21Sections mirrors the TS parseBlueprintReportJson v2.1
+// shape rules so the Go CLI and TS wrapper reject the same malformed
+// canonical saves (corrective bug wi-dbeba706): implementation_decisions
+// must be a non-empty array of objects with non-empty decision/rationale and
+// a non-empty alternatives_considered array of non-empty strings, and every
+// other v2.1 section must be a present array with well-shaped rows.
+func validateBlueprintV21Sections(report *struct {
+	ProjectInfo   map[string]any `json:"project_info"`
+	Goals         map[string]any `json:"goals"`
+	Architecture  map[string]any `json:"architecture"`
+	TechStack     []any          `json:"tech_stack"`
+	FileStructure []any          `json:"file_structure"`
+	Requirements  []any          `json:"rri_requirements_matrix"`
+	Preview       struct {
+		EstimatedTasks  int   `json:"estimated_tasks"`
+		Tasks           []any `json:"tasks"`
+		EstimatedEffort int   `json:"estimated_effort_minutes"`
+	} `json:"task_decomposition_preview"`
+	DecompositionPolicyVersion int                `json:"decomposition_policy_version"`
+	SchemaVersion              json.RawMessage    `json:"schema_version"`
+	VerificationSeams          []verificationSeam `json:"verification_seams"`
+	ExcludedKeys               []string           `json:"excluded_keys"`
+	ImplementationDecisions    json.RawMessage    `json:"implementation_decisions"`
+	AdrCandidates              json.RawMessage    `json:"adr_candidates"`
+	Deferrals                  json.RawMessage    `json:"deferrals"`
+	NotYetSpecified            json.RawMessage    `json:"not_yet_specified"`
+	OutOfScope                 json.RawMessage    `json:"out_of_scope"`
+}) error {
+	decisions, err := blueprintV21Array(report.ImplementationDecisions, "implementation_decisions")
+	if err != nil {
+		return err
+	}
+	if len(decisions) == 0 {
+		return errors.New("Blueprint policy v2.1 implementation_decisions must be a non-empty array")
+	}
+	for _, raw := range decisions {
+		var row map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &row); err != nil {
+			return errors.New("Blueprint policy v2.1 implementation_decisions rows must be objects")
+		}
+		for _, field := range []string{"decision", "rationale"} {
+			value, ok := row[field]
+			if !ok || len(value) == 0 || string(value) == "null" {
+				return fmt.Errorf("Blueprint policy v2.1 implementation_decisions.%s must be a non-empty string", field)
+			}
+			var s string
+			if err := json.Unmarshal(value, &s); err != nil || strings.TrimSpace(s) == "" {
+				return fmt.Errorf("Blueprint policy v2.1 implementation_decisions.%s must be a non-empty string", field)
+			}
+		}
+		alternativesRaw, ok := row["alternatives_considered"]
+		if !ok || len(alternativesRaw) == 0 || string(alternativesRaw) == "null" {
+			return errors.New("Blueprint policy v2.1 implementation_decisions.alternatives_considered must be a non-empty array of non-empty strings")
+		}
+		var alternatives []any
+		if err := json.Unmarshal(alternativesRaw, &alternatives); err != nil || len(alternatives) == 0 {
+			return errors.New("Blueprint policy v2.1 implementation_decisions.alternatives_considered must be a non-empty array of non-empty strings")
+		}
+		for _, alternative := range alternatives {
+			s, ok := alternative.(string)
+			if !ok || strings.TrimSpace(s) == "" {
+				return errors.New("Blueprint policy v2.1 implementation_decisions.alternatives_considered must be a non-empty array of non-empty strings")
+			}
+		}
+	}
+	for _, key := range report.ExcludedKeys {
+		if strings.TrimSpace(key) == "" {
+			return errors.New("Blueprint policy v2.1 excluded_keys require non-empty keys")
+		}
+	}
+	deferrals, err := blueprintV21Array(report.Deferrals, "deferrals")
+	if err != nil {
+		return err
+	}
+	if err := blueprintV21StringRows(deferrals, "deferrals", []string{"question", "resolution"}); err != nil {
+		return err
+	}
+	notYet, err := blueprintV21Array(report.NotYetSpecified, "not_yet_specified")
+	if err != nil {
+		return err
+	}
+	if err := blueprintV21StringRows(notYet, "not_yet_specified", []string{"uncertainty", "graduation_path"}); err != nil {
+		return err
+	}
+	outOfScope, err := blueprintV21Array(report.OutOfScope, "out_of_scope")
+	if err != nil {
+		return err
+	}
+	if err := blueprintV21StringRows(outOfScope, "out_of_scope", []string{"exclusion", "reason"}); err != nil {
+		return err
+	}
+	adrCandidates, err := blueprintV21Array(report.AdrCandidates, "adr_candidates")
+	if err != nil {
+		return err
+	}
+	return blueprintV21StringRows(adrCandidates, "adr_candidates", []string{"context", "choice", "reason"})
 }
 
 // approvedCheckpointDecision names the owner decision that makes a checkpoint
@@ -2186,7 +2413,6 @@ func workItemPlanningReset(db *sql.DB, args []string) error {
 // Owner-only bounded amendment: exact old→new substitutions across approved planning
 // lineage. Resolves the dual-source-of-truth hazard of injecting corrected values
 // (e.g. a port change) while frozen artifacts still state the old value, without a full re-scope.
-
 
 // dryRunCascadeRows previews the exact rows one child-owned table contributes
 // to a planning reset: every row whose ownerColumn holds a materialized
@@ -2571,15 +2797,36 @@ func workItemScanRejection(db *sql.DB, args []string) error {
 }
 
 func workItemArtifactApprove(db *sql.DB, args []string) error {
-	if len(args) != 4 || !contains(workItemStages, args[1]) {
-		return errors.New("usage: pic work-item artifact-approve <id> <stage> <artifact-id> <accepted|approved>")
+	usage := "usage: pic work-item artifact-approve <id> <stage> <artifact-id> <accepted|approved> [--dispositions-json <json>]"
+	hasDispositions := len(args) == 6 && args[4] == "--dispositions-json"
+	if (len(args) != 4 && !hasDispositions) || !contains(workItemStages, args[1]) {
+		return errors.New(usage)
+	}
+	// Blueprint disposition evidence constraint (OB-F3-2/OB-F3-3): terminal
+	// annotation dispositions {annotation, resolution: addressed|waived,
+	// evidence} are validated BEFORE any transaction opens, so incomplete
+	// evidence can never mutate lifecycle state, and the evidence commits
+	// atomically with the approval checkpoint — a failed save or approval rolls
+	// back the evidence mutation together with everything else.
+	dispositionsJSON := ""
+	dispositionCount := 0
+	if hasDispositions {
+		if args[1] != "blueprint" {
+			return errors.New("--dispositions-json is only supported for the blueprint stage")
+		}
+		count, err := validateAnnotationDispositions(args[5])
+		if err != nil {
+			return err
+		}
+		dispositionsJSON = args[5]
+		dispositionCount = count
 	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	artifactID, revision, contentHash, err := approveWorkItemArtifactTx(tx, args[0], args[1], args[2], args[3])
+	artifactID, revision, contentHash, err := approveWorkItemArtifactTx(tx, args[0], args[1], args[2], args[3], dispositionsJSON)
 	if err != nil {
 		return err
 	}
@@ -2602,8 +2849,48 @@ func workItemArtifactApprove(db *sql.DB, args []string) error {
 		}
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3], "glossary_updated": glossaryUpdated})
+	result := map[string]any{"work_item_id": args[0], "stage": args[1], "artifact_id": artifactID, "revision": revision, "content_hash": contentHash, "decision": args[3], "glossary_updated": glossaryUpdated}
+	if dispositionsJSON != "" {
+		result["dispositions_recorded"] = dispositionCount
+	}
+	writeJSON(os.Stdout, result)
 	return nil
+}
+
+// validateAnnotationDispositions enforces the terminal disposition evidence
+// surface: a JSON array of {annotation, resolution: addressed|waived, evidence}
+// with nonempty annotation and evidence, deduplicated by annotation identity so
+// the checkpoint evidence stays immutable and idempotent by disposition
+// identity. Validation runs before any database mutation.
+func validateAnnotationDispositions(raw string) (int, error) {
+	var entries []struct {
+		Annotation string `json:"annotation"`
+		Resolution string `json:"resolution"`
+		Evidence   string `json:"evidence"`
+	}
+	if err := json.Unmarshal([]byte(raw), &entries); err != nil {
+		return 0, errors.New("annotation dispositions must be a JSON array of {annotation, resolution, evidence}")
+	}
+	if len(entries) == 0 {
+		return 0, errors.New("annotation dispositions must not be empty")
+	}
+	seen := map[string]bool{}
+	for _, entry := range entries {
+		if strings.TrimSpace(entry.Annotation) == "" {
+			return 0, errors.New("each annotation disposition requires a nonempty annotation")
+		}
+		if entry.Resolution != "addressed" && entry.Resolution != "waived" {
+			return 0, errors.New("annotation disposition resolution must be addressed or waived")
+		}
+		if strings.TrimSpace(entry.Evidence) == "" {
+			return 0, errors.New("each annotation disposition requires nonempty evidence")
+		}
+		if seen[entry.Annotation] {
+			return 0, fmt.Errorf("duplicate disposition for annotation %q", entry.Annotation)
+		}
+		seen[entry.Annotation] = true
+	}
+	return len(entries), nil
 }
 
 // applyRriGlossaryApproval (REQ-F1-6) is the sole CONTEXT.md glossary writer:
@@ -2717,8 +3004,11 @@ func renderRriGlossaryEntries(existing string, updates []rriGlossaryUpdate) stri
 // approveWorkItemArtifactTx records one stage checkpoint inside a caller-owned
 // transaction so batched owner decisions (checkpoint-decide) share the exact
 // validation and predecessor rules of single approvals. artifactRef may be
-// "current" to bind the stage's latest artifact revision.
-func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decision string) (string, int, string, error) {
+// "current" to bind the stage's latest artifact revision. dispositionsJSON
+// carries the terminal blueprint annotation dispositions recorded as durable
+// approval evidence inside the SAME transaction; empty for every other caller,
+// so a failure in any caller rolls the evidence mutation back with the approval.
+func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decision, dispositionsJSON string) (string, int, string, error) {
 	expectedDecision := "approved"
 	if stage == "scan" {
 		expectedDecision = "accepted"
@@ -2769,6 +3059,17 @@ func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decis
 			return "", 0, "", fmt.Errorf("task graph validation failed: %w", err)
 		}
 	}
+	if stage == "blueprint" {
+		// Re-bind at approval: a newer approved RRI between Blueprint save and
+		// approval must not leave stale excluded_keys references unvalidated.
+		var blueprintContent string
+		if err = tx.QueryRow(`SELECT content FROM work_item_artifacts WHERE id=? AND work_item_id=?`, artifactID, workItemID).Scan(&blueprintContent); err != nil {
+			return "", 0, "", err
+		}
+		if err = validateBlueprintExcludedKeysBinding(tx, workItemID, blueprintContent); err != nil {
+			return "", 0, "", err
+		}
+	}
 	if stage == "contracts" {
 		// Re-bind at approval: a Blueprint re-approval between Contract save and
 		// approval must not leave the Contract bound to a retired lineage.
@@ -2780,7 +3081,7 @@ func approveWorkItemArtifactTx(tx *sql.Tx, workItemID, stage, artifactRef, decis
 			return "", 0, "", err
 		}
 	}
-	if _, err = tx.Exec(`INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type) VALUES(?,?,?,?,?,?,?)`, "wic-"+shortID(), workItemID, stage, artifactID, revision, contentHash, decision); err != nil {
+	if _, err = tx.Exec(`INSERT INTO workflow_checkpoints(id,work_item_id,stage,artifact_id,artifact_revision,content_hash,decision_type,dispositions_json) VALUES(?,?,?,?,?,?,?,?)`, "wic-"+shortID(), workItemID, stage, artifactID, revision, contentHash, decision, dispositionsJSON); err != nil {
 		return "", 0, "", err
 	}
 	return artifactID, revision, contentHash, nil
@@ -3417,6 +3718,12 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ti
 		return fmt.Errorf("approved Contract is required before Task Graph obligation validation: %w", err)
 	}
 	var contract tip.ContractDocument
+	executableNodeCount := 0
+	for _, node := range plan.Nodes {
+		if node.Type != "feature" && node.Type != "gate" {
+			executableNodeCount++
+		}
+	}
 	bindingFieldsPresent := false
 	for _, node := range plan.Nodes {
 		if node.Type != "feature" && node.Type != "gate" && (node.Provides != nil || node.Consumes != nil || node.EvidenceFor != nil || node.ObligationKeys != nil) {
@@ -3433,7 +3740,7 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ti
 	if contract.ObligationSchemaVersion != 2 {
 		return nil
 	}
-	if !bindingFieldsPresent {
+	if !bindingFieldsPresent && executableNodeCount > 0 {
 		return errors.New("Task Graph nodes must bind Contract obligations with provides, consumes, evidence_for, and obligation_keys")
 	}
 	obligations := map[string]tip.ContractObligation{}
@@ -3442,6 +3749,30 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ti
 			return fmt.Errorf("Contract obligation %s is duplicated", obligation.ID)
 		}
 		obligations[obligation.ID] = obligation
+	}
+	if executableNodeCount == 0 {
+		// Verification-only graph constraint: retrospective aggregates verify
+		// obligations delivered by their features, so a gate-only graph must
+		// evidence every Contract obligation at a gate node instead of
+		// providing it; executable-node graphs keep the provider rule.
+		gateEvidence := map[string][]string{}
+		for _, node := range plan.Nodes {
+			if node.Type != "gate" {
+				continue
+			}
+			for _, key := range node.EvidenceFor {
+				gateEvidence[key] = append(gateEvidence[key], node.Key)
+			}
+			for _, key := range node.ObligationKeys {
+				gateEvidence[key] = append(gateEvidence[key], node.Key)
+			}
+		}
+		for key := range obligations {
+			if len(gateEvidence[key]) == 0 {
+				return fmt.Errorf("verification-only Task Graph must evidence Contract obligation %s at a gate node", key)
+			}
+		}
+		return nil
 	}
 	providers := map[string][]string{}
 	evidence := map[string][]string{}

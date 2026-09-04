@@ -3,6 +3,14 @@ import type { PipelineRun } from "./pipeline-types.ts";
 
 export function isMutationStage(stage: string): boolean { return stage === "worker" || stage === "autofix"; }
 
+// Repair bare ampersands (live pr-6d36b57b/pr-a12dba81 class): providers emit raw
+// shell commands like `a && b` inside text sections. A `&` that does not open a
+// valid entity reference is always invalid XML, so escaping it can only rescue
+// an otherwise-invalid document — already-valid documents are unchanged.
+function repairBareAmpersands(document: string): string {
+  return document.replace(/&(?!(?:[a-zA-Z][a-zA-Z0-9]*|#[0-9]+|#x[0-9a-fA-F]+);)/g, "&amp;");
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function reviewRequiresOwner(runs: any[], candidate: any): boolean {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
@@ -98,7 +106,7 @@ export function activePackDoneReports(data: any, activePack: any): any[] {
 export function parseTaskCompletionReport(output: string): { status: "done" | "partial" | "blocked" | "escalated"; markdown: string; blocker: string; escalation?: any; failure_metadata?: Record<string, string>; no_change_justification?: string } {
   const documents = [...output.matchAll(/<completion_report\b[\s\S]*?<\/completion_report>/g)].map((match) => match[0]);
   if (documents.length !== 1) throw new Error("worker output must contain one completion_report XML document");
-  const document = documents[0]!.replace(/<([^<>\s]+)&gt;/g, "&lt;$1&gt;");
+  const document = repairBareAmpersands(documents[0]!.replace(/<([^<>\s]+)&gt;/g, "&lt;$1&gt;"));
   if (XMLValidator.validate(document) !== true) throw new Error("worker output contains invalid XML");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   let parsed: any;
@@ -173,7 +181,7 @@ export function parseReviewReport(output: string): { status: "passed" | "failed"
   const start = outputText.indexOf("<review_report");
   const end = outputText.lastIndexOf("</review_report>");
   if (start < 0 || end < start || outputText.indexOf("<review_report", start + 1) >= 0) throw new Error("expected one review_report XML document");
-  const document = outputText.slice(start, end + "</review_report>".length);
+  const document = repairBareAmpersands(outputText.slice(start, end + "</review_report>".length));
   if (XMLValidator.validate(document) !== true) throw new Error("review report contains invalid XML");
   const report = new XMLParser({ ignoreAttributes: false }).parse(document)?.review_report;
   const reviewStatus = report?.["@_status"];

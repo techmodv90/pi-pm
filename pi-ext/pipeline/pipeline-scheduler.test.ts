@@ -93,8 +93,14 @@ test("worker and reviewer reports require strict XML envelopes", () => {
   assert.throws(() => parseTaskCompletionReport(`${worker}\n${worker}`), /one completion_report XML/);
   assert.throws(() => parseTaskCompletionReport("**STATUS:** DONE"), /completion_report XML/);
   // fast-xml-parser validate() returns a truthy error object on invalid XML; the
-  // strict !== true guard must reject raw unescaped ampersands (live pr-293abf12 case)
-  assert.throws(() => parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>None</files_changed><test_results>go test ./cmd/pic && go vet ./...</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`), /invalid XML/);
+  // strict !== true guard still rejects genuinely malformed documents (unclosed
+  // tags below), while bare ampersands are repaired before validation (live
+  // pr-6d36b57b/pr-a12dba81 class: raw `&&` shell commands in text sections)
+  assert.throws(() => parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>None</files_changed><test_results>go test <cmd</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`), /invalid XML/);
+  const ampRepaired = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>None</files_changed><test_results>cd pi-ext && node --experimental-strip-types --test core/blueprint-drafts.test.ts</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`);
+  assert.match(ampRepaired.markdown, /cd pi-ext &amp;&amp; node --experimental-strip-types --test core\/blueprint-drafts\.test\.ts/);
+  const entityPreserved = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="done"><files_changed>a &amp; b.ts</files_changed><test_results>PASS</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>`);
+  assert.match(entityPreserved.markdown, /a &amp; b\.ts/);
 
   const metaBlocked = parseTaskCompletionReport(`<completion_report tip_id="tip-1" version="1" status="blocked"><files_changed>None</files_changed><test_results>Not run</test_results><issues_discovered>Port unavailable</issues_discovered><deviations>None</deviations><suggestions>None</suggestions><failure_metadata>{"category":"ENVIRONMENTAL_CONSTRAINT","violating_variable":"API_PORT","runtime_value":"95317","system_error_code":"EADDRINUSE","evidence":"listen tcp :95317: bind: address already in use"}</failure_metadata></completion_report>`);
   assert.deepEqual(metaBlocked.failure_metadata, { category: "ENVIRONMENTAL_CONSTRAINT", violating_variable: "API_PORT", runtime_value: "95317", system_error_code: "EADDRINUSE", evidence: "listen tcp :95317: bind: address already in use" });
@@ -108,7 +114,9 @@ test("worker and reviewer reports require strict XML envelopes", () => {
   assert.deepEqual(parseReviewReport(passed), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
   assert.deepEqual(parseReviewReport(`Reviewer output:\n${passed}\nDone.`), { status: "passed", notes: "All criteria verified.", findings: [], ownerApprovalRequired: false });
   assert.throws(() => parseReviewReport("```review-report\n{\"status\":\"passed\"}\n```"), /review_report XML/);
-  assert.throws(() => parseReviewReport(`<review_report status="passed"><notes>go test && go vet passed</notes><findings></findings></review_report>`), /review report contains invalid XML/);
+  assert.throws(() => parseReviewReport(`<review_report status="passed"><notes>go test <broken</notes><findings></findings></review_report>`), /review report contains invalid XML/);
+  const reviewAmp = parseReviewReport(`<review_report status="passed"><notes>go test && go vet passed</notes><findings></findings></review_report>`);
+  assert.equal(reviewAmp.notes, "go test && go vet passed");
   assert.throws(() => parseReviewReport(`${passed}${passed}`), /review_report XML/);
 });
 
@@ -875,7 +883,7 @@ test("detached worker progress cannot throw through a stale session context", ()
 
 test("scheduler worktree provisioning uses the asynchronous launch boundary", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /await prepareSubagentWorktree\(spec\.cwd, spec\.initialPatchPath, claim\.id\)/);
+  assert.match(source, /await prepareSubagentWorktree\(spec\.cwd, spec\.initialPatchPath, claim\.id, spec\.durableWorktreeKey \|\| claim\.id\)/);
   assert.match(source, /spec\.preparedWorktree = prepared\.cwd/);
 });
 
@@ -1198,6 +1206,38 @@ test("integration publication does not run commit-spawning post-commit hooks", (
   }
 });
 
+test("empty reviewed candidate patch integrates as a verification-only no-op", () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-system-review-empty-patch-"));
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    writeFileSync(join(repo, "file.txt"), "base\n");
+    execFileSync("git", ["add", "file.txt"], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+    // Verification-only gate candidates deliver evidence reports, not source
+    // changes: the reviewed patch is 0 bytes and integration must checkpoint
+    // without applying (git apply rejects empty input, wi-cef960fd gate seam).
+    const patch = join(repo, "reviewed.patch");
+    const commitMessage = "task-system: integrate reviewed worker run-1";
+    writeFileSync(join(repo, ".git", "info", "exclude"), "reviewed.patch\n.pi/tasks.db*\n.pi-subagents/\n");
+    writeFileSync(patch, "");
+    const originalHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+    let checkpoints = 0;
+    finalizeReviewedIntegration({ patch, cwd: repo, commitMessage, integrated: false, checkpoint: () => { checkpoints++; } });
+    assert.equal(checkpoints, 1);
+    assert.equal(execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim(), originalHead);
+    assert.equal(execFileSync("git", ["status", "--porcelain"], { cwd: repo, encoding: "utf8" }).trim(), "");
+    // A dirty tree still refuses the no-op: unreviewed edits must never be
+    // laundered through an empty candidate.
+    writeFileSync(join(repo, "file.txt"), "unreviewed\n");
+    assert.throws(() => finalizeReviewedIntegration({ patch, cwd: repo, commitMessage, integrated: false, checkpoint: () => { checkpoints++; } }));
+    assert.equal(checkpoints, 1);
+  } finally {
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("integration publication does not run dirtying post-commit hooks", () => {
   const repo = mkdtempSync(join(tmpdir(), "task-system-review-dirty-hook-"));
   try {
@@ -1479,6 +1519,58 @@ test("a transient-provider exhaustion persists failure_code=transient_provider i
   assert.equal(status.state, "failed");
   assert.equal(status.failure_code, "transient_provider");
   assert.match(status.error, /without consuming a numbered attempt/);
+});
+
+test("pack worktree is retained on report-less worker death and cleaned on deterministic terminals", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-system-retained-"));
+  execFileSync("git", ["init", "-q", "-b", "master"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  writeFileSync(join(repo, "file.txt"), "base\n");
+  execFileSync("git", ["add", "file.txt"], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+  const packKey = "wip-retained-pack";
+  const worktree = join(repo, ".pi", "worktrees", packKey);
+  mkdirSync(join(repo, ".pi", "worktrees"), { recursive: true });
+  execFileSync("git", ["worktree", "add", "-qb", `pi-agent-${packKey}`, worktree], { cwd: repo });
+  writeFileSync(join(worktree, "file.txt"), "partial resume work\n");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+  const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+  const scheduler = new PipelineScheduler(pi) as any;
+  scheduler.cwd = repo;
+  const makeRun = (runId: string, artifactId: string) => {
+    const artifactDir = join(repo, ".pi-subagents", "pipeline", artifactId);
+    mkdirSync(artifactDir, { recursive: true });
+    scheduler.agentRuns.set(runId, { id: artifactId, task_id: "t-1", stage: "worker", lease_token: "lease", async_dir: artifactDir, child_index: 0 });
+  };
+  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 };
+  const workspace = {
+    assignedWorktree: worktree, childProcessCwd: worktree, bashCwd: worktree,
+    readToolRoot: worktree, editToolRoot: worktree, writeToolRoot: worktree, applyPatchRoot: worktree,
+    gitToplevel: worktree, head: "", statusBefore: "", statusAfter: " M file.txt", diffStatAfter: "file.txt | 2 +-",
+  };
+
+  // Transient death mid-work (no completion report): the pack worktree survives.
+  makeRun("agent-died-1", "pr-died-1");
+  await scheduler.persistAgentResult({ runId: "agent-died-1", agent: "task-worker", task: "work", exitCode: 1, stopReason: "timed_out", messages: [{ role: "assistant", content: [{ type: "text", text: "partial work" }] }], stderr: "", usage, workspace });
+  assert.equal(readFileSync(join(worktree, "file.txt"), "utf8"), "partial resume work\n");
+  assert.equal(scheduler.retainedFailures.get(packKey), "timed_out");
+
+  // Deterministic terminal (report emitted): cleanup exactly as GAP-091/096.
+  makeRun("agent-done-1", "pr-done-1");
+  await scheduler.persistAgentResult({ runId: "agent-done-1", agent: "task-worker", task: "work", exitCode: 0, stopReason: "end", messages: [{ role: "assistant", content: [{ type: "text", text: '<completion_report status="done"><files_changed>file.txt</files_changed><test_results>PASS</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>' }] }], stderr: "", usage, workspace });
+  assert.throws(() => readFileSync(join(worktree, "file.txt"), "utf8"));
+  assert.equal(scheduler.retainedFailures.has(packKey), false);
+});
+
+test("worker launch wiring carries the durable pack key and resume failure mode", () => {
+  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  assert.match(source, /spec\.durableWorktreeKey = packKey/);
+  assert.match(source, /if \(retainedMode\) spec\.resumeFailureMode = retainedMode/);
+  assert.match(source, /spec\.reusedRetainedWorktree = prepared\.reused/);
+  assert.match(source, /!spec\.reusedRetainedWorktree\) removeSubagentWorktree/);
+  assert.match(source, /if \(!prepared\.reused && spec\.durableWorktreeKey\) this\.retainedFailures\.delete/);
 });
 
 test("worker scope only blocks protected task-system paths", () => {

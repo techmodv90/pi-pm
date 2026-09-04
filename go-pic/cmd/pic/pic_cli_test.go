@@ -1083,6 +1083,10 @@ func TestRriReportValidationMarkerGate(t *testing.T) {
 		row:  rriOpenQuestion{ID: "Q1", Question: "No blocks", Status: "open", Priority: "P1", Mode: "hitl"},
 		want: "requires blocks",
 	}, {
+		name: "open with empty resolution object",
+		row:  rriOpenQuestion{ID: "Q1", Question: "Open with empty resolution", Status: "open", Priority: "P0", Mode: "afk", Blocks: boolPtr(false), Resolution: &rriResolution{}},
+		want: "requires resolution answer and source",
+	}, {
 		name: "resolved without resolution",
 		row:  rriOpenQuestion{ID: "Q1", Question: "No resolution", Status: "resolved", Priority: "P1", Mode: "hitl", Blocks: boolPtr(true)},
 		want: "requires resolution",
@@ -1107,6 +1111,35 @@ func TestRriReportValidationMarkerGate(t *testing.T) {
 }
 
 func boolPtr(value bool) *bool { return &value }
+
+// Typed unmarshalling rejects non-string open_questions id and question values
+// before any validator runs, mirroring the field-type checks in
+// reporting/rri-report.ts so the renderer never sees a non-string row field.
+func TestRriOpenQuestionFieldTypesRejectedByUnmarshal(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "numeric id",
+			raw:  `{"project_name":"Project","generated":"2026-09-01","open_questions":[{"id":7,"question":"Numeric id"}]}`,
+			want: "cannot unmarshal number into Go struct field",
+		},
+		{
+			name: "boolean question",
+			raw:  `{"project_name":"Project","generated":"2026-09-01","open_questions":[{"id":"Q1","question":false}]}`,
+			want: "cannot unmarshal bool into Go struct field",
+		},
+	}
+	for _, tc := range cases {
+		var report rriReport
+		err := json.Unmarshal([]byte(tc.raw), &report)
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: expected typed unmarshal rejection, got %v", tc.name, err)
+		}
+	}
+}
 
 // Dual-enforcer parity (REQ-F1-7, OB-F1-7): marker-gated required-array
 // strictness must match the TypeScript validator in reporting/rri-report.ts,
@@ -1325,12 +1358,12 @@ func TestWorkItemRriFinalizeMarkedEmptyScopeSectionsPersist(t *testing.T) {
 		"requirements": []map[string]any{{"key": "REQ-SCOPE-EMPTY", "priority": "tier1", "title": "Scope sections persist", "description": "Persist empty scope sections", "acceptanceCriteria": "Given a marked report with empty scope sections\nWhen rri-finalize runs\nThen both scope keys persist"}},
 		"decisions":    []map[string]any{},
 		"report": map[string]any{
-			"project_name":        "Empty scope finalization", "generated": "2026-09-01", "rri_policy_version": 2,
+			"project_name": "Empty scope finalization", "generated": "2026-09-01", "rri_policy_version": 2,
 			"requirements_matrix": []map[string]string{{"req_id": "REQ-SCOPE-EMPTY", "requirement": "Scope sections persist", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
 			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{},
-			"open_questions":      []map[string]any{},
-			"not_yet_specified":   []map[string]string{},
-			"out_of_scope":        []map[string]string{},
+			"open_questions":    []map[string]any{},
+			"not_yet_specified": []map[string]string{},
+			"out_of_scope":      []map[string]string{},
 		},
 	})
 	finalized := asObject(t, runPic(t, bin, root, home, "work-item", "rri-finalize", id, string(payload), "--actor-role", "contractor"))
@@ -1389,6 +1422,10 @@ func TestWorkItemRriFinalizeRejectsMalformedMarkedRows(t *testing.T) {
 		row:  map[string]any{"id": "Q1", "question": "Bad status", "status": "parked", "priority": "P1", "mode": "hitl", "blocks": true},
 		want: "invalid status",
 	}, {
+		name: "non-string question",
+		row:  map[string]any{"id": "Q1", "question": false, "status": "open", "priority": "P0", "mode": "afk", "blocks": false},
+		want: "requires valid JSON",
+	}, {
 		name: "resolved without resolution",
 		row:  map[string]any{"id": "Q1", "question": "No resolution", "status": "resolved", "priority": "P1", "mode": "hitl", "blocks": true},
 		want: "requires resolution",
@@ -1410,6 +1447,12 @@ func TestWorkItemRriFinalizeRejectsMalformedMarkedRows(t *testing.T) {
 	var artifacts int
 	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND revision=2`, id).Scan(&artifacts); err != nil || artifacts != 0 {
 		t.Fatalf("rejected finalization persisted artifacts=%d err=%v", artifacts, err)
+	}
+	// No artifact at any revision may appear from the rejected payload: the
+	// validation failures above must leave canonical persistence unchanged.
+	var anyArtifacts int
+	if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, id).Scan(&anyArtifacts); err != nil || anyArtifacts != 2 {
+		t.Fatalf("rejected finalization left unexpected artifacts=%d err=%v", anyArtifacts, err)
 	}
 }
 
@@ -1438,9 +1481,9 @@ func markedRriPayload(t *testing.T, title string, questions []any) string {
 			"project_name": title, "generated": "2026-09-01", "rri_policy_version": 2,
 			"requirements_matrix": []map[string]string{{"req_id": "REQ-GATE", "requirement": "Publish gate", "source": "RRI Q#1", "priority": "P0", "persona": "Developer"}},
 			"auto_answered":       []map[string]string{}, "decisions_log": []map[string]string{{"decision": "Gate mode", "options_considered": "Gated vs legacy", "chosen": "Gated", "rationale": "Blocking frontier"}},
-			"open_questions":      questions,
-			"not_yet_specified":   []map[string]string{},
-			"out_of_scope":        []map[string]string{},
+			"open_questions":    questions,
+			"not_yet_specified": []map[string]string{},
+			"out_of_scope":      []map[string]string{},
 		},
 	})
 	if err != nil {
@@ -3877,9 +3920,9 @@ func TestInstructionPackRendersContractInterfaces(t *testing.T) {
 	node := tip.TaskPlanDocumentNode{
 		Key: "T01", Type: "task", Name: "Persist", RequirementKeys: []string{"REQ-001"},
 		Provides: []string{"OBL-001"}, Consumes: []string{"OBL-002"}, EvidenceFor: []string{"OBL-001"}, ObligationKeys: []string{"OBL-001"},
-		Files: []string{"a.go"},
-		Constraints: map[string]any{"scope_roots": []any{"."}},
-		Verification: []any{map[string]any{"command": "go test ./..."}},
+		Files:         []string{"a.go"},
+		Constraints:   map[string]any{"scope_roots": []any{"."}},
+		Verification:  []any{map[string]any{"command": "go test ./..."}},
 		BusinessRules: []any{"rule"}, ValidationRules: []any{"v"}, ErrorHandling: []any{"e"}, StateTransitions: []any{"s"}, ContractObligations: []any{"o"},
 	}
 	packBytes, _, err := tip.MaterializedInstructionPack(node, 3, map[string]tip.RequirementSnapshot{"REQ-001": {RequirementKey: "REQ-001", Title: "R", AcceptanceCriteria: "Given\nWhen\nThen"}})
@@ -4142,7 +4185,10 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer verifyDB.Close()
-	resetChecks := []struct{ query string; want int }{
+	resetChecks := []struct {
+		query string
+		want  int
+	}{
 		{`SELECT COUNT(*) FROM work_items WHERE id='` + childID + `'`, 0},
 		{`SELECT COUNT(*) FROM work_items WHERE id='wi-bug-child'`, 1},
 		{`SELECT COUNT(*) FROM work_items WHERE id='wi-grandchild'`, 1},
@@ -4528,6 +4574,203 @@ func TestBlueprintArtifactPolicySchemas(t *testing.T) {
 	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":3`, 1)); err == nil || !strings.Contains(err.Error(), "unsupported decomposition_policy_version 3") {
 		t.Fatalf("unsupported policy version = %v", err)
 	}
+	// The additive schema_version 2.1 marker gates excluded_keys on top of
+	// policy v2; the decomposition_policy_version field itself stays 2.
+	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"implementation_decisions":`+v21BlueprintDecisions+`,"deferrals":[],"not_yet_specified":[],"out_of_scope":[],"adr_candidates":[]`, 1)); err != nil {
+		t.Fatalf("v2 blueprint with v2.1 marker and no excluded_keys must validate: %v", err)
+	}
+	// The marker is a shape commitment: a marked artifact without the required
+	// implementation_decisions section is rejected, mirroring TS.
+	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1`, 1)); err == nil || !strings.Contains(err.Error(), "implementation_decisions must be an array") {
+		t.Fatalf("v2.1 blueprint without implementation_decisions = %v", err)
+	}
+	// An empty implementation_decisions array is equally rejected.
+	if err := validateBlueprintReport(strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"implementation_decisions":[],"deferrals":[],"not_yet_specified":[],"out_of_scope":[],"adr_candidates":[]`, 1)); err == nil || !strings.Contains(err.Error(), "implementation_decisions must be a non-empty array") {
+		t.Fatalf("v2.1 blueprint with empty implementation_decisions = %v", err)
+	}
+	if err := validateBlueprintReport(v21BlueprintWithExcludedKeys("Cloud sync", "")); err == nil || !strings.Contains(err.Error(), "excluded_keys require non-empty keys") {
+		t.Fatalf("v2.1 blueprint with empty excluded key = %v", err)
+	}
+}
+
+// v21BlueprintDecisions is the well-shaped implementation_decisions every
+// v2.1-marked fixture carries, since the marker commits the artifact to all
+// v2.1 sections (Go/TS shape parity, wi-dbeba706).
+const v21BlueprintDecisions = `[{"decision":"Mirror TS v2.1 shape validation","rationale":"Dual-enforcer parity","alternatives_considered":["Owner deferral","TS-only guard"]}]`
+
+// v21BlueprintFull builds a v2.1-marked blueprint carrying every v2.1 section
+// with the given raw implementation_decisions JSON, so shape variants can be
+// probed against the Go validator (corrective bug wi-dbeba706).
+func v21BlueprintFull(decisions string) string {
+	extra := `"schema_version":2.1,` +
+		`"implementation_decisions":` + decisions + `,` +
+		`"adr_candidates":[{"context":"Shape parity","choice":"Mirror TS shape rules","reason":"Canonical saves must reject the same malformed sections"}],` +
+		`"excluded_keys":["Cloud sync"],` +
+		`"deferrals":[{"question":"SQ-1","resolution":"Owner decision at Blueprint"}],` +
+		`"not_yet_specified":[],` +
+		`"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside epic scope"}]`
+	return strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,`+extra, 1)
+}
+
+func TestBlueprintV21ShapeParity(t *testing.T) {
+	validDecisions := `[{"decision":"Mirror TS v2.1 shape validation","rationale":"Dual-enforcer parity","alternatives_considered":["Owner deferral","TS-only guard"]}]`
+	if err := validateBlueprintReport(v21BlueprintFull(validDecisions)); err != nil {
+		t.Fatalf("complete v2.1 blueprint must validate: %v", err)
+	}
+	if err := validateBlueprintReport(v2BlueprintArtifact); err != nil {
+		t.Fatalf("legacy markerless v2 blueprint must keep validating: %v", err)
+	}
+	cases := []struct {
+		name      string
+		mutate    func(content string) string
+		wantError string
+	}{
+		{"empty decisions", func(c string) string { return strings.Replace(c, validDecisions, "[]", 1) }, "implementation_decisions must be a non-empty array"},
+		{"missing decisions", func(c string) string {
+			return strings.Replace(c, `"implementation_decisions":`+validDecisions+`,`, "", 1)
+		}, "implementation_decisions must be an array"},
+		{"null decisions", func(c string) string { return strings.Replace(c, validDecisions, "null", 1) }, "implementation_decisions must be an array"},
+		{"non-object decision row", func(c string) string { return strings.Replace(c, validDecisions, `[["decision"]]`, 1) }, "implementation_decisions rows must be objects"},
+		{"empty decision", func(c string) string {
+			return strings.Replace(c, `"decision":"Mirror TS v2.1 shape validation"`, `"decision":""`, 1)
+		}, "implementation_decisions.decision must be a non-empty string"},
+		{"missing rationale", func(c string) string { return strings.Replace(c, `"rationale":"Dual-enforcer parity",`, "", 1) }, "implementation_decisions.rationale must be a non-empty string"},
+		{"empty alternatives", func(c string) string { return strings.Replace(c, `["Owner deferral","TS-only guard"]`, "[]", 1) }, "alternatives_considered must be a non-empty array of non-empty strings"},
+		{"non-string alternative", func(c string) string { return strings.Replace(c, `["Owner deferral","TS-only guard"]`, `["a",3]`, 1) }, "alternatives_considered must be a non-empty array of non-empty strings"},
+		{"missing out_of_scope", func(c string) string {
+			return strings.Replace(c, `"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside epic scope"}],`, "", 1)
+		}, "out_of_scope must be an array"},
+		{"null out_of_scope", func(c string) string {
+			return strings.Replace(c, `"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside epic scope"}]`, `"out_of_scope":null`, 1)
+		}, "out_of_scope must be an array"},
+		{"string schema marker", func(c string) string { return strings.Replace(c, `"schema_version":2.1`, `"schema_version":"2.1"`, 1) }, "schema_version must be the numeric marker 2.1"},
+		{"null schema marker", func(c string) string { return strings.Replace(c, `"schema_version":2.1`, `"schema_version":null`, 1) }, "schema_version must be the numeric marker 2.1"},
+		{"deferral row missing resolution", func(c string) string {
+			return strings.Replace(c, `"resolution":"Owner decision at Blueprint"`, `"resolution":" "`, 1)
+		}, "deferrals.resolution must be a non-empty string"},
+		{"adr row missing reason", func(c string) string {
+			return strings.Replace(c, `"reason":"Canonical saves must reject the same malformed sections"`, `"reason":" "`, 1)
+		}, "adr_candidates.reason must be a non-empty string"},
+		{"out_of_scope row empty exclusion", func(c string) string { return strings.Replace(c, `"exclusion":"Cloud sync"`, `"exclusion":" "`, 1) }, "out_of_scope.exclusion must be a non-empty string"},
+		{"not_yet_specified row empty graduation path", func(c string) string {
+			return strings.Replace(c, `"not_yet_specified":[]`, `"not_yet_specified":[{"uncertainty":"u","graduation_path":" "}]`, 1)
+		}, "not_yet_specified.graduation_path must be a non-empty string"},
+	}
+	base := v21BlueprintFull(validDecisions)
+	for _, tc := range cases {
+		err := validateBlueprintReport(tc.mutate(base))
+		if err == nil || !strings.Contains(err.Error(), tc.wantError) {
+			t.Fatalf("%s: err = %v, want containing %q", tc.name, err, tc.wantError)
+		}
+	}
+}
+
+// v21BlueprintWithExcludedKeys splices the additive schema_version 2.1 marker,
+// the required implementation_decisions, and excluded_keys into the policy-v2
+// fixture, matching the production marker shape where
+// decomposition_policy_version stays 2.
+func v21BlueprintWithExcludedKeys(keys ...string) string {
+	emcoded, _ := json.Marshal(keys)
+	scope := `"deferrals":[],"not_yet_specified":[],"out_of_scope":[],"adr_candidates":[]`
+	return strings.Replace(v2BlueprintArtifact, `"decomposition_policy_version":2`, `"decomposition_policy_version":2,"schema_version":2.1,"implementation_decisions":`+v21BlueprintDecisions+`,"excluded_keys":`+string(emcoded)+`,`+scope, 1)
+}
+
+func TestBlueprintExcludedKeysBinding(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	id := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Excluded Keys Epic"))["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	// Build the approved RRI referent: scan accepted, RRI approved with
+	// out_of_scope rows, vision approved.
+	scan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scan["id"].(string), "accepted")
+	rri := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri", `{"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside the epic scope"},{"exclusion":"Legacy import","reason":"Deferred to a later epic"}]}`))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", rri["id"].(string), "approved")
+	vision := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "vision", validVisionArtifact))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "vision", vision["id"].(string), "approved")
+
+	blueprintRows := func(t *testing.T) int {
+		t.Helper()
+		db, err := openSQLite(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var count int
+		if err = db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage='blueprint'`, id).Scan(&count); err != nil {
+			t.Fatal(err)
+		}
+		return count
+	}
+
+	// Known RRI exclusion keys save and persist.
+	known := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", v21BlueprintWithExcludedKeys("Cloud sync", "Legacy import")))
+	if known["revision"] != float64(1) {
+		t.Fatalf("first v2.1 blueprint revision = %#v", known["revision"])
+	}
+
+	// Malformed v2.1 implementation_decisions fail closed with a field error
+	// and leave no new artifact row (Go/TS shape parity, wi-dbeba706).
+	malformed := strings.Replace(v21BlueprintWithExcludedKeys("Cloud sync"), v21BlueprintDecisions, "[]", 1)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", malformed); !strings.Contains(out, "implementation_decisions must be a non-empty array") {
+		t.Fatalf("malformed implementation_decisions save = %q", out)
+	}
+	if rows := blueprintRows(t); rows != 1 {
+		t.Fatalf("blueprint rows after malformed save = %d, want 1", rows)
+	}
+
+	// Unknown exclusion keys fail closed naming the key and leave no new row.
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", v21BlueprintWithExcludedKeys("Cloud sync", "Phantom export")); !strings.Contains(out, "Phantom export") {
+		t.Fatalf("dangling excluded key error = %s", out)
+	}
+	if rows := blueprintRows(t); rows != 1 {
+		t.Fatalf("failed save persisted %d blueprint rows, want 1", rows)
+	}
+
+	// Legacy policy-v2 content without v2.1 fields still saves unchanged.
+	legacy := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", v2BlueprintArtifact))
+	if legacy["revision"] != float64(2) {
+		t.Fatalf("legacy v2 blueprint revision = %#v", legacy["revision"])
+	}
+
+	// Without an approved RRI referent, nonempty excluded_keys fail closed.
+	orphan := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Orphan Exclusions Epic"))
+	orphanID := orphan["id"].(string)
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-save", orphanID, "blueprint", v21BlueprintWithExcludedKeys("Cloud sync")); !strings.Contains(out, "approved RRI out_of_scope referent") {
+		t.Fatalf("missing referent error = %s", out)
+	}
+
+	// Stale-predecessor lifecycle: a Blueprint saved against an older RRI must
+	// fail closed at approval after a newer RRI retires the exclusion key.
+	stale := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Stale Predecessor Epic"))
+	staleID := stale["id"].(string)
+	staleScan := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "scan", "scan"))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "scan", staleScan["id"].(string), "accepted")
+	rriV1 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "rri", `{"out_of_scope":[{"exclusion":"Cloud sync","reason":"Outside the epic scope"}]}`))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "rri", rriV1["id"].(string), "approved")
+	staleVision := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "vision", validVisionArtifact))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "vision", staleVision["id"].(string), "approved")
+	staleBlueprint := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "blueprint", v21BlueprintWithExcludedKeys("Cloud sync")))
+
+	// Approving a newer RRI drops the vision and blueprint checkpoints but
+	// leaves the artifacts; the unchanged Blueprint must not re-approve.
+	rriV2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "rri", `{"out_of_scope":[{"exclusion":"Local cache","reason":"Deferred to a later epic"}]}`))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "rri", rriV2["id"].(string), "approved")
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "vision", "current", "approved")
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", staleID, "blueprint", staleBlueprint["id"].(string), "approved"); !strings.Contains(out, "Cloud sync") {
+		t.Fatalf("stale blueprint approval error = %s", out)
+	}
+
+	// A corrected Blueprint matching the newer RRI referent still approves.
+	corrected := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "blueprint", v21BlueprintWithExcludedKeys("Local cache")))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "blueprint", corrected["id"].(string), "approved")
+
+	// A policy-v2 Contract binds to an approved v2.1 Blueprint: the seam
+	// authority must accept the v2.1 marker, not only exact policy v2.
+	contractContent := v2ContractArtifact(corrected["id"].(string), int(corrected["revision"].(float64)), corrected["content_hash"].(string))
+	contract := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", staleID, "contracts", contractContent))
+	runPic(t, bin, root, home, "work-item", "artifact-approve", staleID, "contracts", contract["id"].(string), "approved")
 }
 
 func TestContractArtifactPolicySchemas(t *testing.T) {
@@ -5043,4 +5286,104 @@ func TestRejectedCheckpointsDoNotSupplyPlanningAuthority(t *testing.T) {
 		('wic-fb2-rejected','`+fallbackID+`','blueprint','`+bp2["id"].(string)+`',2,'`+bp2["content_hash"].(string)+`','rejected')`)
 	runPic(t, bin, root, home, "work-item", "artifact-save", fallbackID, "contracts", validContractArtifact)
 	runPic(t, bin, root, home, "work-item", "artifact-approve", fallbackID, "contracts", "current", "approved")
+}
+
+// querySQLiteColumn runs one SQLite query through the sqlite3 CLI and returns
+// its trimmed stdout, so tests can assert persisted evidence without mocks.
+func querySQLiteColumn(t *testing.T, dbPath string, query string) string {
+	t.Helper()
+	out, err := exec.Command("sqlite3", dbPath, query).CombinedOutput()
+	if err != nil {
+		t.Fatalf("sqlite query %q failed: %v\n%s", query, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// TestBlueprintAnnotationEvidence (OB-F3-2/OB-F3-3, go-artifact-approve seam):
+// a real temporary SQLite database proves that terminal annotation dispositions
+// are recorded as durable approval evidence inside the approval checkpoint,
+// that incomplete evidence is rejected before any canonical mutation, and that
+// the Go PI_TASK_AGENT_NAME rejection still defends approval behind the new
+// gate.
+func TestBlueprintAnnotationEvidence(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Annotation Evidence"))
+	id := epic["id"].(string)
+	for _, stage := range []string{"scan", "rri", "vision"} {
+		content := stage + " content"
+		if stage == "vision" {
+			content = validVisionArtifact
+		}
+		artifact := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, content))
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	blueprint := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", validBlueprintArtifact))
+	blueprintID := blueprint["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	// Incomplete evidence (empty evidence, bad resolution, duplicates) is
+	// rejected before any canonical save or checkpoint mutation.
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", `[{"annotation":"tighten seam 2","resolution":"addressed","evidence":""}]`); !strings.Contains(out, "nonempty evidence") {
+		t.Fatalf("empty evidence disposition = %s", out)
+	}
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", `[{"annotation":"tighten seam 2","resolution":"noted","evidence":"e"}]`); !strings.Contains(out, "addressed or waived") {
+		t.Fatalf("nonterminal resolution = %s", out)
+	}
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", `[{"annotation":"a","resolution":"addressed","evidence":"e"},{"annotation":"a","resolution":"waived","evidence":"dup"}]`); !strings.Contains(out, "duplicate disposition") {
+		t.Fatalf("duplicate disposition = %s", out)
+	}
+	if count := querySQLiteColumn(t, dbPath, `SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id='`+id+`' AND stage='blueprint'`); count != "0" {
+		t.Fatalf("rejected evidence attempts must not record a checkpoint, got %s", count)
+	}
+
+	// Successful approval records both terminal dispositions as durable
+	// evidence attached to the approved Blueprint checkpoint.
+	valid := `[{"annotation":"tighten seam 2","resolution":"addressed","evidence":"seam 2 rewritten"},{"annotation":"rename the gate","resolution":"waived","evidence":"owner deferred naming"}]`
+	approved := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", valid))
+	if approved["dispositions_recorded"] != float64(2) {
+		t.Fatalf("approved dispositions = %#v", approved)
+	}
+	evidence := querySQLiteColumn(t, dbPath, `SELECT dispositions_json FROM workflow_checkpoints WHERE work_item_id='`+id+`' AND stage='blueprint' AND decision_type='approved'`)
+	for _, fragment := range []string{"tighten seam 2", "addressed", "seam 2 rewritten", "rename the gate", "waived", "owner deferred naming"} {
+		if !strings.Contains(evidence, fragment) {
+			t.Fatalf("checkpoint evidence %q missing %q", evidence, fragment)
+		}
+	}
+
+	// Immutable evidence: the same artifact revision can never be approved
+	// again, so no duplicate evidence rows can accumulate behind the checkpoint.
+	if out := runPicError(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--dispositions-json", valid); !strings.Contains(out, "UNIQUE constraint failed") {
+		t.Fatalf("re-approval of the same revision = %s", out)
+	}
+
+	// Revised blueprint round: each approval binds its own complete evidence.
+	revised := strings.Replace(validBlueprintArtifact, "Reliable workflow", "Revised reliable workflow", 1)
+	blueprint2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "blueprint", revised))
+	approved2 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-approve", id, "blueprint", blueprint2["id"].(string), "approved", "--dispositions-json", `[{"annotation":"tighten seam 2","resolution":"addressed","evidence":"seam 2 rewritten"}]`))
+	if approved2["dispositions_recorded"] != float64(1) {
+		t.Fatalf("revised approval dispositions = %#v", approved2)
+	}
+	// Evidence survives and remains queryable after cleanup: the approved
+	// Blueprint checkpoint still carries its dispositions even though no
+	// runtime draft or plan file remains (revision 2's save invalidates the
+	// revision 1 checkpoint by the established downstream-invalidation rules,
+	// so exactly the current approval's evidence row remains).
+	rows := querySQLiteColumn(t, dbPath, `SELECT COUNT(*) FROM workflow_checkpoints WHERE work_item_id='`+id+`' AND stage='blueprint' AND decision_type='approved' AND dispositions_json!=''`)
+	if rows != "1" {
+		t.Fatalf("durable evidence checkpoints = %s", rows)
+	}
+
+	// Child-agent rejection: the existing Go PI_TASK_AGENT_NAME defense still
+	// rejects the approval regardless of any actor_role the child supplies.
+	child := exec.Command(bin, "work-item", "artifact-approve", id, "blueprint", blueprintID, "approved", "--actor-role", "owner", "--dispositions-json", valid)
+	child.Dir = root
+	child.Env = append(clearedPiEnv(), "HOME="+home, "PI_TASK_AGENT_NAME=task-reviewer")
+	if out, err := child.CombinedOutput(); err == nil || !strings.Contains(string(out), "cannot mutate Work Item lifecycle") {
+		t.Fatalf("child-agent approval attempt: err=%v out=%s", err, out)
+	}
 }

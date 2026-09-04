@@ -210,6 +210,29 @@ test("marked RRI report rejects unsupported policy versions and keeps legacy tol
   );
 });
 
+test("open_questions id and question must be non-empty strings like Go unmarshalling", () => {
+  // Go typed fields reject non-string id/question JSON at unmarshal time; the
+  // parser must mirror that with a field-specific error before rendering can
+  // crash in cell() on a non-string value.
+  assert.throws(
+    () => parseRriReportJson(JSON.stringify(markedReport([{ ...openFrontierRow, id: 7 }]))),
+    /open_questions rows require id to be a non-empty string/,
+  );
+  assert.throws(
+    () => parseRriReportJson(JSON.stringify(markedReport([{ ...openFrontierRow, question: false }]))),
+    /open_questions rows require question to be a non-empty string/,
+  );
+  // The same typed rejection applies on the legacy path, like Go unmarshalling.
+  assert.throws(
+    () => parseRriReportJson(JSON.stringify({ ...legacyReport, open_questions: [{ id: ["Q-LEGACY"], question: "Legacy open question" }] })),
+    /open_questions rows require id to be a non-empty string/,
+  );
+  assert.throws(
+    () => parseRriReportJson(JSON.stringify({ ...legacyReport, open_questions: [{ id: "Q-LEGACY", question: 42 }] })),
+    /open_questions rows require question to be a non-empty string/,
+  );
+});
+
 // Dual-enforcer parity (REQ-F1-7, OB-F1-7): marked reports with a missing
 // required array are rejected with the same named defect as the Go validator,
 // while legacy reports stay valid without the arrays.

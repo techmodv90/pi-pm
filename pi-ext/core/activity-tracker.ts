@@ -10,7 +10,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
-import { execPicAsync, hasDb } from "./cli-helpers";
+import { execPicAsync, hasDb } from "./cli-helpers.ts";
 import { resolve } from "node:path";
 
 let currentWorkItemId = "";

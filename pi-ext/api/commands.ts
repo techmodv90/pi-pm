@@ -1,10 +1,10 @@
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { matchesKey, Text } from "@mariozechner/pi-tui";
-import { execPic, hasDb } from "../core/cli-helpers";
+import { execPic, hasDb } from "../core/cli-helpers.ts";
 
 
 import { updateStatus } from "../core/extension-helpers";
-import { buildTaskVerifyPrompt, buildWorkItemContinuePrompt } from "../tasking/work-item-prompts";
+import { buildTaskVerifyPrompt, buildWorkItemContinuePrompt } from "../tasking/work-item-prompts.ts";
 import type { PipelineScheduler } from "../pipeline/pipeline-scheduler.ts";
 
 import { isTaskListRequest } from "../ui/task-navigation.ts";

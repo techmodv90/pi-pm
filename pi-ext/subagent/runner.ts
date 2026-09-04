@@ -1,5 +1,6 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { isMutationStage } from "../pipeline/report-parsing.ts";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -82,6 +83,10 @@ export interface SubagentSpec {
   sessionPath?: string;
   /** Backoff base (ms) between in-claim transient-provider retries; defaults to RUNNER_TRANSIENT_BACKOFF_MS. */
   transientBackoffMs?: number;
+  /** Durable worker worktree constraint (RLB-GAP-001): when set, the worktree is keyed by this id (instruction pack) and retained across report-less transient failures instead of destroyed per attempt. */
+  durableWorktreeKey?: string;
+  /** Resume preamble for a retained pack worktree, prepended to the task on every launch. */
+  resumeFailureMode?: string;
 }
 
 export interface SubagentHandle {
@@ -97,11 +102,26 @@ export function assertManagedAcceptance(spec: SubagentSpec): void {
   if (spec.acceptance !== required) throw new Error(`${spec.stage} subagent requires acceptance ${required}`);
 }
 
-export async function prepareSubagentWorktree(cwd: string, initialPatchPath?: string, runId: string = randomUUID()): Promise<{ runId: string; cwd: string }> {
+export async function prepareSubagentWorktree(cwd: string, initialPatchPath?: string, runId: string = randomUUID(), worktreeKey: string = runId): Promise<{ runId: string; cwd: string; reused: boolean }> {
   const worktreeRoot = join(cwd, ".pi", "worktrees");
   mkdirSync(worktreeRoot, { recursive: true, mode: 0o700 });
-  const worktree = join(worktreeRoot, runId);
-  await execFileAsync("git", ["worktree", "add", "-b", `pi-agent-${runId}`, worktree, "HEAD"], { cwd });
+  const worktree = join(worktreeRoot, worktreeKey);
+  // Durable worker worktree constraint (RLB-GAP-001): a pack-keyed worktree left
+  // by a retained transient failure is reused in place — no reset, no patch
+  // reapply — so the retry resumes the prior attempt's partial work.
+  if (existsSync(worktree) && existsSync(join(worktree, ".git"))) {
+    const branch = `pi-agent-${worktreeKey}`;
+    const registration = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd, encoding: "utf8" })
+      .trim().split(/\n\n+/).find((block) => {
+        const registeredPath = block.match(/^worktree (.+)$/m)?.[1];
+        return registeredPath && (existsSync(registeredPath) ? realpathSync(registeredPath) : registeredPath) === realpathSync(worktree);
+      });
+    const registeredBranch = registration?.match(/^branch refs\/heads\/(.+)$/m)?.[1];
+    if (registration && registeredBranch === branch) return { runId, cwd: worktree, reused: true };
+    throw new Error(`refusing to reuse unregistered or foreign-branch worktree: ${worktree}`);
+  }
+  if (existsSync(worktree)) throw new Error(`refusing to overwrite non-worktree path: ${worktree}`);
+  await execFileAsync("git", ["worktree", "add", "-b", `pi-agent-${worktreeKey}`, worktree, "HEAD"], { cwd });
   try {
     if (initialPatchPath && statSync(initialPatchPath).size > 0) {
       try {
@@ -117,10 +137,10 @@ export async function prepareSubagentWorktree(cwd: string, initialPatchPath?: st
       }
     }
   } catch (error) {
-    removeSubagentWorktree(cwd, worktree, runId);
+    removeSubagentWorktree(cwd, worktree, worktreeKey);
     throw error;
   }
-  return { runId, cwd: worktree };
+  return { runId, cwd: worktree, reused: false };
 }
 
 export function removeSubagentWorktree(cwd: string, worktree: string, runId: string): void {
@@ -144,14 +164,42 @@ export function removeSubagentWorktree(cwd: string, worktree: string, runId: str
   execFileSync("git", ["branch", "-D", branch], { cwd, stdio: "pipe" });
 }
 
-export function cleanupOrphanedSubagentWorktrees(cwd: string, activeRunIds: ReadonlySet<string>): void {
+export function cleanupOrphanedSubagentWorktrees(cwd: string, activeRunIds: ReadonlySet<string>, orphanAgeMs: number = ORPHANED_WORKTREE_MAX_AGE_MS): void {
+  const cutoff = Date.now() - orphanAgeMs;
   const blocks = execFileSync("git", ["worktree", "list", "--porcelain"], { cwd, encoding: "utf8" }).trim().split(/\n\n+/);
   for (const block of blocks) {
     const path = block.match(/^worktree (.+)$/m)?.[1];
     const branch = block.match(/^branch refs\/heads\/pi-agent-(.+)$/m)?.[1];
     if (!path || !branch || activeRunIds.has(branch) || basename(path) !== branch) continue;
+    // Durable worker worktree constraint (RLB-GAP-001): pack-keyed worktrees are
+    // retained across transient worker failures, so a worktree that is not part
+    // of an active claim is only reclaimed once it is older than the retention
+    // horizon (aligned with the GAP-137 24h session TTL). Age is taken from the
+    // worktree directory mtime, refreshed by every retained attempt.
+    let ageOk = true;
+    try { ageOk = statSync(path).mtimeMs < cutoff; } catch { ageOk = false; }
+    if (!ageOk) continue;
     removeSubagentWorktree(cwd, path, branch);
   }
+}
+
+/** Retention horizon aligning the orphan sweep with GAP-137's 24h session TTL. */
+export const ORPHANED_WORKTREE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+
+// Durable worker worktree constraint (RLB-GAP-001): a mutation-stage child that
+// died before emitting its completion report (provider stream loss, watchdog
+// kill, deadline kill, mid-run exit) retains its pack-keyed worktree so the
+// retry resumes the prior attempt's partial work; a run that emitted a report is
+// deterministic and cleans up exactly as GAP-091/096 required.
+export function retainWorktreeForResume(stage: string | undefined, result: SubagentResult): boolean {
+  if (!stage || !isMutationStage(stage)) return false;
+  if (result.stopReason === "aborted") return false;
+  // Retain every report-less death: nonzero exits, watchdog/deadline kills,
+  // and exit-0 stream cuts (the runner defaults stopReason to "end" on exit 0,
+  // so stopReason cannot distinguish a clean finish from a provider stream
+  // that ended without the worker emitting its completion report — presence
+  // of the report in the final assistant text is the only reliable signal).
+  return !/<completion_report\b/.test(finalAssistantText(result.messages || []));
 }
 
 function gitText(cwd: string, args: string[]): string {
@@ -274,11 +322,29 @@ export function startSubagent(spec: SubagentSpec, onUpdate?: (update: SubagentUp
   if (spec.agent.tools?.length) args.push("--tools", spec.agent.tools.join(","));
   for (const directory of skillDirectories) args.push("--skill", directory);
   for (const path of getAppendSystemPromptPaths(spec.agent.name, spec.agent.systemPrompt, promptPath)) args.push("--append-system-prompt", path);
+  // Durable worker worktree constraint (RLB-GAP-001): a run resuming a retained
+  // pack worktree gets a mandatory preamble describing the prior failure mode
+  // and the worktree's current state, so the child orients before continuing.
+  let resumePreamble = "";
+  if (spec.durableWorktreeKey) {
+    const runDir = spec.preparedWorktree || runCwd;
+    const isWorktreeCwd = runDir !== spec.cwd && runDir.startsWith(spec.cwd);
+    let statusSample = "(empty)";
+    try {
+      statusSample = execFileSync("git", ["status", "--short"], { cwd: runDir, encoding: "utf8" }).trim().split("\n").slice(0, 30).join("\n") || "(clean)";
+    } catch {}
+    const retained = Boolean(spec.resumeFailureMode);
+    resumePreamble = retained
+      ? `RESUME: A prior attempt of this task died in the retained worktree (${spec.resumeFailureMode}). The worktree still holds that attempt's uncommitted partial work. Re-orient with the git status sample below, verify the partial work against the task, and continue from there — do not start over from zero.\nCurrent worktree git status:\n${statusSample}\nYou have a fresh deadline budget for this attempt.`
+      : "FRESH START: No prior attempt survived; the worktree is newly created. Implement the task from the current state.\nCurrent worktree git status:\n" + statusSample;
+    if (isWorktreeCwd) resumePreamble += "\nWORKTREE DISCIPLINE: git refs/stash is shared across linked worktrees — NEVER run git stash or git stash pop here; your uncommitted work is your durable state. Do not create commits. Do not touch paths outside this worktree.";
+  }
+  const baseTask = resumePreamble ? `${resumePreamble}\n\n${spec.task}` : spec.task;
   const patchedTask = spec.initialPatchPath
     ? spec.stage === "review"
-      ? `${spec.task}\n\nCANDIDATE ATTESTATION: The bound candidate patch has been applied to this isolated worktree. Review this worktree, not the parent checkout.`
-      : `${spec.task}\n\nREVIEW-FIX RUN: The rejected candidate patch has been applied to this worktree. You must modify the worktree to address the review findings and produce a non-empty patch different from the rejected candidate. A no-op completion is invalid.`
-    : spec.task;
+      ? `${baseTask}\n\nCANDIDATE ATTESTATION: The bound candidate patch has been applied to this isolated worktree. Review this worktree, not the parent checkout.`
+      : `${baseTask}\n\nREVIEW-FIX RUN: The rejected candidate patch has been applied to this worktree. You must modify the worktree to address the review findings and produce a non-empty patch different from the rejected candidate. A no-op completion is invalid.`
+    : baseTask;
   args.push(`Task: ${patchedTask}`);
   const invocation = buildPiInvocation(args);
   let child: ChildProcess | undefined;
@@ -480,6 +546,11 @@ export function classifyRunnerTransientFault(result: SubagentResult): RunnerTran
   // Watchdog kill means the provider wedged mid-run: same transient class as an
   // inference abort, retried in-claim rather than burning a numbered attempt.
   if (result.stopReason === "stalled") return "provider_stall";
+  // Deadline kill is a throughput fault, not a candidate defect: the child was
+  // working when the process timer fired, so it retries in-claim with a fresh
+  // timer (SQ-1: fresh deadline budget per resume) instead of being consumed as
+  // a deterministic numbered attempt.
+  if (result.stopReason === "timed_out") return "provider_stall";
   const diagnostic = `${result.errorMessage || ""}\n${result.stderr || ""}`;
   if (/inference[\s_-]?abort|inference\s+error|empty[\s_-]?(?:model|provider)[\s_-]?(?:output|response)|provider[\s_-]?error/i.test(diagnostic)) return "inference_abort";
   // Empty assistant output is transient independently of exit code: a provider
@@ -546,7 +617,10 @@ export function startSubagentResilient(spec: SubagentSpec, onUpdate?: (update: S
         return attempt;
       }
       retry++;
-      if (attempt.workspace?.assignedWorktree) {
+      if (attempt.workspace?.assignedWorktree && !boundSpec.durableWorktreeKey) {
+        // Durable worker worktree constraint (RLB-GAP-001): a pack-keyed retained
+        // worktree skips the destructive reset — the uncommitted diff IS the
+        // resume state between in-claim retries.
         try { resetSubagentWorktreeToCandidate(spec, attempt.workspace.assignedWorktree, spec.cwd); }
         catch {}
       }
