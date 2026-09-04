@@ -193,8 +193,12 @@ export const ORPHANED_WORKTREE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // deterministic and cleans up exactly as GAP-091/096 required.
 export function retainWorktreeForResume(stage: string | undefined, result: SubagentResult): boolean {
   if (!stage || !isMutationStage(stage)) return false;
-  if (result.exitCode === 0 && result.stopReason !== "aborted") return false;
   if (result.stopReason === "aborted") return false;
+  // Retain every report-less death: nonzero exits, watchdog/deadline kills,
+  // and exit-0 stream cuts (the runner defaults stopReason to "end" on exit 0,
+  // so stopReason cannot distinguish a clean finish from a provider stream
+  // that ended without the worker emitting its completion report — presence
+  // of the report in the final assistant text is the only reliable signal).
   return !/<completion_report\b/.test(finalAssistantText(result.messages || []));
 }
 

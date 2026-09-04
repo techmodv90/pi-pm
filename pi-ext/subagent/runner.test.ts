@@ -93,6 +93,8 @@ test("retainWorktreeForResume retains report-less worker deaths and cleans deter
   assert.equal(retainWorktreeForResume("worker", { exitCode: 1, stopReason: "stalled", messages: partialMessages } as any), true);
   assert.equal(retainWorktreeForResume("worker", { exitCode: 1, stopReason: "timed_out", messages: partialMessages } as any), true);
   assert.equal(retainWorktreeForResume("worker", { exitCode: 1, stopReason: "end", messages: partialMessages } as any), true);
+  // Exit-0 stream cut: provider ended the stream without the report.
+  assert.equal(retainWorktreeForResume("worker", { exitCode: 0, messages: partialMessages } as any), true);
   // Deterministic terminals: report emitted, success, cancellation, non-mutation stage.
   assert.equal(retainWorktreeForResume("worker", { exitCode: 0, stopReason: "end", messages: reportMessages } as any), false);
   assert.equal(retainWorktreeForResume("worker", { exitCode: 1, stopReason: "aborted", messages: partialMessages } as any), false);
