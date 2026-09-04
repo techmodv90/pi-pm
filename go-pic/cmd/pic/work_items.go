@@ -3712,6 +3712,12 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ti
 		return fmt.Errorf("approved Contract is required before Task Graph obligation validation: %w", err)
 	}
 	var contract tip.ContractDocument
+	executableNodeCount := 0
+	for _, node := range plan.Nodes {
+		if node.Type != "feature" && node.Type != "gate" {
+			executableNodeCount++
+		}
+	}
 	bindingFieldsPresent := false
 	for _, node := range plan.Nodes {
 		if node.Type != "feature" && node.Type != "gate" && (node.Provides != nil || node.Consumes != nil || node.EvidenceFor != nil || node.ObligationKeys != nil) {
@@ -3728,7 +3734,7 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ti
 	if contract.ObligationSchemaVersion != 2 {
 		return nil
 	}
-	if !bindingFieldsPresent {
+	if !bindingFieldsPresent && executableNodeCount > 0 {
 		return errors.New("Task Graph nodes must bind Contract obligations with provides, consumes, evidence_for, and obligation_keys")
 	}
 	obligations := map[string]tip.ContractObligation{}
@@ -3737,6 +3743,30 @@ func validateTaskGraphObligations(db databaseQueryer, workItemID string, plan ti
 			return fmt.Errorf("Contract obligation %s is duplicated", obligation.ID)
 		}
 		obligations[obligation.ID] = obligation
+	}
+	if executableNodeCount == 0 {
+		// Verification-only graph constraint: retrospective aggregates verify
+		// obligations delivered by their features, so a gate-only graph must
+		// evidence every Contract obligation at a gate node instead of
+		// providing it; executable-node graphs keep the provider rule.
+		gateEvidence := map[string][]string{}
+		for _, node := range plan.Nodes {
+			if node.Type != "gate" {
+				continue
+			}
+			for _, key := range node.EvidenceFor {
+				gateEvidence[key] = append(gateEvidence[key], node.Key)
+			}
+			for _, key := range node.ObligationKeys {
+				gateEvidence[key] = append(gateEvidence[key], node.Key)
+			}
+		}
+		for key := range obligations {
+			if len(gateEvidence[key]) == 0 {
+				return fmt.Errorf("verification-only Task Graph must evidence Contract obligation %s at a gate node", key)
+			}
+		}
+		return nil
 	}
 	providers := map[string][]string{}
 	evidence := map[string][]string{}
