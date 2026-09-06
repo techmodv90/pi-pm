@@ -12,8 +12,9 @@ standard execution phases.
 - **Executable or nothing** — every implementation task names exact file paths;
   every task has a unique ID and a phase
 - **Discovery boundary** — the `.tasks.md` is a discovery artifact that
-  informs the Work Item's own Task Graph; it never creates Work Items, never
-  bypasses `task_graph` approval, and never launches workers
+  becomes the execution record only through `pic workflow import-apm` (run
+  by `/apm implement`); it never creates Work Items by hand, never bypasses
+  an importer gate, and never launches workers itself
 
 ## Input
 
@@ -267,17 +268,18 @@ On owner approval, update `**Status:** Approved` in the tasks file.
 
 ## Handoff into APM
 
-The task list is a **discovery input, not the decomposition authority**. The
-canonical decomposition lives in the Work Item's Task Graph (decomposition
-policy: vertical tracer-bullet slices, `depends_on` edges, Given/When/Then
-acceptance), created through the Work Item planning flow and materialized via
-`materialize_work_item`; parallel execution happens only through the persisted
-scheduler with worktree isolation. On gate PASS with owner approval, propose
-creating a Work Item citing the `.feature`, `.plan.md`, and `.tasks.md` paths
-— use the `[P]` markers and phases as input for `depends_on` design, never as
-authorization to launch work. Never create placeholder Work Items from a
-DO-NOT-ADVANCE list, and never author RRI/Blueprint/Contract/Task-Graph
-planning artifacts directly from this file.
+The task list is a **discovery input that becomes the execution record**.
+`/apm implement` imports it through `pic workflow import-apm`, which creates
+the canonical Work Items (epic, P-tier features, tasks) with deterministic
+`depends_on` edges from the Execution Order block — the importer is the only
+bridge; never create Work Items from this file by hand and never write Work
+Item rows directly. After import, `/apm implement` relays the owner
+authorization gate, and the persisted scheduler executes: per-task worktrees,
+TDD task-workers, task-reviewer, contractor verification. The `[P]` markers
+and phases are import input, never authorization to launch work. Never create
+placeholder Work Items from a DO-NOT-ADVANCE list, and never author
+RRI/Blueprint/Contract/Task-Graph planning artifacts directly from this file
+(those pipeline stages are deprecated).
 
 The Nyquist mapping produced by the gate
 (`pi-ext/core/policies/nyquist-validation.md`) is part of the handoff

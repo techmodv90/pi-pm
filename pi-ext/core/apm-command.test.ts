@@ -113,6 +113,26 @@ test("prompt templates carry the input prefix and handlers inject bare values", 
   assert.doesNotMatch(distill, /replace\("\{INPUT\}", `- module:/);
 });
 
+test("implement prompt is an import-and-handoff orchestrator, not an inline executor", () => {
+  const prompt = readSource("./prompts/apm-implement.md");
+  // Handoff flow: gate, import (dry-run + real), resume on re-import,
+  // owner-relayed authorization, exit after handoff.
+  assert.match(prompt, /2\. IMPORT/);
+  assert.match(prompt, /--dry-run/);
+  assert.match(prompt, /RESUME mode/);
+  assert.match(prompt, /3\. AUTHORIZATION/);
+  assert.match(prompt, /authorize_work_item_implementation/);
+  assert.match(prompt, /4\. HANDOFF/);
+  // HANDOFF exits; no attached polling loop.
+  assert.match(prompt, /do not attach a polling\s+loop/);
+  // Inline execution machinery is gone: the scheduler owns it.
+  assert.doesNotMatch(prompt, /BOUNDARY/);
+  assert.doesNotMatch(prompt, /Stub Detection/);
+  assert.doesNotMatch(prompt, /^RED:/m);
+  // The Input contract is pinned by another test; the orchestrator keeps it.
+  assert.match(prompt, /- tasks: \{INPUT\}/);
+});
+
 test("parseSpecArgs reads dc:especificar-style fields", () => {
   const fields = parseSpecArgs("Type: COMMAND Feature: usuario/CrearUsuario Domain: usuario Requirement: allow users to register with email and password Context: @docs/auth.md");
   assert.equal(fields.type, "COMMAND");
