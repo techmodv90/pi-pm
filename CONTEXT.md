@@ -73,3 +73,7 @@ Capability callers gain per unit of Interface they must learn.
 
 **Locality**:
 The concentration of change, bugs, knowledge, and verification behind one Interface.
+
+**APM**:
+Agent Project Management — the product name for this Work Item planning and delivery system (formerly task-system).
+_Avoid_: task-system, "the task system"

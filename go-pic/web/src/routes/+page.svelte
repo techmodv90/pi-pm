@@ -1,5 +1,5 @@
 <svelte:head>
-  <title>pic task-system dashboard</title>
+  <title>APM dashboard</title>
 </svelte:head>
 
 <div id="welcome-view" class="view">

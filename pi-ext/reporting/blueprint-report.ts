@@ -59,6 +59,11 @@ export function parseBlueprintReportJson(content: string): BlueprintReport {
     // degrading the artifact to legacy v2 and dropping its v2.1 sections.
     if (r.schema_version !== undefined && r.schema_version !== 2.1) throw new Error(`Blueprint policy v2.1 schema_version must be the numeric marker 2.1, got ${JSON.stringify(r.schema_version)}`);
     if (isV21(r)) {
+      // REQ-7 shape commitment: retired planning sections (user stories, a
+      // testing section) must not ride along on a v2.1 solution spec, while
+      // legacy v1/v2 tolerance for unknown top-level keys is preserved.
+      const forbidden = ["user_stories", "testing"] as const;
+      for (const name of forbidden) if (name in r) throw new Error(`Blueprint policy v2.1 forbids the retired ${name} section`);
       // Required v2.1 section presence: a 2.1-marked artifact must carry every
       // v2.1 section in shape, with implementation_decisions non-empty.
       if (!Array.isArray(r.implementation_decisions) || !r.implementation_decisions.length) throw new Error("Blueprint policy v2.1 implementation_decisions must be a non-empty array");
