@@ -95,28 +95,28 @@ Feature: Artifact Markdown File Storage
     When the Work Item detail view is opened in the dashboard
     Then each artifact entry shows its file_path
 
-  # === SUCCESS CRITERIA ===
-  # UX: every saved artifact is readable as valid markdown at a deterministic
-  #     file_path under its Work Item directory, with no dashboard or SQL access
-  # Performance: file projection adds < 50ms at p95 to an artifact save
-  # Reliability: every work_item_artifacts row is bound to an artifact_files
-  #     row whose file bytes hash to content_sha256, except rows whose
-  #     projection failed (each recorded as a warning event and recoverable
-  #     via backfill); a failed projection leaves the canonical row intact and
-  #     zero mutated existing files
-  # Business: the owner can review and archive any artifact from disk alone
+# === SUCCESS CRITERIA ===
+# UX: every saved artifact is readable as valid markdown at a deterministic
+#     file_path under its Work Item directory, with no dashboard or SQL access
+# Performance: file projection adds < 50ms at p95 to an artifact save
+# Reliability: every work_item_artifacts row is bound to an artifact_files
+#     row whose file bytes hash to content_sha256, except rows whose
+#     projection failed (each recorded as a warning event and recoverable
+#     via backfill); a failed projection leaves the canonical row intact and
+#     zero mutated existing files
+# Business: the owner can review and archive any artifact from disk alone
 
-  # === NEEDS CLARIFICATION ===
-  # 1. RESOLVED (NC-1): scope → all planning stages of work_item_artifacts;
-  #    execution reports out of scope. Answer recorded under the P1 save
-  #    scenario.
-  # 2. RESOLVED (NC-2): failure semantics → best-effort mirror, warning event,
-  #    canonical save kept. P1 sad path rewritten accordingly.
-  # 3. RESOLVED (NC-3): write timing → project on every save.
-  # 4. RESOLVED (NC-4): path → <project>/.apm/artifacts/<work_item>/
-  #    <stage>-r<revision>.md; existing .pi/artifacts/plans/ render untouched.
-  # 5. RESOLVED (NC-5): surface → projection inside artifact-save.
-  # 6. RESOLVED (NC-6): Type → COMMAND; `# Type: COMMAND` added to the file header.
-  # 7. RESOLVED (NC-7): drift-check trigger → hash comparison, on demand; no
-  #    scheduler or verify-flow integration (interpretation recorded under the
-  #    drift scenario — owner to review).
+# === NEEDS CLARIFICATION ===
+# 1. RESOLVED (NC-1): scope → all planning stages of work_item_artifacts;
+#    execution reports out of scope. Answer recorded under the P1 save
+#    scenario.
+# 2. RESOLVED (NC-2): failure semantics → best-effort mirror, warning event,
+#    canonical save kept. P1 sad path rewritten accordingly.
+# 3. RESOLVED (NC-3): write timing → project on every save.
+# 4. RESOLVED (NC-4): path → <project>/.apm/artifacts/<work_item>/
+#    <stage>-r<revision>.md; existing .pi/artifacts/plans/ render untouched.
+# 5. RESOLVED (NC-5): surface → projection inside artifact-save.
+# 6. RESOLVED (NC-6): Type → COMMAND; `# Type: COMMAND` added to the file header.
+# 7. RESOLVED (NC-7): drift-check trigger → hash comparison, on demand; no
+#    scheduler or verify-flow integration (interpretation recorded under the
+#    drift scenario — owner to review).

@@ -194,6 +194,8 @@ Feature: SampleFeature
     When alpha runs
     Then it works
 
+  ## Priority P1: Critical Path
+
   @P1 @US2
   Scenario: Alpha fails cleanly
     Given broken alpha
@@ -211,6 +213,9 @@ Feature: SampleFeature
     Given gamma
     When gamma runs
     Then it polishes
+
+# === SUCCESS CRITERIA ===
+# UX: everything works
 `
 
 func writeApmProject(t *testing.T) (bin string, root string, home string) {
@@ -755,6 +760,17 @@ func TestApmImportGherkinEmbed(t *testing.T) {
 				if !strings.Contains(desc, want) {
 					t.Fatalf("US1 task description missing %q: %s", want, desc)
 				}
+			}
+			if strings.Contains(desc, "## Priority") {
+				t.Fatalf("US1 scenario body leaked a section heading: %s", desc)
+			}
+			if strings.Contains(desc, "SUCCESS CRITERIA") {
+				t.Fatalf("scenario body leaked trailing footer blocks: %s", desc)
+			}
+		}
+		if strings.Contains(title, "GREEN: Implement gamma") {
+			if strings.Contains(desc, "SUCCESS CRITERIA") {
+				t.Fatalf("last scenario body leaked trailing footer blocks: %s", desc)
 			}
 		}
 		if strings.Contains(title, "Setup: Create test helpers") && strings.Contains(desc, "Behavior context") {

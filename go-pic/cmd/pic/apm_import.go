@@ -307,13 +307,21 @@ func parseApmScenarios(featureMD string) []apmScenario {
 	var out []apmScenario
 	for n, start := range idxs {
 		end := len(lines)
+		limit := end
 		if n+1 < len(idxs) {
-			// A scenario ends where the next scenario's tag block begins.
-			for e := start + 1; e < idxs[n+1]; e++ {
-				if strings.HasPrefix(strings.TrimSpace(lines[e]), "@") {
-					end = e
-					break
-				}
+			limit = idxs[n+1]
+		}
+		// A scenario ends where the next scenario's tag block begins or at a
+		// Gherkin section heading / column-0 footer comment, whichever comes first.
+		for e := start + 1; e < limit; e++ {
+			t := strings.TrimSpace(lines[e])
+			// Scenario bodies span indented steps and indented comments only:
+			// section headings, tag blocks, and column-0 comment footers
+			// (e.g. "# === SUCCESS CRITERIA ===") all end the body.
+			if strings.HasPrefix(t, "@") || strings.HasPrefix(t, "## ") ||
+				(strings.HasPrefix(t, "#") && !strings.HasPrefix(lines[e], " ")) {
+				end = e
+				break
 			}
 		}
 		body := strings.TrimRight(strings.Join(lines[start:end], "\n"), "\n \t")
