@@ -44,6 +44,10 @@ type apmDoc struct {
 	TierHeaders map[string]string // "P1" -> "P1: Critical Path" (verbatim header text)
 	Tasks       []apmTask
 	Order       []apmOrderLine
+	// Scenarios maps US id -> verbatim Gherkin scenario block (tagged @US<n>)
+	// parsed from the companion .feature; embedded into task descriptions as
+	// the behavioral context pillar.
+	Scenarios map[string]string
 	// NyquistSection carries the verbatim "## Nyquist Mapping" markdown body
 	// (through "## Nyquist Result") so the epic description attests the
 	// requirement-to-verification mapping from the single approved artifact.
@@ -264,6 +268,89 @@ func scenarioUSPresent(doc *apmDoc, us string) bool {
 	return false
 }
 
+type apmScenario struct {
+	US   string
+	Body string
+}
+
+// parseApmScenarios extracts verbatim Gherkin scenario blocks from a .feature
+// keyed by the @US<n> tag directly above the Scenario: line (authoring rule:
+// every Scenario carries exactly one @US tag).
+func parseApmScenarios(featureMD string) []apmScenario {
+	lines := strings.Split(featureMD, "\n")
+	starts := map[int]string{}
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "Scenario:") {
+			continue
+		}
+		us := ""
+		for j := i - 1; j >= 0; j-- {
+			tag := strings.TrimSpace(lines[j])
+			if !strings.HasPrefix(tag, "@") {
+				break
+			}
+			for _, field := range strings.Fields(tag) {
+				if strings.HasPrefix(field, "@US") {
+					us = strings.TrimPrefix(field, "@")
+				}
+			}
+			j--
+		}
+		starts[i] = us
+	}
+	idxs := make([]int, 0, len(starts))
+	for i := range starts {
+		idxs = append(idxs, i)
+	}
+	sort.Ints(idxs)
+	var out []apmScenario
+	for n, start := range idxs {
+		end := len(lines)
+		if n+1 < len(idxs) {
+			// A scenario ends where the next scenario's tag block begins.
+			for e := start + 1; e < idxs[n+1]; e++ {
+				if strings.HasPrefix(strings.TrimSpace(lines[e]), "@") {
+					end = e
+					break
+				}
+			}
+		}
+		body := strings.TrimRight(strings.Join(lines[start:end], "\n"), "\n \t")
+		out = append(out, apmScenario{US: starts[start], Body: body})
+	}
+	return out
+}
+
+// validateApmScenarios is the fail-closed pillar-4 gate: every scenario in
+// the .feature must carry exactly one @US tag, and every Scenario Map US must
+// have exactly one tagged scenario.
+func validateApmScenarios(doc *apmDoc, featureMD string) []string {
+	var diffs []string
+	byUS := map[string]string{}
+	for _, s := range parseApmScenarios(featureMD) {
+		title := s.Body
+		if idx := strings.IndexByte(title, '\n'); idx >= 0 {
+			title = title[:idx]
+		}
+		if s.US == "" {
+			diffs = append(diffs, fmt.Sprintf("scenario %q is missing a @US tag", strings.TrimSpace(title)))
+			continue
+		}
+		if prev, dup := byUS[s.US]; dup {
+			diffs = append(diffs, fmt.Sprintf("%s maps to multiple scenarios: %q and %q", s.US, prev, strings.TrimSpace(title)))
+			continue
+		}
+		byUS[s.US] = title
+	}
+	for _, us := range doc.ScenarioUS {
+		if _, ok := byUS[us]; !ok {
+			diffs = append(diffs, fmt.Sprintf("Scenario Map %s has no @%s-tagged scenario in the .feature", us, us))
+		}
+	}
+	return diffs
+}
+
 // apmFeature / apmGraph are the dry-run JSON shapes and the creation input.
 // Phase 5 tasks never become Work Items: their commands live on the epic
 // description and are executed by aggregate verification.
@@ -288,6 +375,7 @@ type apmTaskGraph struct {
 	Feature    string   `json:"feature"`
 	Verbatim   string   `json:"description"`
 	Acceptance string   `json:"acceptance"`
+	US         string   `json:"us,omitempty"`
 	DependsOn  []string `json:"depends_on"`
 }
 
@@ -359,6 +447,7 @@ func buildApmGraph(doc *apmDoc, milestone string) *apmGraph {
 			Feature:    featureOf[t.TID],
 			Verbatim:   t.Verbatim,
 			Acceptance: t.Acceptance,
+			US:         t.US,
 			DependsOn:  predecessors(t.TID),
 		})
 	}
@@ -447,6 +536,15 @@ func cmdWorkflowImportApm(db *sql.DB, args []string) error {
 			}
 			if !strings.Contains(string(specBytes), "Status: @ready") {
 				return apmImportError(fmt.Errorf("companion spec %s is not @ready", specPath), nil)
+			}
+			doc.Scenarios = map[string]string{}
+			for _, s := range parseApmScenarios(string(specBytes)) {
+				if s.US != "" {
+					doc.Scenarios[s.US] = s.Body
+				}
+			}
+			if diffs := validateApmScenarios(doc, string(specBytes)); len(diffs) > 0 {
+				return apmImportError(fmt.Errorf("Scenario Map is inconsistent with the .feature"), diffs)
 			}
 		}
 	}
@@ -547,6 +645,11 @@ func createApmWorkItems(db *sql.DB, doc *apmDoc, graph *apmGraph, importLabel st
 		id := "wi-" + shortID()
 		taskIDs[t.TID] = id
 		desc := t.Verbatim + "\n\nAcceptance criteria:\n" + t.Acceptance
+		for _, us := range strings.Fields(t.US) {
+			if body, ok := doc.Scenarios[us]; ok {
+				desc += "\n\nBehavior context (" + us + "):\n" + body
+			}
+		}
 		if _, err := tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority,deferred,planning_depth) VALUES(?,'task',?,?,?,'medium',0,'full')`, id, featureIDs[t.Feature], taskTitle(t.Verbatim), desc); err != nil {
 			return "", fmt.Errorf("insert task %s: %w", t.TID, err)
 		}

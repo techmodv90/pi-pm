@@ -18,7 +18,7 @@ Feature: Artifact Markdown File Storage
 
   ## Priority P1: Critical Path (Must Have)
 
-  @P1
+  @P1 @US1
   Scenario: Saving an artifact stores its content as a markdown file
     Given Work Item "wi-abc123" exists
     And no artifact exists for work_item_id "wi-abc123", stage "rri", revision 1
@@ -38,7 +38,7 @@ Feature: Artifact Markdown File Storage
     # Clarified (NC-5): surface → projection inside artifact-save, not a
     #   pic markdown --out extension
 
-  @P1
+  @P1 @US2
   Scenario: Best-effort projection keeps the canonical save on file-write failure
     Given Work Item "wi-abc123" exists
     And the directory "<project>/.apm/artifacts" is not writable
@@ -52,14 +52,14 @@ Feature: Artifact Markdown File Storage
 
   ## Priority P2: Important (Should Have)
 
-  @P2
+  @P2 @US3
   Scenario: New revision creates a new file and never rewrites prior files
     Given Work Item "wi-abc123" has an approved artifact at stage "blueprint", revision 1 with file "<project>/.apm/artifacts/wi-abc123/blueprint-r1.md"
     When an artifact is saved with work_item_id "wi-abc123", stage "blueprint", revision 2, and revised content
     Then a markdown file exists at file_path "<project>/.apm/artifacts/wi-abc123/blueprint-r2.md"
     And the bytes of "<project>/.apm/artifacts/wi-abc123/blueprint-r1.md" are unchanged
 
-  @P2
+  @P2 @US4
   Scenario: Existing file with conflicting bytes blocks the save
     Given Work Item "wi-abc123" exists
     And a file already exists at file_path "<project>/.apm/artifacts/wi-abc123/contracts-r1.md" with bytes that differ from the artifact content
@@ -69,7 +69,7 @@ Feature: Artifact Markdown File Storage
     And the error message indicates "artifact file conflict"
     And the bytes at file_path "<project>/.apm/artifacts/wi-abc123/contracts-r1.md" are unchanged
 
-  @P2
+  @P2 @US5
   Scenario: File drift from the canonical content is detectable
     Given Work Item "wi-abc123" has an artifact at stage "scan", revision 1 with a bound artifact_files row
     And the bytes at that row's file_path no longer hash to content_sha256
@@ -82,14 +82,14 @@ Feature: Artifact Markdown File Storage
 
   ## Priority P3+: Desirable (Nice to Have)
 
-  @P3
+  @P3 @US6
   Scenario: Backfill files for artifacts saved before the projection existed
     Given Work Item "wi-abc123" has artifact rows with no bound artifact_files rows
     When a file backfill is run for work_item_id "wi-abc123"
     Then a markdown file exists for every artifact row with content equal to its stored content
     And every artifact row is bound to an artifact_files row with content_sha256 equal to content_hash
 
-  @P3
+  @P3 @US7
   Scenario: Dashboard links each artifact to its file
     Given Work Item "wi-abc123" has artifacts with bound file_path values
     When the Work Item detail view is opened in the dashboard

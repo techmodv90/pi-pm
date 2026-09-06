@@ -223,6 +223,10 @@ This command implements the **task-preparation gate**:
 - Every P1/P2/P3 scenario tier from the `.feature` appears in Phase 3
 - Every `.feature` scenario appears in the Scenario Map, and at least one
   implementation task references each scenario's US id
+- Every `.feature` Scenario carries an `@US<n>` tag above the `Scenario:`
+  line (combined with the `@P` tag, e.g. `@P1 @US1`); the importer embeds
+  the tagged scenario into task descriptions and aborts on untagged or
+  unmatched scenarios
 - Parallelism markers respect the same-phase-only rule and the blueprint's
   architecture
 - Complexity: tasks never add behavior the plan's Complexity Tracking did not

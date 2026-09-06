@@ -188,25 +188,25 @@ Feature: SampleFeature
   I want alpha beta gamma
   So that demo works
 
-  @P1
+  @P1 @US1
   Scenario: Alpha works
     Given alpha
     When alpha runs
     Then it works
 
-  @P1
+  @P1 @US2
   Scenario: Alpha fails cleanly
     Given broken alpha
     When alpha runs
     Then it fails cleanly
 
-  @P2
+  @P2 @US3
   Scenario: Beta controls
     Given beta
     When beta runs
     Then it controls
 
-  @P3
+  @P3 @US4
   Scenario: Gamma polish
     Given gamma
     When gamma runs
@@ -725,4 +725,69 @@ func altLabel(labels []any) string {
 		}
 	}
 	return ""
+}
+
+func TestApmImportGherkinEmbed(t *testing.T) {
+	// Pillar 4: every US-tagged task carries its verbatim Gherkin scenario
+	// from the companion .feature; untagged tasks carry none.
+	bin, root, home := writeApmProject(t)
+	out := runPic(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0")
+	_ = out
+	db, err := sql.Open("sqlite", filepath.Join(root, ".pi", "tasks.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT title,description FROM work_items WHERE type='task'`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	found := 0
+	for rows.Next() {
+		var title, desc string
+		if err := rows.Scan(&title, &desc); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(title, "alpha happy-path") {
+			found++
+			for _, want := range []string{"Behavior context (US1)", "Scenario: Alpha works", "Given alpha", "Then it works"} {
+				if !strings.Contains(desc, want) {
+					t.Fatalf("US1 task description missing %q: %s", want, desc)
+				}
+			}
+		}
+		if strings.Contains(title, "Setup: Create test helpers") && strings.Contains(desc, "Behavior context") {
+			t.Fatalf("untagged setup task carries scenario context: %s", desc)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if found != 1 {
+		t.Fatalf("expected exactly 1 alpha happy-path task, got %d", found)
+	}
+}
+
+func TestApmImportRuleDScenarioGaps(t *testing.T) {
+	// Fail closed: a scenario missing its @US tag, or a Scenario Map US with
+	// no tagged scenario, aborts the import.
+	cases := map[string]string{
+		"untagged scenario":   "  @P1\n  Scenario: Alpha works",
+		"missing US2 mapping": "  @P1\n  Scenario: Alpha fails cleanly",
+	}
+	for name, replacement := range cases {
+		t.Run(name, func(t *testing.T) {
+			feat := strings.Replace(companionFeatureMD, "  @P1 @US1\n  Scenario: Alpha works", replacement, 1)
+			bin, root, home := writeApmProjectWithTasks(t, validTasksMD)
+			featPath := filepath.Join(root, ".apm", "specs", "demo", "SampleFeature.feature")
+			if err := os.WriteFile(featPath, []byte(feat), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			out := runPicError(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0")
+			if !strings.Contains(out, "Execution Order block is inconsistent") && !strings.Contains(out, "scenario") && !strings.Contains(out, "Scenario") {
+				t.Fatalf("expected scenario gap abort, got: %s", out)
+			}
+		})
+	}
 }
