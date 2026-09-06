@@ -1,0 +1,18 @@
+{
+  "versions": [
+    {
+      "file": "prd-v1.0.md",
+      "version": "1.0",
+      "date": "2026-09-04",
+      "status": "draft",
+      "change": "Initial PRD generated from repository evidence; no external sources"
+    },
+    {
+      "file": "prd-v1.0.md",
+      "version": "1.1",
+      "date": "2026-09-05",
+      "status": "draft",
+      "change": "Format normalization only, no content changes: YAML frontmatter, template-aligned subsection structure, file renamed apm-v1.0.md → prd-v1.0.md, prd-history.json sidecar added"
+    }
+  ]
+}

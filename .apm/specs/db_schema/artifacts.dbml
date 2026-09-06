@@ -1,0 +1,36 @@
+// .apm/specs/db_schema/artifacts.dbml
+// Ratified by /apm tech-plan 2026-09-05
+//
+// Reference: canonical table `work_item_artifacts` already exists in code
+// (go-pic/cmd/pic/workflow_schema.go). It is shown here unchanged as the
+// binding reference for scenario field names; it is NOT new scope of this
+// spec. The new projection table `artifact_files` is ratified.
+
+Table work_item_artifacts {
+  id text [pk]
+  work_item_id text [not null]
+  stage text [not null] // scan | rri | rri_t_scenarios | vision | blueprint | contracts | task_graph
+  revision integer [not null]
+  content text [not null]
+  content_hash text [not null]
+  created_at text [default: `datetime('now')`]
+
+  indexes {
+    (work_item_id, stage, revision) [unique]
+  }
+}
+
+Table artifact_files {
+  id text [pk]
+  artifact_id text [not null, unique] // 1:1 with an immutable artifact row
+  work_item_id text [not null]
+  stage text [not null]
+  revision integer [not null]
+  file_path text [not null, unique] // deterministic: <project>/.apm/artifacts/<work_item>/<stage>-r<revision>.md (NC-4)
+  content_sha256 text [not null]    // equals work_item_artifacts.content_hash for the bound artifact
+  created_at timestamp [not null, default: `now()`]
+
+  indexes {
+    (work_item_id, stage, revision) [unique]
+  }
+}

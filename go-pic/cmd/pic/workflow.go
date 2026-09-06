@@ -82,6 +82,8 @@ func cmdWorkflow(args []string) error {
 		return workflowProfileList(db, rest)
 	case "profile-promotion-evaluate":
 		return workflowProfilePromotionEvaluate(db, rest)
+	case "import-apm":
+		return cmdWorkflowImportApm(db, rest)
 	default:
 		return fmt.Errorf("unknown workflow subcommand: %s", args[0])
 	}
