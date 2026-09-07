@@ -778,6 +778,34 @@ func loadWorkItemExecutionState(db databaseQueryer, id string) (workItemExecutio
 	var packHash string
 	err := db.QueryRow(`SELECT id,version,content_hash FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, id).Scan(&state.PackID, &packVersion, &packHash)
 	if errors.Is(err, sql.ErrNoRows) {
+		// Lean path: no pack — execution state tracks pack-free runs so the
+		// scheduler advances worker → review → close on the description-verbatim
+		// contract (mirrors the legacy state machine without pack bindings).
+		var leanCandidate string
+		_ = db.QueryRow(`SELECT id FROM pipeline_runs WHERE task_id=? AND stage IN ('worker','autofix') AND status='completed' AND instruction_pack_id='' AND artifact_saved_at<>'' AND integrated_patch_hash<>'' ORDER BY rowid DESC LIMIT 1`, id).Scan(&leanCandidate)
+		if leanCandidate == "" {
+			return state, nil
+		}
+		state.CandidateID = leanCandidate
+		state.NextStage = "review"
+		state.PipelineStage = "review"
+		var leanReviewStatus string
+		var leanOwnerApproval int
+		_ = db.QueryRow(`SELECT COALESCE(json_extract(result_json,'$.review_status'),''),COALESCE(json_extract(result_json,'$.owner_approval_required'),0) FROM pipeline_runs WHERE task_id=? AND stage='review' AND status='completed' AND instruction_pack_id='' AND candidate_run_id=? AND json_valid(result_json) AND json_extract(result_json,'$.candidate_patch_hash')=(SELECT integrated_patch_hash FROM pipeline_runs WHERE id=?) ORDER BY rowid DESC LIMIT 1`, id, leanCandidate, leanCandidate).Scan(&leanReviewStatus, &leanOwnerApproval)
+		state.ReviewStatus = leanReviewStatus
+		state.OwnerApprovalRequired = leanOwnerApproval != 0
+		if state.ReviewStatus == "failed" {
+			if state.OwnerApprovalRequired {
+				state.NextStage = "owner_approval"
+				state.PipelineStage = ""
+			} else {
+				state.NextStage = "implement"
+				state.PipelineStage = "worker"
+			}
+		} else if state.ReviewStatus == "passed" {
+			state.NextStage = "contractor_verification"
+			state.PipelineStage = ""
+		}
 		return state, nil
 	}
 	if err != nil {
