@@ -472,6 +472,20 @@ func TestNativeWorkItemGenericShowUsesCanonicalShape(t *testing.T) {
 			t.Fatalf("generic show field %s = %#v", field, shown[field])
 		}
 	}
+	// Dashboard read seam: the web dashboard renders the Artifact Revisions
+	// table from this same detail payload, so staged revisions must surface
+	// with stage/revision/content_hash and latest-revision-first ordering.
+	runPic(t, bin, root, home, "work-item", "artifact-save", created["id"].(string), "scan", "scan content")
+	revised := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", created["id"].(string), "scan", "revised scan content"))
+	shown = asObject(t, runPic(t, bin, root, home, "show", created["id"].(string)))
+	artifacts := shown["artifacts"].([]any)
+	if len(artifacts) != 2 {
+		t.Fatalf("detail artifacts = %#v", artifacts)
+	}
+	latest := asObject(t, artifacts[0])
+	if latest["id"] != revised["id"] || latest["stage"] != "scan" || latest["revision"] != float64(2) || latest["content_hash"] != revised["content_hash"] {
+		t.Fatalf("latest artifact revision = %#v", latest)
+	}
 }
 
 func TestWorkItemReadinessAndClaim(t *testing.T) {
