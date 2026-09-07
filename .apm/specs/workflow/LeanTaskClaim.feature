@@ -1,6 +1,9 @@
 # Feature: Lean Task Claim
-
+# Status: @ready
 # Type: COMMAND
+
+@ready
+Feature: LeanTaskClaim
 
 # === USER STORIES / SCENARIOS ===
 
