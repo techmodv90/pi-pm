@@ -5460,6 +5460,49 @@ func TestArtifactFilesSchemaMigration(t *testing.T) {
 		}
 	})
 
+	// Normal upgrade path: a pre-v10 database (versions 1-9 recorded, intact
+	// ledger, no artifact_files table) must gain artifact_files from the
+	// ordered migration without any ledger deletion or replay trickery.
+	t.Run("pre-v10-database-upgrade", func(t *testing.T) {
+		dbPath := filepath.Join(t.TempDir(), "tasks.db")
+		db, err := openSQLite(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(`CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')));
+			` + workItemsTableSQL + `;
+			` + workItemArtifactsTableSQL + `;
+			INSERT INTO schema_migrations(version,name) VALUES(1,'pre_reconcile_schema'),(2,'artifact_stage_widening'),(3,'pipeline_columns_reconcile'),(4,'canonical_baseline'),(6,'canonical_backfills'),(8,'decomposition_policy_projection'),(9,'blueprint_annotation_evidence')`); err != nil {
+			t.Fatal(err)
+		}
+		db.Close()
+		if err := initDB(dbPath); err != nil {
+			t.Fatalf("pre-v10 database failed to upgrade: %v", err)
+		}
+		db, err = openSQLite(dbPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer db.Close()
+		var tableCount int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='artifact_files'`).Scan(&tableCount); err != nil {
+			t.Fatal(err)
+		}
+		if tableCount != 1 {
+			t.Fatal("artifact_files table missing after pre-v10 upgrade")
+		}
+		var v10 int
+		if err := db.QueryRow(`SELECT COUNT(*) FROM schema_migrations WHERE version=10 AND name='artifact_files_table'`).Scan(&v10); err != nil || v10 != 1 {
+			t.Fatalf("migration 10 recorded=%d err=%v", v10, err)
+		}
+		// Second open against the same upgraded database: the recorded version
+		// must skip the step with no duplicate-table or duplicate-column error.
+		db.Close()
+		if err := initDB(dbPath); err != nil {
+			t.Fatalf("second initDB on upgraded database: %v", err)
+		}
+	})
+
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	if err := initDB(dbPath); err != nil {
 		t.Fatal(err)

@@ -52,6 +52,17 @@ const workItemsTableSQL = `CREATE TABLE IF NOT EXISTS work_items (
 // stage names and their gating behavior stay unchanged.
 const workItemArtifactsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_artifacts (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','rri_t_scenarios','vision','blueprint','contracts','task_graph')), revision INTEGER NOT NULL CHECK(revision>0), content TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,revision))`
 
+// artifact_files binding table (.apm/specs/db_schema/artifacts.dbml): maps each
+// emitted artifact to its on-disk files without touching the immutable
+// work_item_artifacts rows. Every file binding references the canonical
+// artifact and its work item with ON DELETE CASCADE, so deleting an artifact
+// (or work item) removes its file bindings and the artifact rows themselves
+// stay immutable behind the existing immutable-history triggers. The unique
+// bindings mirror the artifact uniqueness: one path per artifact, one artifact
+// per path, and (work_item_id,stage,revision) matching
+// work_item_artifacts' UNIQUE constraint.
+const artifactFilesTableSQL = `CREATE TABLE IF NOT EXISTS artifact_files (id TEXT PRIMARY KEY, artifact_id TEXT NOT NULL REFERENCES work_item_artifacts(id) ON DELETE CASCADE, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL, revision INTEGER NOT NULL, file_path TEXT NOT NULL, content_sha256 TEXT NOT NULL, created_at TIMESTAMP NOT NULL DEFAULT (datetime('now')), UNIQUE(artifact_id), UNIQUE(file_path), UNIQUE(work_item_id,stage,revision))`
+
 // Blueprint disposition evidence constraint (OB-F3-3): the approved Blueprint
 // checkpoint carries the terminal annotation dispositions as durable approval
 // evidence, so the record survives runtime draft and plan cleanup and stays
