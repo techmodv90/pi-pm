@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -168,5 +169,88 @@ func TestLeanClaimEndToEnd(t *testing.T) {
 	}
 	if claimEvents != 1 {
 		t.Fatalf("activity log claimed events = %d, want 1", claimEvents)
+	}
+}
+
+// leanWorkerRunEvidence marks a claimed lean worker run completed and
+// integrated, mirroring the canonical evidence fixture without pack columns.
+func leanWorkerRunEvidence(t *testing.T, dbPath, runID string) {
+	t.Helper()
+	runSQLite(t, dbPath, `UPDATE pipeline_runs SET status='completed',artifact_saved_at=datetime('now'),integrated_patch_path='lean.patch',integrated_patch_hash='lean-hash',integrated_at=datetime('now'),completed_at=datetime('now') WHERE id='`+runID+`';`)
+}
+
+func TestLeanClaimCompletion(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Lean task"))
+	id := item["id"].(string)
+	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
+	runID := claim["id"].(string)
+	leanWorkerRunEvidence(t, dbPath, runID)
+
+	completed := asObject(t, runPic(t, bin, root, home, "work-item", "completion-save", id, "done", "--pipeline-run-id", runID, "--summary", "lean done"))
+	if completed["id"] != runID {
+		t.Fatalf("lean completion output = %#v", completed["id"])
+	}
+
+	db := openSQLiteGo(t, dbPath)
+	var status string
+	if err := db.QueryRow(`SELECT status FROM work_items WHERE id=?`, id).Scan(&status); err != nil || status != "done" {
+		t.Fatalf("lean completion status=%q err=%v", status, err)
+	}
+	var events, reports int
+	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='completed'),(SELECT COUNT(*) FROM work_item_completion_reports WHERE work_item_id=?)`, id, id).Scan(&events, &reports); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 || reports != 0 {
+		t.Fatalf("lean completion events=%d reports=%d, want 1/0", events, reports)
+	}
+}
+
+func TestLeanClaimReviewVerification(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Lean task"))
+	id := item["id"].(string)
+	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
+	runID := claim["id"].(string)
+	leanWorkerRunEvidence(t, dbPath, runID)
+
+	// Review claim (lean) on the completed candidate, then a failed verdict.
+	reviewClaim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "review"))
+	reviewRunID := reviewClaim["id"].(string)
+	reviewClaim["id"] = reviewRunID
+	runSQLite(t, dbPath, `UPDATE pipeline_runs SET status='completed',result_json='{"review_status":"failed","candidate_run_id":"`+runID+`","candidate_patch_hash":"lean-hash"}',completed_at=datetime('now') WHERE id='`+reviewRunID+`';`)
+	asObject(t, runPic(t, bin, root, home, "work-item", "review", id, "failed", "--notes", "needs work", "--pipeline-run-id", reviewRunID))
+
+	// A failed review routes a fix attempt without pack-hash cycle caps.
+	fixClaim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker", "--review-fix", "1"))
+	if fixClaim["candidate_run_id"] != runID {
+		t.Fatalf("lean review-fix must bind the rejected candidate: %#v", fixClaim["candidate_run_id"])
+	}
+
+	// Pass the review, complete, and verify: records reference task+run without
+	// pack columns.
+	runSQLite(t, dbPath, `UPDATE pipeline_runs SET result_json='{"review_status":"passed","candidate_run_id":"`+runID+`","candidate_patch_hash":"lean-hash"}' WHERE id='`+reviewRunID+`';`)
+	asObject(t, runPic(t, bin, root, home, "work-item", "review", id, "passed", "--notes", "accepted", "--pipeline-run-id", reviewRunID))
+	asObject(t, runPic(t, bin, root, home, "work-item", "completion-save", id, "done", "--pipeline-run-id", runID, "--summary", "lean done"))
+	verified := asObject(t, runPic(t, bin, root, home, "work-item", "verification-save", id, reviewRunID, "passed", "lean checks passed", "--actor-role", "contractor"))
+
+	db := openSQLiteGo(t, dbPath)
+	var status string
+	if err := db.QueryRow(`SELECT status FROM work_items WHERE id=?`, id).Scan(&status); err != nil || status != "done" {
+		t.Fatalf("post-verification status=%q err=%v", status, err)
+	}
+	var crID string
+	if err := db.QueryRow(`SELECT COALESCE(completion_report_id,'') FROM work_item_verification_reports WHERE id=?`, verified["id"].(string)).Scan(&crID); err != nil {
+		t.Fatal(err)
+	}
+	if crID != "" {
+		t.Fatalf("lean verification must not reference a completion report: %q", crID)
+	}
+	if !strings.Contains(verified["summary"].(string), reviewRunID) {
+		t.Fatalf("lean verification must reference the run: %#v", verified["summary"])
 	}
 }
