@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -84,6 +85,84 @@ func initArtifactFileProject(t *testing.T, bin string) (root string, home string
 func saveArtifact(t *testing.T, bin string, root string, home string, id string, stage string, content string) map[string]any {
 	t.Helper()
 	return asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, stage, content))
+}
+
+// TestArtifactSaveProjectsAllPlanningStages is the RED end-to-end test for
+// artifact markdown projection (Plan §3.1, R01+R02, NC-1/NC-3/NC-4): every
+// planning-stage save must project the exact content bytes onto the
+// deterministic path <project>/.apm/artifacts/<work_item>/<stage>-r<revision>.md
+// and record an artifact_files binding row, in addition to returning file_path
+// in the save response. The save integration (T009) does not exist yet, so the
+// first missing file or binding row fails.
+func TestArtifactSaveProjectsAllPlanningStages(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Projection Epic"))
+	id := epic["id"].(string)
+
+	scenarios := `{"methodology":"rri-t","personas":["End User"],"scenarios":[{"id":"SC-1","persona":"End User","dimension":"D1","stress_axis":"TIME","requirement_id":"REQ-001","procedure":"Run the helper flow","evidence":"go test ./...","result":"PASS"}]}`
+	graph := `{"version":3,"execution_policy":"strict_sequential","nodes":[{"key":"F01","type":"feature","name":"Area","requirement_keys":[],"depends_on":[]}]}`
+	contents := map[string]string{
+		"scan":            "scan content",
+		"rri":             "# RRI Report\n\nRequirement matrix follows.",
+		"rri_t_scenarios": scenarios,
+		"vision":          validVisionArtifact,
+		"blueprint":       validBlueprintArtifact,
+		"contracts":       validContractArtifact,
+		"task_graph":      graph,
+	}
+
+	db := openArtifactProjectDB(t, root)
+	// Gated stages keep their canonical pre-flight: blueprint approval is
+	// required before contracts save, so approvals mirror the planning flow.
+	for _, stage := range workItemStages {
+		content := contents[stage]
+		artifact := saveArtifact(t, bin, root, home, id, stage, content)
+		if artifact["revision"] != float64(1) {
+			t.Fatalf("%s artifact = %#v", stage, artifact)
+		}
+		wantHash := hashJSON(content)
+		if artifact["content_hash"] != wantHash {
+			t.Fatalf("%s content_hash = %v, want %s", stage, artifact["content_hash"], wantHash)
+		}
+		_, rowContent, contentHash := artifactFileRow(t, db, id, stage)
+		if rowContent != content || contentHash != wantHash {
+			t.Fatalf("%s artifact row content/hash = %q/%q, want hash %s", stage, rowContent, contentHash, wantHash)
+		}
+		// NC-4: deterministic projection path per stage and revision.
+		wantPath := filepath.Join(root, ".apm", "artifacts", id, fmt.Sprintf("%s-r%d.md", stage, 1))
+		got, err := os.ReadFile(wantPath)
+		if err != nil {
+			t.Fatalf("%s projected markdown missing at %s: %v", stage, wantPath, err)
+		}
+		if string(got) != content {
+			t.Fatalf("%s projected bytes = %q, want exact content %q", stage, got, content)
+		}
+		// Binding row: artifact_id -> file_path with content_sha256 equal to the
+		// canonical content_hash (artifacts.dbml artifact_files table).
+		var bindArtifactID, bindWorkItemID, bindStage, bindPath, bindSHA string
+		var bindRevision int
+		if err := db.QueryRow(`SELECT artifact_id,work_item_id,stage,revision,file_path,content_sha256 FROM artifact_files WHERE work_item_id=? AND stage=?`, id, stage).Scan(&bindArtifactID, &bindWorkItemID, &bindStage, &bindRevision, &bindPath, &bindSHA); err != nil {
+			t.Fatalf("%s artifact_files binding row: %v", stage, err)
+		}
+		if bindArtifactID != artifact["id"] || bindWorkItemID != id || bindStage != stage || bindRevision != 1 || bindPath != wantPath || bindSHA != wantHash {
+			t.Fatalf("%s artifact_files binding = %s/%s/%s/%d path %q sha %q, want artifact %v path %s sha %s", stage, bindArtifactID, bindWorkItemID, bindStage, bindRevision, bindPath, bindSHA, artifact["id"], wantPath, wantHash)
+		}
+		// NC-5: the save response surfaces the projection path.
+		if artifact["file_path"] != wantPath {
+			t.Fatalf("%s response file_path = %v, want %s", stage, artifact["file_path"], wantPath)
+		}
+		if stage == "rri_t_scenarios" || stage == "task_graph" {
+			// rri_t_scenarios is gated out of next_stage progression and the
+			// draft graph needs no approval for projection coverage.
+			continue
+		}
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
 }
 
 func TestArtifactFilePath(t *testing.T) {
