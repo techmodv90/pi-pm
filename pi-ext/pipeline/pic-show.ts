@@ -184,10 +184,10 @@ export interface PicShowDocument {
   error?: string;
 }
 
-type CollectionKey = "artifacts" | "checkpoints" | "instruction_packs" | "completion_reports" | "verification_reports" | "scan_reports" | "designs" | "requirements" | "children" | "dependencies" | "owner_decisions" | "escalations" | "profiles";
+type CollectionKey = "artifacts" | "checkpoints" | "instruction_packs" | "materializations" | "completion_reports" | "verification_reports" | "scan_reports" | "designs" | "requirements" | "children" | "dependencies" | "owner_decisions" | "escalations" | "profiles";
 
 const COLLECTION_KEYS: CollectionKey[] = [
-  "artifacts", "checkpoints", "instruction_packs", "completion_reports", "verification_reports",
+  "artifacts", "checkpoints", "instruction_packs", "materializations", "completion_reports", "verification_reports",
   "scan_reports", "designs", "requirements", "children", "dependencies", "owner_decisions",
   "escalations", "profiles",
 ];

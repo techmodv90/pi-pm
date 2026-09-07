@@ -789,7 +789,9 @@ test("nextPipelineStage rejects completion reports without integrated worker evi
 });
 
 test("pipelineWorkerBlockReason enforces worker prerequisites", () => {
-  assert.match(pipelineWorkerBlockReason({ work_item: { title: "Missing pack" } }) || "", /exactly one active Task Instruction Pack/);
+  // No materializations field would now mean lean (owner decision 2026-09-07);
+  // a pack-pending legacy item carries its materialization row.
+  assert.match(pipelineWorkerBlockReason({ work_item: { title: "Missing pack" }, materializations: [{ work_item_id: "wi-x" }] }) || "", /exactly one active Task Instruction Pack/);
   assert.equal(pipelineWorkerBlockReason({ canonical: true, ready: true, work_item: { title: "Authorized" }, instruction_packs: [], dependencies: [] }), null);
   assert.match(pipelineWorkerBlockReason({ work_item: { title: "Legacy" }, instruction_packs: [{ status: "active", content_schema_version: 2 }], dependencies: [] }) || "", /schema-v3.*effective contract/);
   assert.equal(pipelineWorkerBlockReason({ work_item: { title: "Ready" }, instruction_packs: [{ status: "active", content_schema_version: 3, skill_families_json: "[]", effective_contract_snapshot_id: "ecs-1", effective_contract_snapshot_hash: "hash-1" }], dependencies: [] }), null);
@@ -2068,4 +2070,22 @@ test("RRI dispatch gate fails closed on malformed profiles and missing approved 
   assert.doesNotThrow(() => gateOpenP0P1RriQuestions(doc(settledRriContent), stages, "blueprint", "wi-1"));
   // Scan and the RRI stage itself remain ungated.
   assert.doesNotThrow(() => gateOpenP0P1RriQuestions(doc(null), ["scan", "rri"], "rri", "wi-1"));
+});
+
+test("lean worker input is the description verbatim — no TIP render", () => {
+  // Source-pattern assertions mirror the established stagePrompt test style:
+  // the lean branch (no active pack, no materialization) must return the
+  // stored description verbatim for worker/autofix and must not fall through
+  // to the canonical TIP render.
+  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
+  const stagePromptBody = prompts.slice(prompts.indexOf("export function stagePrompt"));
+  assert.match(stagePromptBody, /if \(!activePack\) \{[\s\S]+?Lean path[\s\S]+?data\.work_item\.description \|\| ""/);
+  assert.match(stagePromptBody, /if \(stage === "review"\) return reviewStagePrompt\(taskId, cwd\);\s*\n\s*if \(stage === "autofix" \|\| stage === "worker"\) return String\(data\.work_item\.description \|\| ""\)/);
+});
+
+test("pipelineWorkerBlockReason admits lean tasks with no legacy state", () => {
+  const lean = { work_item: { id: "wi-lean", title: "Lean task" }, instruction_packs: [], materializations: [], dependencies: [] };
+  assert.equal(pipelineWorkerBlockReason(lean), null);
+  const packPending = { work_item: { id: "wi-mat", title: "Materialized" }, instruction_packs: [], materializations: [{ work_item_id: "wi-mat" }], dependencies: [] };
+  assert.match(String(pipelineWorkerBlockReason(packPending)), /requires exactly one active Task Instruction Pack/);
 });

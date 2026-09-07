@@ -116,9 +116,11 @@ test("REQ-AUTHORITY-BOUNDARIES: a dependency-blocked or unmediated child is neve
   // A leaf without the sole active TIP is genuinely blocked unless it is the
   // canonical first-claim-ready handoff (a ready authorized executable awaiting
   // its frozen TIP), which the scheduler dispatches rather than bypasses.
+  // Pack-pending legacy items carry a materialization row; a bare item (no
+  // materialization) would be lean and admitted by design.
   assert.equal(pipelineWorkerBlockReason({
     work_item: { id: "wi-2", type: "task", title: "No TIP", status: "open" },
-    canonical: false, ready: true, instruction_packs: [],
+    canonical: false, ready: true, instruction_packs: [], materializations: [{ work_item_id: "wi-2" }],
   }), "Work Item \"No TIP\" requires exactly one active Task Instruction Pack before work.");
   assert.equal(pipelineWorkerBlockReason({
     work_item: { id: "wi-3", type: "task", title: "Awaiting first claim", status: "open" },

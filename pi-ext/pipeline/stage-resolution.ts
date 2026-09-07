@@ -180,8 +180,12 @@ export function buildPipelineDryRun(root: any, load: (id: string) => any): any {
 export function pipelineWorkerBlockReason(data: any): string | null {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const activePacks = (data.instruction_packs || []).filter((pack: any) => pack.status === "active");
+  // Lean path (owner decision 2026-09-07): no active pack and no materialization
+  // means the task was claimed on the lean branch — description-verbatim input.
+  const materializations = data.materializations || [];
+  const lean = activePacks.length === 0 && materializations.length === 0;
   const awaitingFirstClaimTIP = data.canonical && data.ready && activePacks.length === 0;
-  if (activePacks.length !== 1 && !awaitingFirstClaimTIP) return `Work Item "${data.work_item?.title || data.work_item?.id || "unknown"}" requires exactly one active Task Instruction Pack before work.`;
+  if (activePacks.length !== 1 && !awaitingFirstClaimTIP && !lean) return `Work Item "${data.work_item?.title || data.work_item?.id || "unknown"}" requires exactly one active Task Instruction Pack before work.`;
   const blockers = getBlockingTaskDependencies(data.dependencies || [], data.phase_metadata || null);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   if (blockers.length) return `Work Item "${data.work_item?.title || data.work_item?.id || "unknown"}" is blocked by incomplete dependencies: ${blockers.map((dependency: any) => dependency.depends_on_task_id).join(", ")}`;

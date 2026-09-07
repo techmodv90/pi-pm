@@ -462,8 +462,10 @@ func TestNativeWorkItemGenericShowUsesCanonicalShape(t *testing.T) {
 	if asObject(t, shown["work_item"])["id"] != created["id"] {
 		t.Fatalf("generic show did not return canonical Work Item detail: %#v", shown)
 	}
-	if shown["ready"] != false {
-		t.Fatalf("standalone Work Item without an active TIP is ready: %#v", shown["ready"])
+	// Lean path (owner decision 2026-09-07): a bare task with no legacy
+	// pipeline state is ready — the description is the worker input.
+	if shown["ready"] != true {
+		t.Fatalf("lean standalone Work Item should be ready: %#v", shown["ready"])
 	}
 	for _, field := range []string{"children", "dependencies", "artifacts", "checkpoints", "instruction_packs", "verification_reports"} {
 		if _, ok := shown[field].([]any); !ok {
