@@ -93,6 +93,7 @@ export function buildReviewContext(taskId: string, cwd: string): { text?: string
     text += `**TIP Hash:** ${pack.content_hash}\n`;
   }
   text += `**Candidate Run:** ${candidate.id}\n`;
+  text += `**Candidate Patch Hash:** ${candidate.integrated_patch_hash} (validated)\n`;
   text += `**Completed by:** ${candidate.agent_model || task.completed_by_model || "unknown"}\n`;
   text += `**Status:** ${task.status}\n\n`;
   text += lean ? `## Authoritative Worker Input (stored task description, verbatim)\n\n${task.description || ""}\n` : `## Authoritative Task Instruction Pack\n\n${renderedPack}\n`;
