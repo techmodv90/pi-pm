@@ -357,6 +357,12 @@ func applySchemaMigrations(db *sql.DB) error {
 			return fmt.Errorf("schema migration %03d_%s: %w", migration.version, migration.name, err)
 		}
 	}
+	// Convergent per-open backfill: retired dependency/gate edge tables keep
+	// receiving rows after the version-gated migration applied (post-migration
+	// APM imports), and readiness reads only their work_item_relations projection.
+	if err := applyConvergentDependencyBackfill(db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -567,6 +573,20 @@ func applyCanonicalBackfills(db schemaDB) error {
 	)`); err != nil {
 		return err
 	}
+	if err := applyConvergentDependencyBackfill(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+// applyConvergentDependencyBackfill projects retired dependency and gate edge
+// tables onto work_item_relations blocks/gates rows. The migration runner
+// applies version 6 exactly once, but edges keep arriving after that (the APM
+// import writes work_item_dependencies rows post-migration), and the readiness
+// SQL (workItemReadySQL) reads only work_item_relations — so this backfill must
+// converge on every open, not just at migration time. INSERT OR IGNORE keeps it
+// idempotent under the wir-migrated- id scheme.
+func applyConvergentDependencyBackfill(db schemaDB) error {
 	if _, err := db.Exec(`INSERT OR IGNORE INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id,created_at)
 		SELECT 'wir-migrated-'||id,work_item_id,'blocks',depends_on_work_item_id,created_at FROM work_item_dependencies
 		UNION ALL
