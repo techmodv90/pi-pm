@@ -1702,6 +1702,23 @@ func workItemArtifactSave(db *sql.DB, args []string) error {
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(revision),0)+1 FROM work_item_artifacts WHERE work_item_id=? AND stage=?`, args[0], args[1]).Scan(&revision); err != nil {
 		return err
 	}
+	// Pre-flight conflict check (Plan §API Contract): the deterministic
+	// markdown for this stage/revision must not hold divergent bytes. Runs
+	// before any DB write so a conflict strands no committed artifact row.
+	root := artifactProjectRoot()
+	projectPath, err := artifactFilePath(root, args[0], args[1], revision)
+	if err != nil {
+		return err
+	}
+	if _, statErr := os.Stat(projectPath); statErr == nil {
+		matches, hashErr := artifactFileHashMatches(projectPath, args[2])
+		if hashErr != nil {
+			return hashErr
+		}
+		if !matches {
+			return fmt.Errorf("artifact file conflict: existing markdown at %s does not match new content", projectPath)
+		}
+	}
 	id, contentHash := "wia-"+shortID(), hashJSON(args[2])
 	if _, err = tx.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES(?,?,?,?,?,?)`, id, args[0], args[1], revision, args[2], contentHash); err != nil {
 		return err
@@ -1718,7 +1735,19 @@ func workItemArtifactSave(db *sql.DB, args []string) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, map[string]any{"id": id, "work_item_id": args[0], "stage": args[1], "revision": revision, "content_hash": contentHash})
+	// Post-commit best-effort projection (Plan §Architecture): write the
+	// markdown atomically, bind it through artifact_files, and record any
+	// failure as a warning event — the committed artifact row stays canonical
+	// and the save still succeeds with an empty file_path (NC-2).
+	projectedPath := ""
+	if writeErr := writeArtifactFileAtomic(projectPath, args[2]); writeErr != nil {
+		_ = addEvent(db, args[0], "artifact_projection_failed", "system", "Artifact markdown projection failed", map[string]any{"stage": args[1], "revision": revision, "file_path": projectPath, "error": writeErr.Error()})
+	} else if bindErr := bindArtifactFile(db, id, args[0], args[1], revision, projectPath, contentHash); bindErr != nil {
+		_ = addEvent(db, args[0], "artifact_projection_failed", "system", "Artifact markdown binding failed", map[string]any{"stage": args[1], "revision": revision, "file_path": projectPath, "error": bindErr.Error()})
+	} else {
+		projectedPath = projectPath
+	}
+	writeJSON(os.Stdout, map[string]any{"id": id, "work_item_id": args[0], "stage": args[1], "revision": revision, "content_hash": contentHash, "file_path": projectedPath})
 	return nil
 }
 

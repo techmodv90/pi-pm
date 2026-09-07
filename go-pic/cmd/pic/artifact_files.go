@@ -2,6 +2,7 @@ package main
 
 import (
 	"crypto/sha256"
+	"database/sql"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -22,6 +23,18 @@ func artifactFilePath(root string, workItemID string, stage string, revision int
 	return filepath.Join(root, ".apm", "artifacts", workItemID, fmt.Sprintf("%s-r%d.md", stage, revision)), nil
 }
 
+// artifactProjectRoot resolves the current project root the same way the
+// CLI does (findDB upward walk), so deterministic artifact paths anchor to
+// <project>/.apm/artifacts regardless of the invocation directory.
+func artifactProjectRoot() string {
+	cwd, _ := os.Getwd()
+	dbPath := findDB(cwd)
+	if dbPath == "" {
+		return cwd
+	}
+	return filepath.Dir(filepath.Dir(dbPath))
+}
+
 // artifactFileHashMatches reports whether the file at path already holds
 // exactly the given content (sha256 comparison). A missing file is an error.
 func artifactFileHashMatches(path string, content string) (bool, error) {
@@ -32,6 +45,14 @@ func artifactFileHashMatches(path string, content string) (bool, error) {
 	sum := sha256.Sum256([]byte(content))
 	existingSum := sha256.Sum256(existing)
 	return string(sum[:]) == string(existingSum[:]), nil
+}
+
+// bindArtifactFile records the artifact_files binding row for a projected
+// markdown file. A single INSERT is its own transaction; the caller treats
+// failure as a best-effort projection failure (warning event, empty path).
+func bindArtifactFile(db *sql.DB, artifactID, workItemID, stage string, revision int, filePath, contentSHA256 string) error {
+	_, err := db.Exec(`INSERT INTO artifact_files(id,artifact_id,work_item_id,stage,revision,file_path,content_sha256) VALUES(?,?,?,?,?,?,?)`, "wiaf-"+shortID(), artifactID, workItemID, stage, revision, filePath, contentSHA256)
+	return err
 }
 
 // writeArtifactFileAtomic writes content to path via a 0600 temp file in the
