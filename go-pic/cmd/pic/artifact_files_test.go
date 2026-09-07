@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Artifact file projection test fixtures: artifact-save flows run against a
@@ -221,6 +223,65 @@ func TestArtifactProjectionFailureIsBestEffort(t *testing.T) {
 	// NC-2: no projected markdown may exist at the deterministic path.
 	if _, statErr := os.Stat(wantPath); !os.IsNotExist(statErr) {
 		t.Fatalf("projected file exists at %s despite unwritable dir: stat err=%v", wantPath, statErr)
+	}
+}
+
+// TestArtifactProjectionP95Under50ms is the bounded timing test for
+// projection overhead (Plan §3.1 NC-6): the projection step added to every
+// artifact-save — deterministic path construction plus the atomic markdown
+// write plus the artifact_files binding insert — must stay under 50ms at the
+// 95th percentile. The sample uses a realistic vision-sized artifact against
+// a temp project tree and a temp SQLite database; the measured p95 is always
+// printed to stdout (visible even when the test passes non-verbose), and the
+// test fails when it reaches 50ms.
+func TestArtifactProjectionP95Under50ms(t *testing.T) {
+	root := t.TempDir()
+	const iterations = 100
+	const p95LimitMS = 50.0
+	content := validVisionArtifact
+
+	// Temp SQLite database holding only the artifact_files binding table so
+	// the timed loop measures the real bindArtifactFile INSERT; foreign keys
+	// stay off so no parent work_items row is required for the benchmark.
+	db, err := sql.Open("sqlite", filepath.Join(root, "bench.db"))
+	if err != nil {
+		t.Fatalf("open bench db: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if _, err := db.Exec(artifactFilesTableSQL); err != nil {
+		t.Fatalf("create artifact_files table: %v", err)
+	}
+
+	durations := make([]float64, 0, iterations)
+	for i := 1; i <= iterations; i++ {
+		start := time.Now()
+		path, err := artifactFilePath(root, "wi-p95bench", "vision", i)
+		if err != nil {
+			t.Fatalf("artifactFilePath(%d): %v", i, err)
+		}
+		if err := writeArtifactFileAtomic(path, content); err != nil {
+			t.Fatalf("writeArtifactFileAtomic(%d): %v", i, err)
+		}
+		if err := bindArtifactFile(db, fmt.Sprintf("wia-p95-%d", i), "wi-p95bench", "vision", i, path, hashJSON(content)); err != nil {
+			t.Fatalf("bindArtifactFile(%d): %v", i, err)
+		}
+		durations = append(durations, float64(time.Since(start).Microseconds())/1000.0)
+	}
+
+	sort.Float64s(durations)
+	p95 := durations[int(float64(len(durations))*0.95)]
+	fmt.Printf("projection overhead p95 = %.3fms over %d iterations (limit %.0fms)\n", p95, iterations, p95LimitMS)
+	if p95 >= p95LimitMS {
+		t.Fatalf("projection overhead p95 = %.3fms, want < %.0fms", p95, p95LimitMS)
+	}
+	// The projection must actually land the bytes: the last revision's file
+	// must hold the exact content, keeping the timing test honest.
+	got, err := os.ReadFile(filepath.Join(root, ".apm", "artifacts", "wi-p95bench", fmt.Sprintf("vision-r%d.md", iterations)))
+	if err != nil {
+		t.Fatalf("read projected file: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("projected bytes = %q, want exact content %q", got, content)
 	}
 }
 
