@@ -769,6 +769,11 @@ const workItemReadySQL = `wi.type IN ('task','bug','chore') AND wi.status='open'
 	SELECT COUNT(*) FROM work_item_instruction_packs p WHERE p.work_item_id=wi.id AND p.status='active'
 )=1 OR EXISTS (
 	SELECT 1 FROM work_item_materializations m JOIN implementation_authorizations a ON a.work_item_id=m.root_work_item_id AND a.task_graph_checkpoint_id=m.checkpoint_id AND a.revoked_at='' WHERE m.work_item_id=wi.id
+) OR (
+	-- Lean path: no legacy pipeline state at all; the description is the worker input.
+	(SELECT COUNT(*) FROM work_item_instruction_packs p WHERE p.work_item_id=wi.id AND p.status='active')=0 AND NOT EXISTS (
+		SELECT 1 FROM work_item_materializations m WHERE m.work_item_id=wi.id
+	)
 )) AND NOT EXISTS (
 	SELECT 1 FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='blocks' AND blocker.status!='done'
 ) AND NOT EXISTS (

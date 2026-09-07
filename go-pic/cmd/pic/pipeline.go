@@ -1,12 +1,12 @@
 package main
 
 import (
-	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -192,67 +192,119 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 			}
 		}
 	}
+	leanClaim := false
 	if stage == "worker" || stage == "review" || stage == "autofix" {
-		if stage == "worker" {
-			if err = prepareInstructionPackForFirstClaim(tx, taskID); err != nil {
-				return fmt.Errorf("pipeline claim rejected: prepare instruction pack: %w", err)
-			}
-		}
-		var activePacks int
+		var activePacks, materializations int
 		if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, taskID).Scan(&activePacks); err != nil {
 			return err
 		}
-		if activePacks != 1 {
-			return fmt.Errorf("Work Item %s requires exactly one active instruction pack", taskID)
-		}
-		eligibility := workItemReadySQL
-		if stage == "review" || (stage == "worker" && opts["review-fix"] == "1") {
-			eligibility = `wi.type IN ('task','bug','chore') AND wi.status IN ('open','in_progress') AND wi.deferred=0 AND wi.claimed_at='' AND NOT EXISTS (
-				SELECT 1 FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='blocks' AND blocker.status!='done'
-			) AND NOT EXISTS (
-				SELECT 1 FROM work_item_relations r JOIN work_items gate_item ON gate_item.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='gates' AND gate_item.status!='done'
-			)`
-		}
-		var itemType string
-		if err = tx.QueryRow(`SELECT type FROM work_items AS wi WHERE id=? AND `+eligibility, taskID).Scan(&itemType); err != nil {
-			return errors.New("pipeline claim rejected: Work Item is not an authorized dependency-ready executable leaf")
-		}
-		if err = tx.QueryRow(`SELECT id,version,content_hash FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, taskID).Scan(&packID, &packVersion, &packHash); err != nil {
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE work_item_id=?`, taskID).Scan(&materializations); err != nil {
 			return err
 		}
-		var rootID, materializationCheckpoint string
-		err = tx.QueryRow(`SELECT root_work_item_id,checkpoint_id FROM work_item_materializations WHERE work_item_id=?`, taskID).Scan(&rootID, &materializationCheckpoint)
-		if err == nil {
-			var newerTaskGraph int
-			if err = tx.QueryRow(`SELECT EXISTS(
+		// State-driven claim routing: a Work Item carrying legacy pipeline state
+		// (active instruction pack or materialization) keeps the unchanged legacy
+		// gates; a Work Item with neither takes the lean path — description is the
+		// worker input, no pack, no pack-keyed limiters (owner decision 2026-09-07).
+		leanClaim = activePacks == 0 && materializations == 0
+		if !leanClaim {
+			if stage == "worker" {
+				if err = prepareInstructionPackForFirstClaim(tx, taskID); err != nil {
+					return fmt.Errorf("pipeline claim rejected: prepare instruction pack: %w", err)
+				}
+				// Re-count after TIP generation: the first-claim pack is created above.
+				if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, taskID).Scan(&activePacks); err != nil {
+					return err
+				}
+			}
+			if activePacks != 1 {
+				return fmt.Errorf("Work Item %s requires exactly one active instruction pack", taskID)
+			}
+			eligibility := workItemReadySQL
+			if stage == "review" || (stage == "worker" && opts["review-fix"] == "1") {
+				eligibility = `wi.type IN ('task','bug','chore') AND wi.status IN ('open','in_progress') AND wi.deferred=0 AND wi.claimed_at='' AND NOT EXISTS (
+					SELECT 1 FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='blocks' AND blocker.status!='done'
+				) AND NOT EXISTS (
+					SELECT 1 FROM work_item_relations r JOIN work_items gate_item ON gate_item.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='gates' AND gate_item.status!='done'
+				)`
+			}
+			var itemType string
+			if err = tx.QueryRow(`SELECT type FROM work_items AS wi WHERE id=? AND `+eligibility, taskID).Scan(&itemType); err != nil {
+				return errors.New("pipeline claim rejected: Work Item is not an authorized dependency-ready executable leaf")
+			}
+			if err = tx.QueryRow(`SELECT id,version,content_hash FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, taskID).Scan(&packID, &packVersion, &packHash); err != nil {
+				return err
+			}
+			var rootID, materializationCheckpoint string
+			err = tx.QueryRow(`SELECT root_work_item_id,checkpoint_id FROM work_item_materializations WHERE work_item_id=?`, taskID).Scan(&rootID, &materializationCheckpoint)
+			if err == nil {
+				var newerTaskGraph int
+				if err = tx.QueryRow(`SELECT EXISTS(
 				SELECT 1 FROM work_item_artifacts newer
 				JOIN workflow_checkpoints approved ON approved.work_item_id=newer.work_item_id AND approved.stage='task_graph'
 				WHERE newer.work_item_id=? AND newer.stage='task_graph' AND newer.revision>approved.artifact_revision
 			)`, rootID).Scan(&newerTaskGraph); err != nil {
+					return err
+				}
+				if newerTaskGraph != 0 {
+					return errors.New("pipeline claim rejected: current task graph is not approved")
+				}
+				var authorized int
+				if err = tx.QueryRow(`SELECT COUNT(*) FROM implementation_authorizations WHERE work_item_id=? AND task_graph_checkpoint_id=? AND revoked_at=''`, rootID, materializationCheckpoint).Scan(&authorized); err != nil {
+					return err
+				}
+				var packCheckpoint string
+				if err = tx.QueryRow(`SELECT checkpoint_id FROM work_item_instruction_packs WHERE id=?`, packID).Scan(&packCheckpoint); err != nil {
+					return err
+				}
+				if packCheckpoint != materializationCheckpoint || authorized != 1 {
+					return errors.New("pipeline claim rejected: active instruction pack is not bound to the authorized parent materialization")
+				}
+			} else if !errors.Is(err, sql.ErrNoRows) {
 				return err
 			}
-			if newerTaskGraph != 0 {
-				return errors.New("pipeline claim rejected: current task graph is not approved")
+			if opts["instruction-pack-id"] != "" && opts["instruction-pack-id"] != packID {
+				return errors.New("pipeline claim rejected: instruction pack changed")
 			}
-			var authorized int
-			if err = tx.QueryRow(`SELECT COUNT(*) FROM implementation_authorizations WHERE work_item_id=? AND task_graph_checkpoint_id=? AND revoked_at=''`, rootID, materializationCheckpoint).Scan(&authorized); err != nil {
-				return err
+			if opts["instruction-pack-hash"] != "" && opts["instruction-pack-hash"] != packHash {
+				return errors.New("pipeline claim rejected: instruction pack hash changed")
 			}
-			var packCheckpoint string
-			if err = tx.QueryRow(`SELECT checkpoint_id FROM work_item_instruction_packs WHERE id=?`, packID).Scan(&packCheckpoint); err != nil {
-				return err
+		} else {
+			// Lean path: description-verbatim worker input; no pack columns, no
+			// pack-keyed circuit limiters (the activity log is the retry evidence).
+			// Single-writer exclusion: first worker claim requires an unclaimed item;
+			// review/autofix/review-fix rely on the shared active-run lease check.
+			eligibility := `wi.type IN ('task','bug','chore') AND wi.status IN ('open','in_progress') AND wi.deferred=0 AND NOT EXISTS (
+			SELECT 1 FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='blocks' AND blocker.status!='done'
+		) AND NOT EXISTS (
+			SELECT 1 FROM work_item_relations r JOIN work_items gate_item ON gate_item.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='gates' AND gate_item.status!='done'
+		)`
+			if stage == "worker" && opts["review-fix"] != "1" {
+				eligibility = `wi.type IN ('task','bug','chore') AND wi.status='open' AND wi.deferred=0 AND wi.claimed_at='' AND NOT EXISTS (
+				SELECT 1 FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='blocks' AND blocker.status!='done'
+			) AND NOT EXISTS (
+				SELECT 1 FROM work_item_relations r JOIN work_items gate_item ON gate_item.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='gates' AND gate_item.status!='done'
+			)`
 			}
-			if packCheckpoint != materializationCheckpoint || authorized != 1 {
-				return errors.New("pipeline claim rejected: active instruction pack is not bound to the authorized parent materialization")
+			var itemType string
+			if err = tx.QueryRow(`SELECT type FROM work_items AS wi WHERE id=? AND `+eligibility, taskID).Scan(&itemType); err != nil {
+				return errors.New("pipeline claim rejected: Work Item is not a dependency-ready executable leaf")
 			}
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return err
-		}
-		if opts["instruction-pack-id"] != "" && opts["instruction-pack-id"] != packID {
-			return errors.New("pipeline claim rejected: instruction pack changed")
-		}
-		if opts["instruction-pack-hash"] != "" && opts["instruction-pack-hash"] != packHash {
-			return errors.New("pipeline claim rejected: instruction pack hash changed")
+			if stage == "worker" {
+				claimant := opts["claimant"]
+				if claimant == "" {
+					claimant = "contractor"
+				}
+				res, err := tx.Exec(`UPDATE work_items SET status='in_progress', claimed_at=datetime('now'), claimed_by=? WHERE id=? AND status IN ('open','in_progress')`, claimant, taskID)
+				if err != nil {
+					return err
+				}
+				if changed, _ := res.RowsAffected(); changed != 1 {
+					return errors.New("lean claim rejected: Work Item is already claimed or closed")
+				}
+				if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,actor_model,summary) VALUES(?,?,'claimed','contractor',?,?)`, "wie-"+shortID(), taskID, claimant, "lean claim: worker input is the stored description verbatim"); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	leaseSeconds := 3600
@@ -304,45 +356,49 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 			if candidateRunID == "" || candidatePatchHash == "" {
 				return errors.New("review-fix claim requires a bound rejected candidate")
 			}
-			var unchangedFailures int
-			if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND candidate_patch_hash=? AND error='review-fix produced the unchanged rejected candidate patch' AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion','owner_review_decision') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, candidatePatchHash, taskID).Scan(&unchangedFailures); err != nil {
-				return err
-			}
-			if unchangedFailures > 0 {
-				return errors.New("review-fix circuit breaker open: rejected candidate already produced no progress; owner action or a new instruction pack is required")
-			}
-			if err = tx.QueryRow(`SELECT COALESCE(MAX(review_fix_cycle),0)+1 FROM pipeline_runs WHERE task_id=? AND instruction_pack_hash=? AND status!='cancelled' AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion','owner_review_decision') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, packHash, taskID).Scan(&reviewFixCycle); err != nil {
-				return err
-			}
-			if reviewFixCycle > 3 {
-				return errors.New("review-fix cycle limit reached (3 attempts for the unchanged active instruction pack); owner action is required")
-			}
-		}
-		if opts["explicit-retry"] != "1" {
-			var blockedReason, previousFingerprint string
-			err = tx.QueryRow(`SELECT CASE WHEN json_valid(result_json) THEN json_extract(result_json,'$.failure_code') ELSE '' END,environment_fingerprint FROM pipeline_runs WHERE task_id=? AND stage='worker' AND instruction_pack_hash=? AND CASE WHEN json_valid(result_json) THEN json_extract(result_json,'$.failure_code') ELSE '' END IN ('environment_blocked','runner_protocol_invalid') ORDER BY attempt DESC LIMIT 1`, taskID, packHash).Scan(&blockedReason, &previousFingerprint)
-			if err == nil {
-				if blockedReason == "runner_protocol_invalid" || previousFingerprint == "" || previousFingerprint == opts["environment-fingerprint"] {
-					return fmt.Errorf("automatic worker retry blocked by %s; correct the environment or runner, then explicitly retry", blockedReason)
+			if !leanClaim {
+				var unchangedFailures int
+				if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND candidate_patch_hash=? AND error='review-fix produced the unchanged rejected candidate patch' AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion','owner_review_decision') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, candidatePatchHash, taskID).Scan(&unchangedFailures); err != nil {
+					return err
+				}
+				if unchangedFailures > 0 {
+					return errors.New("review-fix circuit breaker open: rejected candidate already produced no progress; owner action or a new instruction pack is required")
+				}
+				if err = tx.QueryRow(`SELECT COALESCE(MAX(review_fix_cycle),0)+1 FROM pipeline_runs WHERE task_id=? AND instruction_pack_hash=? AND status!='cancelled' AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion','owner_review_decision') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, packHash, taskID).Scan(&reviewFixCycle); err != nil {
+					return err
+				}
+				if reviewFixCycle > 3 {
+					return errors.New("review-fix cycle limit reached (3 attempts for the unchanged active instruction pack); owner action is required")
 				}
 			}
-			if !errors.Is(err, sql.ErrNoRows) {
+		}
+		if !leanClaim {
+			if opts["explicit-retry"] != "1" {
+				var blockedReason, previousFingerprint string
+				err = tx.QueryRow(`SELECT CASE WHEN json_valid(result_json) THEN json_extract(result_json,'$.failure_code') ELSE '' END,environment_fingerprint FROM pipeline_runs WHERE task_id=? AND stage='worker' AND instruction_pack_hash=? AND CASE WHEN json_valid(result_json) THEN json_extract(result_json,'$.failure_code') ELSE '' END IN ('environment_blocked','runner_protocol_invalid') ORDER BY attempt DESC LIMIT 1`, taskID, packHash).Scan(&blockedReason, &previousFingerprint)
+				if err == nil {
+					if blockedReason == "runner_protocol_invalid" || previousFingerprint == "" || previousFingerprint == opts["environment-fingerprint"] {
+						return fmt.Errorf("automatic worker retry blocked by %s; correct the environment or runner, then explicitly retry", blockedReason)
+					}
+				}
+				if !errors.Is(err, sql.ErrNoRows) {
+					return err
+				}
+			}
+			var contractSnapshotFailures int
+			if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND stage='worker' AND instruction_pack_hash=? AND CASE WHEN json_valid(result_json) THEN json_extract(result_json,'$.failure_code') ELSE '' END IN ('worker_output_invalid','worker_artifact_invalid','scheduler_owner_lost') AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, packHash, taskID).Scan(&contractSnapshotFailures); err != nil {
 				return err
 			}
-		}
-		var contractSnapshotFailures int
-		if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND stage='worker' AND instruction_pack_hash=? AND CASE WHEN json_valid(result_json) THEN json_extract(result_json,'$.failure_code') ELSE '' END IN ('worker_output_invalid','worker_artifact_invalid','scheduler_owner_lost') AND attempt>COALESCE((SELECT MAX(CAST(json_extract(payload_json,'$.after_attempt') AS INTEGER)) FROM work_item_events WHERE work_item_id=? AND event_type IN ('pipeline_circuit_reset','owner_rejected_completion') AND actor_role='owner' AND json_valid(payload_json)),0)`, taskID, packHash, taskID).Scan(&contractSnapshotFailures); err != nil {
-			return err
-		}
-		if contractSnapshotFailures >= maxDeterministicWorkerFailuresPerContract {
-			return fmt.Errorf("worker circuit breaker open: %d deterministic failures for the unchanged active instruction pack; owner circuit reset with repair evidence is required", contractSnapshotFailures)
+			if contractSnapshotFailures >= maxDeterministicWorkerFailuresPerContract {
+				return fmt.Errorf("worker circuit breaker open: %d deterministic failures for the unchanged active instruction pack; owner circuit reset with repair evidence is required", contractSnapshotFailures)
+			}
 		}
 	}
 	attempt := 1
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(attempt),0)+1 FROM pipeline_runs WHERE task_id=? AND stage=?`, taskID, stage).Scan(&attempt); err != nil {
 		return err
 	}
-	if stage == "worker" && opts["explicit-retry"] != "1" && opts["review-fix"] != "1" {
+	if stage == "worker" && opts["explicit-retry"] != "1" && opts["review-fix"] != "1" && !leanClaim {
 		var unchangedPackAttempts int
 		// Unchanged-pack limiter invariant: only attempts that produced output
 		// evidence (a completion/artifact or a classified failure_code) count
@@ -357,7 +413,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 			return fmt.Errorf("automatic worker retry limit reached (%d attempts for unchanged instruction pack); explicit retry requires --explicit-retry 1 after correcting the instruction, model, or runner", maxAutomaticWorkerAttempts)
 		}
 	}
-	if stage == "autofix" {
+	if stage == "autofix" && !leanClaim {
 		var attempts int
 		if err = tx.QueryRow(`SELECT COUNT(*) FROM pipeline_runs WHERE task_id=? AND stage='autofix' AND instruction_pack_hash=? AND status IN ('completed','blocked')`, taskID, packHash).Scan(&attempts); err != nil {
 			return err
