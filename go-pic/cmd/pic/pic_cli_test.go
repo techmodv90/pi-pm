@@ -5422,3 +5422,305 @@ func TestBlueprintAnnotationEvidence(t *testing.T) {
 		t.Fatalf("child-agent approval attempt: err=%v out=%s", err, out)
 	}
 }
+
+// TestArtifactFilesSchemaMigration proves the artifact_files projection table
+// (ratified in .apm/specs/db_schema/artifacts.dbml) is created by initDB with
+// the ratified columns, unique bindings (artifact_id, file_path, and
+// work_item_id+stage+revision), foreign keys to work_item_artifacts and
+// work_items with ON DELETE CASCADE, and idempotent re-open behavior per the
+// repository migration policy.
+func TestArtifactFilesSchemaMigration(t *testing.T) {
+	// Matcher sanity for the created_at default check: the ratified unquoted
+	// current-time expressions are accepted, while quoted constants — which
+	// store literal text instead of a live timestamp — are rejected in both
+	// double-quoted and backtick-quoted forms.
+	t.Run("created-at-default-matcher", func(t *testing.T) {
+		accepted := []string{
+			"datetime('now')",
+			"CURRENT_TIMESTAMP",
+			"( datetime ( 'now' ) )",
+		}
+		for _, d := range accepted {
+			if !createdAtDefaultMatches(d) {
+				t.Errorf("createdAtDefaultMatches(%q) = false, want true", d)
+			}
+		}
+		rejected := []string{
+			`"current_timestamp"`,
+			"`current_timestamp`",
+			"'current_timestamp'",
+			"",
+			"NULL",
+			"strftime('%s','now')",
+		}
+		for _, d := range rejected {
+			if createdAtDefaultMatches(d) {
+				t.Errorf("createdAtDefaultMatches(%q) = true, want false", d)
+			}
+		}
+	})
+
+	dbPath := filepath.Join(t.TempDir(), "tasks.db")
+	if err := initDB(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var tableSQL string
+	if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='artifact_files'`).Scan(&tableSQL); err != nil {
+		db.Close()
+		t.Fatalf("artifact_files table is not present after initDB: %v", err)
+	}
+
+	// Ratified columns: exact names, declared types, NOT NULL except the text
+	// primary key, and the created_at default (artifacts.dbml).
+	type columnSpec struct {
+		name    string
+		dbType  string
+		notNull int
+		pk      int
+		dflt    sql.NullString
+	}
+	specRows, err := db.Query(`SELECT name, type, "notnull", pk, dflt_value FROM pragma_table_info('artifact_files') ORDER BY cid`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	specs := map[string]columnSpec{}
+	order := []string{}
+	for specRows.Next() {
+		var spec columnSpec
+		if err := specRows.Scan(&spec.name, &spec.dbType, &spec.notNull, &spec.pk, &spec.dflt); err != nil {
+			specRows.Close()
+			db.Close()
+			t.Fatal(err)
+		}
+		specs[spec.name] = spec
+		order = append(order, spec.name)
+	}
+	specRows.Close()
+	if err := specRows.Err(); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	wantTypes := map[string]string{
+		"id":             "TEXT",
+		"artifact_id":    "TEXT",
+		"work_item_id":   "TEXT",
+		"stage":          "TEXT",
+		"revision":       "INTEGER",
+		"file_path":      "TEXT",
+		"content_sha256": "TEXT",
+		"created_at":     "TIMESTAMP",
+	}
+	if len(specs) != len(wantTypes) {
+		db.Close()
+		t.Fatalf("artifact_files columns %v, want exactly %v", order, wantTypes)
+	}
+	for _, name := range order {
+		spec := specs[name]
+		wantType, ok := wantTypes[name]
+		if !ok {
+			db.Close()
+			t.Fatalf("artifact_files has unexpected column %q", name)
+		}
+		if !strings.EqualFold(spec.dbType, wantType) {
+			db.Close()
+			t.Fatalf("artifact_files column %q type = %q, want %q", name, spec.dbType, wantType)
+		}
+		wantNotNull := 1
+		wantPK := 0
+		if name == "id" {
+			wantNotNull = 0
+			wantPK = 1
+		}
+		if spec.notNull != wantNotNull || spec.pk != wantPK {
+			db.Close()
+			t.Fatalf("artifact_files column %q notnull=%d pk=%d, want notnull=%d pk=%d", name, spec.notNull, spec.pk, wantNotNull, wantPK)
+		}
+		if name == "created_at" {
+			if !spec.dflt.Valid || spec.dflt.String == "" || spec.dflt.String == "NULL" {
+				db.Close()
+				t.Fatalf("artifact_files column %q must declare a non-null default, got %#v", name, spec)
+			}
+			// Ratified DDL (artifacts.dbml): created_at defaults to the current
+			// time via an explicit current-time expression — exactly
+			// datetime('now') or CURRENT_TIMESTAMP — never a quoted constant
+			// like DEFAULT 'current_timestamp' nor an unrelated expression.
+			if !createdAtDefaultMatches(spec.dflt.String) {
+				db.Close()
+				t.Fatalf("artifact_files column %q default = %q, want exactly datetime('now') or CURRENT_TIMESTAMP (unquoted expression)", name, spec.dflt.String)
+			}
+			continue
+		}
+		if spec.dflt.Valid && spec.dflt.String != "" && spec.dflt.String != "NULL" {
+			db.Close()
+			t.Fatalf("artifact_files column %q must not declare a default, got %#v", name, spec)
+		}
+	}
+
+	// Unique bindings: artifact_id and file_path are individually unique, and
+	// (work_item_id, stage, revision) mirrors the artifact uniqueness.
+	uniqueKeys := map[string]bool{}
+	indexRows, err := db.Query(`SELECT name FROM pragma_index_list('artifact_files') WHERE "unique"=1 AND origin='u'`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	indexNames := []string{}
+	for indexRows.Next() {
+		var name string
+		if err := indexRows.Scan(&name); err != nil {
+			indexRows.Close()
+			db.Close()
+			t.Fatal(err)
+		}
+		indexNames = append(indexNames, name)
+	}
+	indexRows.Close()
+	if err := indexRows.Err(); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	for _, name := range indexNames {
+		infoRows, err := db.Query(`SELECT name FROM pragma_index_info(?) ORDER BY seqno`, name)
+		if err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		indexColumns := []string{}
+		for infoRows.Next() {
+			var column string
+			if err := infoRows.Scan(&column); err != nil {
+				infoRows.Close()
+				db.Close()
+				t.Fatal(err)
+			}
+			indexColumns = append(indexColumns, column)
+		}
+		infoRows.Close()
+		if err := infoRows.Err(); err != nil {
+			db.Close()
+			t.Fatal(err)
+		}
+		uniqueKeys[strings.Join(indexColumns, ",")] = true
+	}
+	for _, want := range []string{"artifact_id", "file_path", "work_item_id,stage,revision"} {
+		if !uniqueKeys[want] {
+			db.Close()
+			t.Fatalf("artifact_files unique indexes %v lack binding %q", indexNames, want)
+		}
+	}
+
+	// Foreign keys: artifact_id → work_item_artifacts(id) and
+	// work_item_id → work_items(id), both referencing the parent id column
+	// and ON DELETE CASCADE.
+	foreignKeys := map[string]string{}
+	fkRows, err := db.Query(`SELECT "from","table","to",on_delete FROM pragma_foreign_key_list('artifact_files')`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	for fkRows.Next() {
+		var from, target, onDelete string
+		var to sql.NullString
+		if err := fkRows.Scan(&from, &target, &to, &onDelete); err != nil {
+			fkRows.Close()
+			db.Close()
+			t.Fatal(err)
+		}
+		if !to.Valid || to.String == "" {
+			to.String = "<implicit>"
+		}
+		foreignKeys[from] = target + ":" + to.String + ":" + onDelete
+	}
+	fkRows.Close()
+	if err := fkRows.Err(); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	wantForeignKeys := map[string]string{
+		"artifact_id":  "work_item_artifacts:id:CASCADE",
+		"work_item_id": "work_items:id:CASCADE",
+	}
+	if len(foreignKeys) != len(wantForeignKeys) {
+		db.Close()
+		t.Fatalf("artifact_files foreign keys = %#v, want %#v", foreignKeys, wantForeignKeys)
+	}
+	for from, want := range wantForeignKeys {
+		if foreignKeys[from] != want {
+			db.Close()
+			t.Fatalf("artifact_files foreign key %q = %q, want %q", from, foreignKeys[from], want)
+		}
+	}
+
+	// Idempotent re-open with migration replay: seed parents and a bound row,
+	// clear the schema_migrations ledger so initDB re-runs every migration
+	// against the already-populated tables (the repository policy for additive
+	// migrations), and assert the binding row survives and the schema stays
+	// valid.
+	if _, err := db.Exec(`INSERT INTO work_items(id,type,title) VALUES('wi-abc123','epic','Artifact Files')`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO work_item_artifacts(id,work_item_id,stage,revision,content,content_hash) VALUES('wia-1','wi-abc123','scan',1,'{}','hash1')`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`INSERT INTO artifact_files(id,artifact_id,work_item_id,stage,revision,file_path,content_sha256) VALUES('wiaf-1','wia-1','wi-abc123','scan',1,'/p/.apm/artifacts/wi-abc123/scan-r1.md','hash1')`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`DELETE FROM schema_migrations`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	db.Close()
+	if err := initDB(dbPath); err != nil {
+		t.Fatalf("replay initDB: %v", err)
+	}
+	db, err = openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var tableCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='artifact_files'`).Scan(&tableCount); err != nil {
+		t.Fatal(err)
+	}
+	if tableCount != 1 {
+		t.Fatal("artifact_files table missing after migration replay")
+	}
+	var bound int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM artifact_files WHERE id='wiaf-1' AND artifact_id='wia-1' AND content_sha256='hash1'`).Scan(&bound); err != nil {
+		t.Fatal(err)
+	}
+	if bound != 1 {
+		t.Fatalf("artifact_files binding survived migration replay = %d", bound)
+	}
+	var violations int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil {
+		t.Fatal(err)
+	}
+	if violations != 0 {
+		t.Fatalf("foreign key violations after migration replay = %d", violations)
+	}
+}
+
+// createdAtDefaultMatches reports whether d is exactly one of the unquoted
+// current-time expressions ratified for artifact_files.created_at:
+// datetime('now') or CURRENT_TIMESTAMP. Quoting is preserved during
+// comparison because quoted forms such as "current_timestamp" or
+// `current_timestamp` are constants storing literal text and must be
+// rejected. Surrounding parentheses and inner whitespace are normalized.
+func createdAtDefaultMatches(d string) bool {
+	norm := strings.ToLower(d)
+	norm = strings.Join(strings.Fields(norm), "")
+	for strings.HasPrefix(norm, "(") && strings.HasSuffix(norm, ")") {
+		norm = strings.TrimPrefix(norm, "(")
+		norm = strings.TrimSuffix(norm, ")")
+	}
+	return norm == "datetime('now')" || norm == "current_timestamp"
+}
