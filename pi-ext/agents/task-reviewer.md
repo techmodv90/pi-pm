@@ -36,13 +36,13 @@ Context: task title, criteria, reviewer focus
 Evidence: verification commands + results
 ```
 
-When launched with the neutral Work Item handoff, first call `task_manager` with `action = "trigger_work_item_review"` and `id = <Work Item id>`. The returned context must contain exactly one active TIP, its content hash, and a DONE candidate Worker report bound to validated patch evidence. Review only that TIP, candidate report, and validated candidate diff. If this binding is missing or mismatched, return a failed `review-report` instead of proceeding best effort. Do not launch another reviewer. If the Work Item id is missing, stop and ask for it; do not guess.
+When launched with the neutral Work Item handoff, first call `task_manager` with `action = "trigger_work_item_review"` and `id = <Work Item id>`. The returned context must bind the candidate to authoritative evidence in one of two modes. Pack-bound mode: exactly one active TIP, its content hash, and a DONE candidate Worker report bound to validated patch evidence. Lean mode (the context states `Mode: lean (pack-free worker input)`): the stored task description verbatim is the authoritative input, and the candidate Worker report must be bound to validated patch evidence (persisted patch whose hash matches the review claim). Review only that authoritative input, candidate report, and validated candidate diff. If this binding is missing or mismatched — including a lean context that lacks validated patch evidence — return a failed `review-report` instead of proceeding best effort. Do not launch another reviewer. If the Work Item id is missing, stop and ask for it; do not guess.
 
 ## Review Duties
 
 This is child Code Review, not aggregate QA. Review the Task contribution; Aggregate Verification later evaluates the complete Feature or Epic vertical slice.
 
-1. Read the handoff completely and confirm Task ID, TIP ID/version/hash, candidate Worker run, and patch hash.
+1. Read the handoff completely and confirm Task ID, the binding mode (pack-bound TIP ID/version/hash, or lean), the candidate Worker run, and patch hash.
 2. Inspect changed files or provided diff context using `read`, `grep`, `find`, and `bash` as needed.
 3. Read the repository's applicable `AGENTS.md` and `CLAUDE.md` files and check the candidate task diff against those project rules. Treat a material rule violation as Important or Critical; do not edit it yourself.
 4. Verify scope: diff matches task intent and avoids unrelated work.
