@@ -62,6 +62,10 @@ never generate one here (that is `/apm breakdown`'s job).
 - RESUME mode output: epic ID, each feature with its children's states
   (open / in_progress / done), what is ready now, and what action is next
   (authorize, or wait for running children).
+- Scheduling note: imported tasks have no instruction packs — the scheduler
+  claims them on the lean path (status flip plus activity log; the task
+  description verbatim is the worker input). Readiness is a state question
+  (`pic show` → ready/status), never a pack question.
 
 ### Step 3 — Authorization relay
 
