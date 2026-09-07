@@ -47,6 +47,7 @@ func cmdShow(args []string) error {
 		artifacts, _ := queryMaps(db, `SELECT * FROM work_item_artifacts WHERE work_item_id=? ORDER BY stage,revision DESC`, id)
 		checkpoints, _ := queryMaps(db, `SELECT * FROM workflow_checkpoints WHERE work_item_id=? ORDER BY created_at`, id)
 		packs, _ := queryMaps(db, `SELECT * FROM work_item_instruction_packs WHERE work_item_id=? ORDER BY version DESC`, id)
+		materializations, _ := queryMaps(db, `SELECT root_work_item_id,checkpoint_id,node_key,work_item_id FROM work_item_materializations WHERE work_item_id=?`, id)
 		profiles, _ := queryMaps(db, `SELECT * FROM work_item_profiles WHERE work_item_id=? ORDER BY profile_name,profile_version`, id)
 		verificationReports, _ := queryMaps(db, `SELECT * FROM work_item_verification_reports WHERE work_item_id=? ORDER BY datetime(created_at) DESC,rowid DESC`, id)
 		completionReports, _ := queryMaps(db, `SELECT * FROM work_item_completion_reports WHERE work_item_id=? ORDER BY datetime(created_at) DESC,rowid DESC`, id)
@@ -60,7 +61,7 @@ func cmdShow(args []string) error {
 			state, _ := loadWorkItemExecutionState(db, id)
 			executionState = state
 		}
-		writeJSON(os.Stdout, map[string]any{"work_item": item, "ready": ready, "execution_state": executionState, "children": children, "dependencies": dependencies, "relations": relations, "artifacts": artifacts, "checkpoints": checkpoints, "instruction_packs": packs, "profiles": profiles, "completion_reports": completionReports, "verification_reports": verificationReports, "owner_decisions": ownerDecisions, "requirements": requirements, "planning_owner_decisions": planningOwnerDecisions, "escalations": escalations})
+		writeJSON(os.Stdout, map[string]any{"work_item": item, "ready": ready, "execution_state": executionState, "children": children, "dependencies": dependencies, "relations": relations, "artifacts": artifacts, "checkpoints": checkpoints, "instruction_packs": packs, "materializations": materializations, "profiles": profiles, "completion_reports": completionReports, "verification_reports": verificationReports, "owner_decisions": ownerDecisions, "requirements": requirements, "planning_owner_decisions": planningOwnerDecisions, "escalations": escalations})
 		return nil
 	}
 	return fmt.Errorf("Work Item %s not found", id)

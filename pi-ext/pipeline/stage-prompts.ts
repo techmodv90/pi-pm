@@ -245,7 +245,16 @@ export function stagePrompt(stage: PipelineStage, taskId: string, cwd: string): 
     }
     const data = normalizePipelineData(doc);
     const activePack = data.instruction_packs.find((pack: PicInstructionPack) => pack.status === "active");
-    if (!activePack) throw new Error(`Work Item ${taskId} requires one active instruction pack`);
+    if (!activePack) {
+      // Lean path (owner decision 2026-09-07): a task claimed without legacy
+      // pipeline state takes the stored description verbatim (Acceptance and
+      // Behavior context already embedded) as the worker input — no TIP render.
+      // Safe here because prompts are built only after a successful claim: a
+      // legacy task always has its pack by this point.
+      if (stage === "review") return reviewStagePrompt(taskId, cwd);
+      if (stage === "autofix" || stage === "worker") return String(data.work_item.description || "");
+      throw new Error(`Work Item ${taskId} requires one active instruction pack`);
+    }
     if (stage === "review") return reviewStagePrompt(taskId, cwd);
     if (stage === "autofix") return renderCanonicalInstructionPackXml(data.work_item, activePack) + buildAutofixContext(data);
     const runs = parsePipelineRuns(execPic(["workflow", "pipeline-runs", taskId], cwd));
