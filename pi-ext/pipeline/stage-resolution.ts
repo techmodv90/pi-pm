@@ -228,8 +228,13 @@ export function nextPipelineStage(data: any, runs: any[] = []): PipelineStage | 
   }
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
-  if (!activePack && (data.scan_reports || [])[0]?.status !== "completed") return "scan";
-  if (!activePack) return null;
+  // Lean imported model (owner decision 2026-09-07, legacy planning disabled):
+  // pack-free executable tasks claim as lean workers; epics/features never run
+  // execution stages themselves — the Go aggregate flow drives verification.
+  if (!activePack) {
+    const type = data.work_item?.type;
+    return type === "epic" || type === "feature" ? null : "worker";
+  }
   const doneReports = activePackDoneReports(data, activePack);
   const latest = doneReports[0];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)

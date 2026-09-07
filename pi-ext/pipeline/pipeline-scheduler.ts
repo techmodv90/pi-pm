@@ -2,7 +2,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
 import { promisify } from "node:util";
-import { join, basename } from "node:path";
+import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
 import { execPic, execPicText, withGitWriteLock } from "../core/cli-helpers.ts";
@@ -11,9 +11,9 @@ import { loadLatestBlueprintDraft } from "../core/blueprint-drafts.ts";
 
 
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
-import { buildTaskVerifyPrompt, buildWorkItemContinuePrompt, buildPlanningHandoffXml, CANONICAL_SCAN_REPORT_XML_FORMAT } from "../tasking/work-item-prompts.ts";
+import { buildTaskVerifyPrompt, buildPlanningHandoffXml } from "../tasking/work-item-prompts.ts";
 import { discoverAgents } from "../subagent/agents.ts";
-import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, retainWorktreeForResume, startSubagentResilient, type SubagentHandle } from "../subagent/runner.ts";
+import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, startSubagentResilient } from "../subagent/runner.ts";
 import { bindPipelineDispatch, findPipelineDispatch, listPipelineDispatches, writePipelineDispatch, writePipelineOutputLog, writePipelineStatus, type PipelineDispatch, type PipelineDispatchReport } from "./pipeline-dispatch.ts";
 
 import type { SubagentResult } from "../subagent/types.ts";
@@ -24,7 +24,7 @@ import { activePackDoneReports, currentFailedReview, isMutationStage, latestVeri
 import { assertCleanGit, assertReviewBaseCurrent, finalizeReviewedIntegration, mergeAggregateBranch, rejectedCandidatePatch, repositoryHead, verificationEnvironmentFingerprint, type AggregateDeliveryState } from "./integration.ts";
 import { DEFAULT_GENERATED_FILES, filterGeneratedFiles, pipelineFailureResult, validateWorkerOutput, validateWorkerPatchArtifact, workerPatch } from "./worker-validation.ts";
 import { REVIEW_FIX_ROUND_LIMIT, assertReviewFixChangedPatch, buildReviewFixCapBlock, reviewCycleCount } from "./corrections.ts";
-import { isPlanningStage, pipelineSpawnParams, planningStages, stageAgent, stagePrompt, predecessorCheckpointFor, startFullScanFanout, workerSessionPath } from "./stage-prompts.ts";
+import { isPlanningStage, pipelineSpawnParams, planningStages, stageAgent, stagePrompt, predecessorCheckpointFor, workerSessionPath } from "./stage-prompts.ts";
 import { assertRunContractCurrent, buildPipelineDryRun, canonicalReadyLeafIds, isResumableExecutionState, nextPipelineStage, normalizePipelineData, pipelineWorkerBlockReason, resolvePlanProfile, workerIntegrationCandidate, type PlanningProfileState } from "./stage-resolution.ts";
 import { evaluateSkillFamilyRouting, recordSkillRoutingEvent } from "./skill-routing.ts";
 
@@ -152,8 +152,6 @@ export class PipelineScheduler {
 
   private roots = new Set<string>();
   private readonly pi: ExtensionAPI;
-  private agentRuns = new Map<string, PipelineRun>();
-  private agentHandles = new Map<string, SubagentHandle>();
   // Durable worker worktree constraint (RLB-GAP-001): failure modes of retained
   // pack worktrees, keyed by worktree key (instruction pack id), consumed by the
   // next launch of the same pack as the resume preamble source.
@@ -204,53 +202,6 @@ export class PipelineScheduler {
     return JSON.stringify(mergeRriTAuthoringResults(results, uniquePersonas));
   }
 
-  private async persistAgentResult(result: SubagentResult): Promise<void> {
-    const run = this.agentRuns.get(result.runId);
-    if (!run?.async_dir) return;
-
-    try {
-      // Completion handoff must yield after HerdR closes; patch inspection and pic reconciliation are synchronous.
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      const completed = result.exitCode === 0 && result.stopReason !== "aborted";
-      const status = completed ? "completed" : "failed";
-      const output = finalAssistantText(result.messages) || result.stderr || result.errorMessage || "";
-      writeFileSync(join(run.async_dir, `output-${run.child_index || 0}.log`), output, { mode: 0o600 });
-      if (result.workspace) writeFileSync(join(run.async_dir, "workspace.json"), JSON.stringify(result.workspace, null, 2), { mode: 0o600 });
-      if (completed && isMutationStage(run.stage)) await this.writeWorkerPatch(run, result);
-      // Transient-fault classification persistence constraint: carry the runner's
-      // in-claim transient provider classification into the status artifact so the
-      // reconciliation completion (pipeline-complete --result-json) can surface
-      // durable failure_code=transient_provider instead of a generic failure.
-      writeFileSync(join(run.async_dir, "status.json"), JSON.stringify({ state: completed ? "completed" : "failed", error: result.errorMessage || result.stderr || "", failure_code: completed ? "" : result.failureCode || "", steps: [{ status, model: result.model || "" }] }), { mode: 0o600 });
-      // Durable worker worktree constraint (RLB-GAP-001): a mutation-stage child
-      // that died before emitting its completion report retains its pack-keyed
-      // worktree for resume; deterministic outcomes (report emitted, success,
-      // cancellation, parse-invalid output with exit 0) clean up exactly as
-      // GAP-091/096 required. Worktree ownership is keyed by the branch key,
-      // which equals the worktree directory name (claim id or instruction pack).
-      const assignedWorktree = result.workspace?.assignedWorktree;
-      if (assignedWorktree) {
-        const worktreeKey = basename(assignedWorktree);
-        if (retainWorktreeForResume(run.stage, result)) {
-          this.retainedFailures.set(worktreeKey, result.failureCode || result.stopReason || "prior attempt died before emitting its completion report");
-        } else {
-          this.retainedFailures.delete(worktreeKey);
-          removeSubagentWorktree(this.cwd, assignedWorktree, worktreeKey);
-        }
-      }
-      this.agentHandles.delete(result.runId);
-      this.agentRuns.delete(result.runId);
-      this.queueReconcile();
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      if (run.async_dir) writeFileSync(join(run.async_dir, "status.json"), JSON.stringify({ state: "failed", error: message, failure_code: result.failureCode || "", steps: [{ status: "failed", error: message }] }), { mode: 0o600 });
-      if (result.workspace?.assignedWorktree) try { removeSubagentWorktree(this.cwd, result.workspace.assignedWorktree, basename(result.workspace.assignedWorktree)); } catch {}
-      this.agentHandles.delete(result.runId);
-      this.agentRuns.delete(result.runId);
-      if (this.context) this.reportError(error, this.context);
-      this.queueReconcile();
-    }
-  }
 
   private queueReconcile(): void {
     setImmediate(() => { void this.reconcileSafely(); });
@@ -399,21 +350,12 @@ export class PipelineScheduler {
     this.lastError = "";
     this.roots.add(rootTaskId);
     const workflow = execPic(["work-item", "workflow-status", rootTaskId], ctx.cwd);
-    if (workflow.next_stage === "scan") {
-      const rejection = execPic(["work-item", "scan-rejection", rootTaskId], ctx.cwd);
-      if (rejection.rejected) {
-        throw new Error(`Scan report was rejected by the contractor: ${rejection.reason}. Owner decision required: call reset_work_item_planning with actor_role=owner to rescan, or leave the Work Item at Scan and do not retry.`);
-      }
-      return await this.launchGroup("scan", [rootTaskId]);
-    }
-    if (workflow.next_stage === "rri") {
-      const data = execPic(["show", rootTaskId], ctx.cwd);
-      return { stage: "rri", taskIds: [rootTaskId], contractor: true, prompt: buildWorkItemContinuePrompt(workflow, data.work_item) };
-    }
-    if (planningStages.includes(workflow.next_stage)) {
-      if (workflow.next_stage === "contracts") throw new Error("Contract drafting is Contractor-owned; use work_on_work_item to return the Contract prompt to the main session");
-      assertCleanGit(ctx.cwd);
-      return await this.launchGroup(workflow.next_stage, [rootTaskId]);
+    // Legacy planning stages are disabled (owner decision 2026-09-07): the
+    // scheduler never launches scan/rri/vision/blueprint/contracts/task_graph.
+    // Contractor-owned planning (rri/contracts/vision prompts) is reached via
+    // work_on_work_item in api/tool.ts, never through the spawn scheduler.
+    if (workflow.next_stage === "scan" || workflow.next_stage === "rri" || planningStages.includes(workflow.next_stage)) {
+      throw new Error(`Work Item ${rootTaskId} next_stage=${workflow.next_stage}: legacy planning stages are disabled. Imported Work Items proceed through owner authorization and lean implementation; planning flows run through task_manager in the main session.`);
     }
     assertCleanGit(ctx.cwd);
     await this.reconcile();
@@ -494,12 +436,10 @@ export class PipelineScheduler {
   async stop(taskId: string, ctx: ExtensionContext): Promise<any> {
     const status = this.status(taskId, ctx);
     const active = (status.runs || []).filter((run: PipelineRun & { status: string }) => run.status === "claimed" || run.status === "running");
-    const runIds = [...new Set(active.map((run: PipelineRun) => run.subagent_run_id).filter(Boolean))];
     for (const run of active) {
       const cancelled = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "cancelled", "--error", "cancelled by operator"], ctx.cwd);
       if (cancelled.error) throw new Error(cancelled.error);
     }
-    for (const runId of runIds) this.agentHandles.get(String(runId))?.stop();
     return { task_id: taskId, cancelled_runs: active.map((run: PipelineRun) => run.id) };
   }
 
@@ -705,52 +645,25 @@ export class PipelineScheduler {
           // exists for this pack anymore, so drop the stale failure-mode note.
           if (!prepared.reused && spec.durableWorktreeKey) this.retainedFailures.delete(spec.durableWorktreeKey);
         }
-        let runId = "";
-        if (stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)) {
-          // Full-scan fanout stays on the process runner until multi-child
-          // dispatch fanout is designed; every other stage dispatches through
-          // the Agent tool seam below.
-          let handle: SubagentHandle;
-          try {
-            handle = startFullScanFanout(spec, agent);
-          } catch (error) {
-            if (spec.preparedWorktree && spec.runId && !spec.reusedRetainedWorktree) removeSubagentWorktree(this.cwd, spec.preparedWorktree, basename(spec.preparedWorktree));
-            throw error;
-          }
-          runId = handle.id;
-          const artifactDir = join(this.cwd, ".pi-subagents", "pipeline", claim.id);
-          mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
-          writeFileSync(join(artifactDir, "status.json"), JSON.stringify({ state: "running", pid: handle.pid, steps: [{ status: "running" }] }), { mode: 0o600 });
-          this.agentRuns.set(runId, { ...claim, skillFamilies, taskPrompt, subagent_run_id: runId, async_dir: artifactDir, child_index: 0 });
-          this.agentHandles.set(runId, handle);
-          void handle.result.then((result) => this.persistAgentResult(result));
-          const bound = execPic(["workflow", "pipeline-bind", claim.id, claim.lease_token, runId, "--async-dir", artifactDir, "--child-index", "0"], this.cwd);
-          if (bound.error) {
-            handle.stop();
-            throw new Error(bound.error);
-          }
-          subagentRunIds.push(runId);
-        } else {
-          // Agent-tool dispatch: persist the dispatch record with the prepared
-          // worktree; the contractor binds the Agent tool id (hard gate: empty
-          // id rejected) and reports terminal output. The run row stays
-          // `claimed` with no async_dir until bind, so reconcile skips it.
-          const artifactDir = join(this.cwd, ".pi-subagents", "pipeline", claim.id);
-          const dispatch: PipelineDispatch = {
-            runId: claim.id,
-            leaseToken: claim.lease_token,
-            agent: spec.agent,
-            stage,
-            taskId,
-            task: taskPrompt,
-            asyncDir: artifactDir,
-            worktree: spec.preparedWorktree || "",
-            initialPatchPath: spec.initialPatchPath,
-            skillFamilies,
-          };
-          writePipelineDispatch(dispatch);
-          dispatches.push(dispatch);
-        }
+        // Agent-tool dispatch: persist the dispatch record with the prepared
+        // worktree; the contractor binds the Agent tool id (hard gate: empty
+        // id rejected) and reports terminal output. The run row stays
+        // `claimed` with no async_dir until bind, so reconcile skips it.
+        const artifactDir = join(this.cwd, ".pi-subagents", "pipeline", claim.id);
+        const dispatch: PipelineDispatch = {
+          runId: claim.id,
+          leaseToken: claim.lease_token,
+          agent: spec.agent,
+          stage,
+          taskId,
+          task: taskPrompt,
+          asyncDir: artifactDir,
+          worktree: spec.preparedWorktree || "",
+          initialPatchPath: spec.initialPatchPath,
+          skillFamilies,
+        };
+        writePipelineDispatch(dispatch);
+        dispatches.push(dispatch);
       }
       return {
         stage,
@@ -885,15 +798,6 @@ export class PipelineScheduler {
         }
         checkpoint(run, "advanced", this.cwd);
         await this.advance(run.task_id);
-        return;
-      }
-      if (run.stage === "scan") {
-        const output = outputFor(run);
-        const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state, scan_report: output })], this.cwd);
-        if (result.error) throw new Error(result.error);
-        const handoffId = this.handoffs.put("scan", run.task_id, output);
-        this.pi.sendUserMessage(`Scan evidence ready for contractor synthesis for ${run.task_id}. Load ephemeral handoff ${handoffId}, validate every section against source, resolve contradictions, and save one canonical Scan Report as structured XML matching this schema:\n\n${CANONICAL_SCAN_REPORT_XML_FORMAT}\n\nDo not format owner-facing Markdown; the task_manager tool renders the saved XML deterministically. Otherwise reject the scan. The handoff expires five minutes after first load and is never persisted.`, { deliverAs: "followUp" });
-        checkpoint(run, "advanced", this.cwd);
         return;
       }
       if (isPlanningStage(run.stage)) {

@@ -1,10 +1,7 @@
-import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { execPic, execPicText } from "../core/cli-helpers.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
 import { buildWorkItemContinuePrompt, buildWorkItemReviewerHandoff, buildWorkItemScanPrompt } from "../tasking/work-item-prompts.ts";
-import { finalAssistantText, startSubagent, type SubagentHandle } from "../subagent/runner.ts";
-import type { SubagentResult } from "../subagent/types.ts";
 import { parsePipelineRuns, type PipelineStage } from "./pipeline-types.ts";
 import { renderCanonicalInstructionPackXml } from "./instruction-pack-xml.ts";
 import { listSkillFamilies, type SkillFamilyCatalogEntry } from "../subagent/skills.ts";
@@ -50,118 +47,6 @@ export function pipelineSpawnParams(stage: PipelineStage, task: any, cwd: string
   return spec;
 }
 
-export const FULL_SCAN_SECTIONS = [
-  ["Architecture", "Map stack, modules, boundaries, entry points, and data flow. Cite files and lines; do not estimate unrelated metrics."],
-  ["Lifecycle", "Trace planning, materialization, authorization, execution, review, verification, acceptance, merge, cancellation, and reset state transitions."],
-  ["Authority", "Audit actor-role checks, child-agent capabilities, persistence boundaries, immutability, and security risks. Distinguish implemented guards from gaps."],
-  ["Verification", "Inspect manifests, test/build/typecheck commands, test layout, runtime prerequisites, and current blockers. Separate observed runs from historical evidence."],
-  ["Reliability", "Inspect the gap ledger, open invariants, operational risks, migrations, generated artifacts, and documentation drift. Report exact statuses only."],
-] as const;
-
-export const SCOUT_EVIDENCE_REQUIRED_ELEMENTS = ["scope", "findings", "gaps", "verification", "risks"] as const;
-
-export function validateScoutEvidenceXml(output: string, section: string): void {
-  const normalized = normalizeScoutEvidenceXml(output);
-  const root = normalized.match(/^<scout_evidence\b([^>]*)>([\s\S]*)<\/scout_evidence>$/);
-  const attributes = root?.[1].match(/([a-zA-Z_][\w.-]*)="([^"]*)"/g)?.reduce<Record<string, string>>((values, attribute) => {
-    const match = attribute.match(/^([a-zA-Z_][\w.-]*)="([^"]*)"$/);
-    if (match) values[match[1]] = match[2];
-    return values;
-  }, {}) || {};
-  if (!root || attributes.section !== section.toLowerCase() || !["high", "medium", "low"].includes(attributes.confidence)) throw new Error(`Scout ${section} output must be one <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low"> document`);
-  for (const element of SCOUT_EVIDENCE_REQUIRED_ELEMENTS) {
-    if (!root[2].includes(`<${element}>`) || !root[2].includes(`</${element}>`)) throw new Error(`Scout ${section} evidence missing <${element}>`);
-  }
-  if (!/<source\s+path="[^"]+"(?:\s+line="[^"]+")?\s*>[\s\S]*<\/source>/.test(root[2])) throw new Error(`Scout ${section} evidence requires at least one source citation`);
-}
-
-export function normalizeScoutEvidenceXml(output: string): string {
-  const trimmed = output.trim().replace(/^```(?:xml)?\s*([\s\S]*?)\s*```$/, "$1").trim();
-  const start = trimmed.indexOf("<scout_evidence");
-  const end = trimmed.lastIndexOf("</scout_evidence>");
-  if (start >= 0 && end > start) return trimmed.slice(start, end + "</scout_evidence>".length).trim();
-  return trimmed;
-}
-
-export const SCAN_FANOUT_RETRY_LIMIT = 1;
-
-// Bounded repair constraint: a Scout section whose output fails validation or
-// whose process failed is retried exactly once with the concrete validation
-// error carried into the retry task; a section that fails again escalates as a
-// failed fanout result instead of looping.
-export function planScanRetryWave(results: Array<Partial<SubagentResult>>, outputs: string[]): Array<{ index: number; error: string }> {
-  const retry: Array<{ index: number; error: string }> = [];
-  results.forEach((entry, index) => {
-    if (entry.exitCode !== 0) {
-      retry.push({ index, error: entry.errorMessage || entry.stderr || "scout process failed" });
-      return;
-    }
-    try {
-      validateScoutEvidenceXml(outputs[index] ?? "", FULL_SCAN_SECTIONS[index]![0]);
-    } catch (error) {
-      retry.push({ index, error: error instanceof Error ? error.message : String(error) });
-    }
-  });
-  return retry;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-function scoutSectionTask(spec: any, section: string, assignment: string, lastError: string): string {
-  return `${spec.task}\n\n<section_assignment name="${section.toLowerCase()}">${assignment}</section_assignment>\nThe root must be <scout_evidence section="${section.toLowerCase()}" confidence="high|medium|low">. Return exactly that one XML document. Use exactly one concise finding, at most one gap, and one evidence container with one or two non-empty <source path="relative/file"> citations. Keep the complete document under 2,500 characters, including </scout_evidence>. Do not use Markdown or compose the canonical Scan Report.${lastError ? ` Previous output was invalid: ${lastError}. Correct exactly that defect on this retry.` : ""}`;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-export function startFullScanFanout(spec: any, agent: any): SubagentHandle {
-  const id = randomUUID();
-  const startSection = (section: string, assignment: string, lastError: string) => startSubagent({
-    ...spec,
-    runId: undefined,
-    agent,
-    task: scoutSectionTask(spec, section, assignment, lastError),
-  });
-  let handles: Array<{ handle: SubagentHandle }> = [];
-  const result = (async (): Promise<SubagentResult> => {
-    handles = FULL_SCAN_SECTIONS.map(([section, assignment]) => ({ handle: startSection(section, assignment, "") }));
-    const results = await Promise.all(handles.map((entry) => entry.handle.result));
-    const outputs = results.map((entry) => finalAssistantText(entry.messages) || entry.errorMessage || entry.stderr || "");
-    for (let attempt = 0; attempt < SCAN_FANOUT_RETRY_LIMIT; attempt++) {
-      const wave = planScanRetryWave(results, outputs);
-      if (!wave.length) break;
-      const retried = await Promise.all(wave.map((entry) => startSection(FULL_SCAN_SECTIONS[entry.index]![0], FULL_SCAN_SECTIONS[entry.index]![1], entry.error).result));
-      for (const [offset, entry] of wave.entries()) {
-        results[entry.index] = retried[offset]!;
-        outputs[entry.index] = finalAssistantText(retried[offset]!.messages) || retried[offset]!.errorMessage || retried[offset]!.stderr || "";
-      }
-    }
-    const failed = results.filter((entry) => entry.exitCode !== 0);
-    try {
-      outputs.forEach((output, index) => validateScoutEvidenceXml(output, FULL_SCAN_SECTIONS[index]![0]));
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    } catch (error: any) {
-      const message = error?.message || String(error);
-      return {
-        runId: id,
-        agent: "task-scout-group",
-        task: spec.task,
-        exitCode: 1,
-        messages: [{ role: "assistant", content: [{ type: "text", text: `Scout fanout failed: ${message}` }] }],
-        stderr: message,
-        usage: results.reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
-      };
-    }
-    const evidence = outputs.map((output, index) => normalizeScoutEvidenceXml(output).replace("<scout_evidence ", `<scout_evidence run_id="${results[index]!.runId}" `)).join("\n");
-    return {
-      runId: id,
-      agent: "task-scout-group",
-      task: spec.task,
-      exitCode: failed.length ? 1 : 0,
-      messages: [{ role: "assistant", content: [{ type: "text", text: `<scan_evidence work_item="${spec.taskId || "unknown"}" scan_level="full">\n${evidence}\n</scan_evidence>\n\nContractor: validate each <scout_evidence> section, resolve contradictions against source, and author one canonical Scan Report. Do not persist any individual Scout output as the Scan artifact.` }] }],
-      stderr: failed.map((entry) => entry.errorMessage || entry.stderr).filter(Boolean).join("\n"),
-      usage: results.reduce((total, entry) => ({ input: total.input + entry.usage.input, output: total.output + entry.usage.output, cacheRead: total.cacheRead + entry.usage.cacheRead, cacheWrite: total.cacheWrite + entry.usage.cacheWrite, cost: total.cost + entry.usage.cost, contextTokens: Math.max(total.contextTokens, entry.usage.contextTokens), turns: total.turns + entry.usage.turns }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 }),
-    };
-  })();
-  return { id, result, stop: () => handles.forEach((entry) => entry.handle.stop()) };
-}
 
 export function stageAgent(stage: PipelineStage): string {
   if (stage === "contracts") throw new Error("Contract drafting is Contractor-owned");

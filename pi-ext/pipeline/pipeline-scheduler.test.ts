@@ -6,9 +6,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { currentFailedReview } from "./report-parsing.ts";
-import { gateOpenP0P1RriQuestions, openP0P1RriQuestions, planPrimerContext, planScanRetryWave, PLANNING_DEADLINE_MS } from "./stage-prompts.ts";
+import { gateOpenP0P1RriQuestions, openP0P1RriQuestions, planPrimerContext, PLANNING_DEADLINE_MS } from "./stage-prompts.ts";
 import { MANAGED_WORKER_DEADLINE_MS } from "../subagent/runner.ts";
-import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
+import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
 import { PLANNING_STAGE_ORDER, SUPPLEMENTARY_PLANNING_STAGES } from "./stage-resolution.ts";
@@ -431,46 +431,12 @@ test("pipeline dry-run reports planned leaf stages and blockers without mutation
   });
 });
 
-test("canonical aggregate scheduling requires owner resolution after Scan rejection", () => {
+test("scheduler rejects legacy planning stages instead of launching them", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /next_stage[\s\S]{0,500}scan-rejection[\s\S]{0,500}launchGroup\("scan"/);
-  assert.match(source, /Owner decision required:[\s\S]{0,220}reset_work_item_planning/);
+  assert.match(source, /legacy planning stages are disabled/);
+  assert.doesNotMatch(source, /launchGroup\("scan"|scan-rejection|startFullScanFanout/);
 });
 
-test("full aggregate Scan fans out bounded evidence sections for contractor synthesis", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
-  for (const section of ["Architecture", "Lifecycle", "Authority", "Verification", "Reliability"]) assert.match(prompts, new RegExp(`\\["${section}"`));
-  assert.match(prompts, /startFullScanFanout/);
-  assert.match(prompts, /compose the canonical Scan Report/i);
-  assert.match(prompts, /root must be <scout_evidence section="\$\{section\.toLowerCase\(\)\}"/i);
-  assert.match(prompts, /one evidence container with one or two non-empty <source path="relative\/file"/);
-  assert.match(prompts, /Use exactly one concise finding, at most one gap/);
-  assert.match(prompts, /Keep the complete document under 2,500 characters/);
-  assert.match(source, /handoffs\.put\("scan"/);
-  assert.match(source, /Load ephemeral handoff \$\{handoffId\}/);
-  assert.doesNotMatch(source, /Scan evidence ready[^`]+\$\{output\}/);
-});
-
-test("Scout evidence requires structured XML rather than a Markdown wrapper", () => {
-  const valid = `<scout_evidence section="architecture" confidence="high"><scope><task>Map</task></scope><findings><finding><evidence><source path="main.go" line="1">package main</source></evidence></finding></findings><gaps></gaps><verification></verification><risks></risks></scout_evidence>`;
-  assert.doesNotThrow(() => validateScoutEvidenceXml(valid, "Architecture"));
-  assert.doesNotThrow(() => validateScoutEvidenceXml("```xml\n" + valid + "\n```", "Architecture"));
-  assert.doesNotThrow(() => validateScoutEvidenceXml("I have comprehensive source evidence.\n\n" + valid + "\n\nDone.", "Architecture"));
-  assert.doesNotThrow(() => validateScoutEvidenceXml(valid.replace('section="architecture" confidence="high"', 'run_id="scout-1" confidence="high" section="architecture"'), "Architecture"));
-  assert.throws(() => validateScoutEvidenceXml(`<scout_evidence section="architecture" confidence="high"># Markdown</scout_evidence>`, "Architecture"), /missing <scope>/);
-  assert.throws(() => validateScoutEvidenceXml(valid.replace(/<source[\s\S]*<\/source>/, "No citation"), "Architecture"), /source citation/);
-  const scoutPrompt = readFileSync(new URL("../agents/task-scout.md", import.meta.url), "utf8");
-  assert.doesNotMatch(scoutPrompt, /<handoff_questions>|<recommended_actions>/);
-});
-
-test("successful Scan Scout handoff completes without reporting a blocked attempt", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const scanStart = source.indexOf('if (run.stage === "scan")');
-  const scanFinish = source.slice(scanStart, source.indexOf("this.pi.sendUserMessage", scanStart));
-  assert.match(scanFinish, /pipeline-complete[\s\S]+"completed"/);
-  assert.doesNotMatch(scanFinish, /pipeline-complete[\s\S]+"blocked"/);
-});
 
 test("blocked Worker persists concrete evidence without saving a candidate artifact", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
@@ -508,14 +474,16 @@ test("planning pipeline stages use planning agents and prompts without an active
   const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   assert.match(prompts, /if \(stage === "rri"\) throw new Error\("RRI is Contractor-owned"\)/);
-  assert.match(source, /workflow\.next_stage === "rri"[\s\S]+contractor: true/);
+  // Legacy planning launch removed: the scheduler rejects planning next_stage
+  // values instead of dispatching scan/rri/vision/blueprint/contracts/task_graph.
+  assert.match(source, /legacy planning stages are disabled/);
+  assert.doesNotMatch(source, /launchGroup\(workflow\.next_stage/);
   assert.match(prompts, /vision: "task-planner"/);
   assert.doesNotMatch(prompts, /contracts: "task-planner"/);
   assert.match(prompts, /stage === "contracts".*Contract drafting is Contractor-owned/);
   assert.match(prompts, /task_graph: "task-planner"/);
   assert.match(prompts, /if \(isPlanningStage\(stage\)\) \{/);
   assert.match(prompts, /planningHandoff\(stage, doc, taskId, listSkillFamilies\(\{ cwd \}\)\)/);
-  assert.match(source, /if \(planningStages\.includes\(workflow\.next_stage\)\)[\s\S]+launchGroup\(workflow\.next_stage, \[rootTaskId\]\)/);
 });
 
 test("worker launches record an observe-mode skill family routing event without blocking", () => {
@@ -634,10 +602,11 @@ test("RRI-T authoring fanout runs read-only personas on the bounded resilient ru
 });
 
 test("RRI dispatch stays in contractor session and does not spawn persona agents", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
   const prompt = readFileSync(new URL("../tasking/work-item-prompts.ts", import.meta.url), "utf8");
-  assert.match(source, /workflow\.next_stage === "rri"[\s\S]+contractor: true/);
-  assert.doesNotMatch(source, /handle = stage === "rri"/);
+  // Contractor-owned RRI prompts are returned by work_on_work_item, never spawned.
+  assert.match(source, /buildWorkItemContinuePrompt/);
+  assert.doesNotMatch(source, /agent: "rri-persona"/);
   assert.match(prompt, /apply all relevant RRI persona lenses yourself/);
   assert.match(prompt, /Do not spawn or request `rri-persona` subagents/);
 });
@@ -702,11 +671,13 @@ test("round cap counts completed fix rounds only and reads the numeric legacy ow
   assert.equal(nextPipelineStage({ instruction_packs: [pack], completion_reports: [], work_item: { review_status: "failed" } }, [...runs, numericBlockReview]), null);
 });
 
-test("nextPipelineStage stops after task review", () => {
-  assert.equal(nextPipelineStage({}), "scan");
-  assert.equal(nextPipelineStage({ scan_reports: [{ status: "partial" }] }), "scan");
-  assert.equal(nextPipelineStage({ scan_reports: [{ status: "partial" }, { status: "completed" }] }), "scan");
-  assert.equal(nextPipelineStage({ scan_reports: [{ status: "completed" }] }), null);
+test("nextPipelineStage routes lean executables to worker and never into planning", () => {
+  // Legacy planning routing removed: pack-free items never return "scan".
+  assert.equal(nextPipelineStage({}), "worker");
+  assert.equal(nextPipelineStage({ scan_reports: [{ status: "partial" }] }), "worker");
+  assert.equal(nextPipelineStage({ work_item: { type: "epic" } }), null);
+  assert.equal(nextPipelineStage({ work_item: { type: "feature" } }), null);
+  assert.equal(nextPipelineStage({ scan_reports: [{ status: "completed" }], work_item: { type: "epic" } }), null);
   const ready = { instruction_packs: [{ status: "active" }] };
   assert.equal(nextPipelineStage(ready), "worker");
   const completion = { id: "cr-worker", status: "done", pipeline_run_id: "pr-worker" };
@@ -1355,7 +1326,7 @@ test("operator stop persists cancellation before stopping runtime and terminal f
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   const stopBody = source.slice(source.indexOf("async stop("), source.indexOf("private async scheduleReady"));
 
-  assert.ok(stopBody.indexOf('"pipeline-complete"') < stopBody.indexOf("agentHandles.get"));
+  assert.match(stopBody, /pipeline-complete[\s\S]+"cancelled"/);
   assert.doesNotMatch(source, /status !== "completed"\) \{[\s\S]{0,300}scheduleReady/);
   assert.doesNotMatch(source, /childStatus !== "complete"[\s\S]{0,500}continueWorkerGroup/);
 });
@@ -1477,147 +1448,15 @@ test("session startup performs no pipeline I/O", async () => {
   assert.equal(reconciled, 0);
 });
 
-test("worker completion yields before synchronous artifact reconciliation", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const body = source.slice(source.indexOf("private async persistAgentResult"), source.indexOf("private async reconcileSafely"));
-  assert.match(body, /await new Promise<void>\(\(resolve\) => setImmediate\(resolve\)\)/);
-  assert.match(body, /this\.queueReconcile\(\)/);
-  assert.match(body, /setImmediate\(\(\) => \{ void this\.reconcileSafely\(\); \}\)/);
-});
 
-test("owned runner completion persists output and Task-specific worktree patch evidence", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "task-system-owned-"));
-  execFileSync("git", ["init", "-q", "-b", "master"], { cwd: repo });
-  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
-  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
-  writeFileSync(join(repo, "file.txt"), "base\n");
-  execFileSync("git", ["add", "file.txt"], { cwd: repo });
-  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
-  const runId = `agent-${Date.now()}`;
-  const worktree = join(repo, ".pi", "worktrees", runId);
-  mkdirSync(join(repo, ".pi", "worktrees"), { recursive: true });
-  execFileSync("git", ["worktree", "add", "-qb", `pi-agent-${runId}`, worktree], { cwd: repo });
-  writeFileSync(join(worktree, "file.txt"), "changed\n");
-  writeFileSync(join(worktree, "new.txt"), "new\n");
-  mkdirSync(join(worktree, "test-results"));
-  writeFileSync(join(worktree, "test-results", ".last-run.json"), "{}\n");
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  const scheduler = new PipelineScheduler(pi) as any;
-  const artifactDir = join(repo, ".pi-subagents", "pipeline", "pr-1");
-  mkdirSync(artifactDir, { recursive: true });
-  scheduler.cwd = repo;
-  scheduler.agentRuns.set(runId, { id: "pr-1", task_id: "t-1", stage: "worker", lease_token: "lease", async_dir: artifactDir, child_index: 0 });
-  await scheduler.persistAgentResult({
-    runId,
-    agent: "task-worker",
-    task: "work",
-    exitCode: 0,
-    messages: [{ role: "assistant", content: [{ type: "text", text: '<completion_report tip_id="TIP-001" version="1" status="done"><files_changed>file.txt</files_changed><test_results>PASS</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>' }] }],
-    stderr: "",
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 },
-    workspace: {
-      assignedWorktree: worktree, childProcessCwd: worktree, bashCwd: worktree,
-      readToolRoot: worktree, editToolRoot: worktree, writeToolRoot: worktree, applyPatchRoot: worktree,
-      gitToplevel: worktree, head: execFileSync("git", ["rev-parse", "HEAD"], { cwd: worktree, encoding: "utf8" }).trim(),
-      statusBefore: "", statusAfter: " M file.txt\n?? new.txt", diffStatAfter: "file.txt | 2 +-",
-    },
-  });
 
-  assert.match(readFileSync(join(artifactDir, "output-0.log"), "utf8"), /completion_report/);
-  const patch = readFileSync(join(artifactDir, "worktree-diffs", "task-0-task-worker.patch"), "utf8");
-  assert.match(patch, /changed/);
-  assert.match(patch, /new\.txt/);
-  assert.doesNotMatch(patch, /test-results/);
-  assert.equal(JSON.parse(readFileSync(join(artifactDir, "status.json"), "utf8")).state, "completed");
-});
-
-test("a transient-provider exhaustion persists failure_code=transient_provider into the status artifact", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "task-transient-status-"));
-  execFileSync("git", ["init", "-q"], { cwd: repo });
-  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
-  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
-  writeFileSync(join(repo, "work.go"), "package work\n");
-  execFileSync("git", ["add", "."], { cwd: repo });
-  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  const scheduler = new PipelineScheduler(pi) as any;
-  const runId = `agent-transient-${Date.now()}`;
-  const artifactDir = join(repo, ".pi-subagents", "pipeline", "pr-transient");
-  mkdirSync(artifactDir, { recursive: true });
-  scheduler.cwd = repo;
-  scheduler.agentRuns.set(runId, { id: "pr-transient", task_id: "t-1", stage: "worker", lease_token: "lease", async_dir: artifactDir, child_index: 0 });
-  await scheduler.persistAgentResult({
-    runId,
-    agent: "task-worker",
-    task: "work",
-    exitCode: 1,
-    failureCode: "transient_provider",
-    errorMessage: "transient provider fault (empty_output) after 2 in-claim retries; exhausted without consuming a numbered attempt",
-    messages: [],
-    stderr: "",
-    usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
-  });
-  const status = JSON.parse(readFileSync(join(artifactDir, "status.json"), "utf8"));
-  assert.equal(status.state, "failed");
-  assert.equal(status.failure_code, "transient_provider");
-  assert.match(status.error, /without consuming a numbered attempt/);
-});
-
-test("pack worktree is retained on report-less worker death and cleaned on deterministic terminals", async () => {
-  const repo = mkdtempSync(join(tmpdir(), "task-system-retained-"));
-  execFileSync("git", ["init", "-q", "-b", "master"], { cwd: repo });
-  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
-  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
-  writeFileSync(join(repo, "file.txt"), "base\n");
-  execFileSync("git", ["add", "file.txt"], { cwd: repo });
-  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
-  const packKey = "wip-retained-pack";
-  const worktree = join(repo, ".pi", "worktrees", packKey);
-  mkdirSync(join(repo, ".pi", "worktrees"), { recursive: true });
-  execFileSync("git", ["worktree", "add", "-qb", `pi-agent-${packKey}`, worktree], { cwd: repo });
-  writeFileSync(join(worktree, "file.txt"), "partial resume work\n");
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  const pi = { events: { on: () => () => {}, emit: () => {} } } as any;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  const scheduler = new PipelineScheduler(pi) as any;
-  scheduler.cwd = repo;
-  const makeRun = (runId: string, artifactId: string) => {
-    const artifactDir = join(repo, ".pi-subagents", "pipeline", artifactId);
-    mkdirSync(artifactDir, { recursive: true });
-    scheduler.agentRuns.set(runId, { id: artifactId, task_id: "t-1", stage: "worker", lease_token: "lease", async_dir: artifactDir, child_index: 0 });
-  };
-  const usage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 1 };
-  const workspace = {
-    assignedWorktree: worktree, childProcessCwd: worktree, bashCwd: worktree,
-    readToolRoot: worktree, editToolRoot: worktree, writeToolRoot: worktree, applyPatchRoot: worktree,
-    gitToplevel: worktree, head: "", statusBefore: "", statusAfter: " M file.txt", diffStatAfter: "file.txt | 2 +-",
-  };
-
-  // Transient death mid-work (no completion report): the pack worktree survives.
-  makeRun("agent-died-1", "pr-died-1");
-  await scheduler.persistAgentResult({ runId: "agent-died-1", agent: "task-worker", task: "work", exitCode: 1, stopReason: "timed_out", messages: [{ role: "assistant", content: [{ type: "text", text: "partial work" }] }], stderr: "", usage, workspace });
-  assert.equal(readFileSync(join(worktree, "file.txt"), "utf8"), "partial resume work\n");
-  assert.equal(scheduler.retainedFailures.get(packKey), "timed_out");
-
-  // Deterministic terminal (report emitted): cleanup exactly as GAP-091/096.
-  makeRun("agent-done-1", "pr-done-1");
-  await scheduler.persistAgentResult({ runId: "agent-done-1", agent: "task-worker", task: "work", exitCode: 0, stopReason: "end", messages: [{ role: "assistant", content: [{ type: "text", text: '<completion_report status="done"><files_changed>file.txt</files_changed><test_results>PASS</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>' }] }], stderr: "", usage, workspace });
-  assert.throws(() => readFileSync(join(worktree, "file.txt"), "utf8"));
-  assert.equal(scheduler.retainedFailures.has(packKey), false);
-});
 
 test("worker launch wiring carries the durable pack key and resume failure mode", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   assert.match(source, /spec\.durableWorktreeKey = packKey/);
   assert.match(source, /if \(retainedMode\) spec\.resumeFailureMode = retainedMode/);
   assert.match(source, /spec\.reusedRetainedWorktree = prepared\.reused/);
-  assert.match(source, /!spec\.reusedRetainedWorktree\) removeSubagentWorktree/);
   assert.match(source, /if \(!prepared\.reused && spec\.durableWorktreeKey\) this\.retainedFailures\.delete/);
 });
 
@@ -1869,27 +1708,6 @@ test("canonical TIP XML renders the contract interfaces provided by the task gra
 test("closing a leaf notifies the owner with dependency-ready next work", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   assert.match(source, /"work-item", "status", taskId, "done"[\s\S]{0,900}readyLeafIds\(/);
-});
-
-test("scan fanout retries only failed sections once with the exact parser error", () => {
-  const valid = `<scout_evidence section="architecture" confidence="high"><finding>Uses SQLite</finding><verification>go test ./...</verification><risks></risks><sources><source path="cmd/pic/main.go">DB open</source></sources></scout_evidence>`;
-  const invalid = "prose without xml";
-  const wave = planScanRetryWave(
-    [
-      { exitCode: 0, runId: "run-1" },
-      { exitCode: 1, runId: "run-2", errorMessage: "spawn failed" },
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    ] as any,
-    [valid, invalid],
-  );
-  assert.equal(wave.length, 2);
-  assert.deepEqual(wave.map((entry) => entry.index), [0, 1]);
-  assert.match(wave[0]!.error, /missing <scope>/);
-  assert.equal(wave[1]!.error, "spawn failed");
-  const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
-  assert.match(prompts, /SCAN_FANOUT_RETRY_LIMIT = 1/);
-  assert.match(prompts, /planScanRetryWave\(/);
-  assert.match(prompts, /Previous output was invalid/);
 });
 
 test("primer context blocks dispatch when a predecessor checkpoint or artifact is missing", () => {
