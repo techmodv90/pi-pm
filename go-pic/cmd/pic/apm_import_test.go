@@ -438,6 +438,16 @@ func TestApmImportDryRun(t *testing.T) {
 	if first["tid"] != "T001" || first["feature"] != "F1" || first["depends_on"] != nil {
 		t.Fatalf("first task = %#v", first)
 	}
+	// Rule C: the fixture's T001 ║ T002 pair must share an empty predecessor
+	// set — a declared-parallel pair must not be serialized by the flattened
+	// execution order.
+	second := asObject(t, tasks[1])
+	if second["tid"] != "T002" {
+		t.Fatalf("second task = %#v", second)
+	}
+	if dep, ok := second["depends_on"].([]any); ok && len(dep) != 0 {
+		t.Fatalf("parallel task T002 depends_on = %#v, want empty", second["depends_on"])
+	}
 	edges := asArray(t, graph["edges"])
 	if len(edges) != 2 {
 		t.Fatalf("feature edges = %#v", edges)

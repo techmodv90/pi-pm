@@ -437,10 +437,29 @@ func buildApmGraph(doc *apmDoc, milestone string) *apmGraph {
 	for i, tid := range seq {
 		pos[tid] = i
 	}
+	// Rule C: tasks joined by ║ on one order line are parallel — they share
+	// the predecessor set of everything strictly before that line, and must
+	// not depend on each other.
+	parallelRank := map[string]int{}
+	for _, ol := range doc.Order {
+		if ol.Parallel {
+			for _, tid := range ol.Seq {
+				parallelRank[tid] = pos[ol.Seq[0]]
+			}
+		}
+	}
 	predecessors := func(tid string) []string {
+		tidRank, ok := parallelRank[tid]
+		if !ok {
+			tidRank = pos[tid]
+		}
 		var preds []string
 		for _, other := range seq {
-			if pos[other] < pos[tid] && featureOf[other] == featureOf[tid] {
+			rank := pos[other]
+			if r, ok := parallelRank[other]; ok {
+				rank = r
+			}
+			if rank < tidRank && featureOf[other] == featureOf[tid] {
 				preds = append(preds, other)
 			}
 		}
