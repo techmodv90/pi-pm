@@ -131,3 +131,42 @@ func TestLeanClaimSingleWriter(t *testing.T) {
 		t.Fatalf("rejected second claim must write nothing: runs=%d events=%d", runs, events)
 	}
 }
+
+func TestLeanClaimEndToEnd(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	// Legacy task reaches its legacy gates in the same store.
+	legacy := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Legacy task"))
+	legacyID := legacy["id"].(string)
+	seedLegacyPipelineState(t, dbPath, legacyID)
+	legacyClaim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", legacyID, "worker"))
+	if legacyClaim["instruction_pack_id"] != "pk-legacy" {
+		t.Fatalf("legacy claim must bind the active pack: %#v", legacyClaim["instruction_pack_id"])
+	}
+
+	// Lean task: claim, then read back through pic show.
+	bare := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Lean task"))
+	bareID := bare["id"].(string)
+	asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", bareID, "worker", "--claimant", "worker-a"))
+
+	shown := asObject(t, runPic(t, bin, root, home, "show", bareID))
+	db := openSQLiteGo(t, dbPath)
+	wi := asObject(t, shown["work_item"])
+	if wi["status"] != "in_progress" || wi["claimed_by"] != "worker-a" {
+		t.Fatalf("show readback = status=%v claimed_by=%v", wi["status"], wi["claimed_by"])
+	}
+	if claimedAt, _ := wi["claimed_at"].(string); claimedAt == "" {
+		t.Fatalf("show readback missing claimed_at: %#v", wi["claimed_at"])
+	}
+	// The activity log (work_item_events) is not part of the show payload;
+	// assert the claimed event directly in the store.
+	var claimEvents int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_item_events WHERE work_item_id=? AND event_type='claimed'`, bareID).Scan(&claimEvents); err != nil {
+		t.Fatal(err)
+	}
+	if claimEvents != 1 {
+		t.Fatalf("activity log claimed events = %d, want 1", claimEvents)
+	}
+}
