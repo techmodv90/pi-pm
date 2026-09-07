@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -162,6 +163,64 @@ func TestArtifactSaveProjectsAllPlanningStages(t *testing.T) {
 			decision = "accepted"
 		}
 		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+}
+
+// TestArtifactProjectionFailureIsBestEffort is the RED end-to-end test for
+// best-effort projection failure semantics (Plan §API Contract, NC-2): when
+// the artifacts directory is unwritable, the canonical save must still
+// succeed with the work_item_artifacts row stored, the response must carry an
+// empty file_path, a warning event artifact_projection_failed with payload
+// {stage, revision, file_path, error} must record the failed projection, and
+// no markdown file may exist at the deterministic path. The save integration
+// (T009) does not exist yet, so the missing warning event and empty file_path
+// fail first while the canonical save already succeeds.
+func TestArtifactProjectionFailureIsBestEffort(t *testing.T) {
+	bin := buildPic(t)
+	root, home, id := initArtifactFileProject(t, bin)
+	db := openArtifactProjectDB(t, root)
+
+	// Unwritable artifacts dir: canonical SQLite stays writable, file
+	// projection cannot.
+	makeArtifactsDirUnwritable(t, root)
+
+	artifact := saveArtifact(t, bin, root, home, id, "vision", validVisionArtifact)
+	if artifact["revision"] != float64(1) {
+		t.Fatalf("vision artifact = %#v", artifact)
+	}
+	// Canonical persistence is best-effort's anchor: the row must be stored.
+	revision, content, contentHash := artifactFileRow(t, db, id, "vision")
+	wantHash := hashJSON(validVisionArtifact)
+	if revision != 1 || content != validVisionArtifact || contentHash != wantHash {
+		t.Fatalf("vision artifact row = rev %d content %q hash %q, want hash %s", revision, content, contentHash, wantHash)
+	}
+	// NC-2: failed projection surfaces an empty file_path, not an error.
+	if artifact["file_path"] != "" {
+		t.Fatalf("response file_path = %v, want empty string", artifact["file_path"])
+	}
+	// NC-2: the failed projection is recorded as a warning event.
+	assertWorkItemEventCount(t, db, id, "artifact_projection_failed", 1)
+	var eventType, payloadJSON string
+	if err := db.QueryRow(`SELECT event_type,payload_json FROM work_item_events WHERE work_item_id=? AND event_type='artifact_projection_failed' LIMIT 1`, id).Scan(&eventType, &payloadJSON); err != nil {
+		t.Fatalf("artifact_projection_failed event: %v", err)
+	}
+	wantPath, err := artifactFilePath(root, id, "vision", 1)
+	if err != nil {
+		t.Fatalf("artifactFilePath: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("warning payload not JSON: %v (%s)", err, payloadJSON)
+	}
+	if payload["stage"] != "vision" || payload["revision"] != float64(1) || payload["file_path"] != wantPath {
+		t.Fatalf("warning payload = %#v, want stage vision revision 1 file_path %s", payload, wantPath)
+	}
+	if errMsg, _ := payload["error"].(string); errMsg == "" {
+		t.Fatalf("warning payload error detail missing: %#v", payload)
+	}
+	// NC-2: no projected markdown may exist at the deterministic path.
+	if _, statErr := os.Stat(wantPath); !os.IsNotExist(statErr) {
+		t.Fatalf("projected file exists at %s despite unwritable dir: stat err=%v", wantPath, statErr)
 	}
 }
 
