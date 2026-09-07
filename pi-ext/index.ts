@@ -6,7 +6,6 @@ import { registerPipelineScheduler } from "./pipeline/pipeline-scheduler";
 import { registerTaskAppCommand } from "./core/task-app-command";
 import { registerApmCommand } from "./core/apm-command";
 import { registerTaskManagerTool } from "./api/tool";
-import { registerAgentTrackerUI } from "./subagent/ui";
 import { registerManagedBashTimeout } from "./core/worker-timeout";
 import { registerSkillLoader } from "./core/skill-loader";
 import { registerWorkflowPrimer } from "./core/workflow-primer";
@@ -20,7 +19,6 @@ export default function (pi: ExtensionAPI) {
   const pipelineScheduler = registerPipelineScheduler(pi);
   registerTaskCommand(pi, pipelineScheduler);
   registerTaskManagerTool(pi, pipelineScheduler);
-  registerAgentTrackerUI(pi);
   registerTaskAppCommand(pi);
   registerApmCommand(pi);
   registerApmApprovalTool(pi);

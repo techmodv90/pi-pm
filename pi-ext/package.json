@@ -16,9 +16,15 @@
   },
   "pi": {
     "extensions": [
-      "./index.ts"
+      "./index.ts",
+      "node_modules/@plannotator/pi-extension",
+      "node_modules/pi-subagents-lite/src/index.ts"
     ]
   },
+  "bundledDependencies": [
+    "@plannotator/pi-extension",
+    "pi-subagents-lite"
+  ],
   "peerDependencies": {
     "@mariozechner/pi-ai": "*",
     "@mariozechner/pi-coding-agent": "*",
@@ -33,6 +39,7 @@
   },
   "dependencies": {
     "@plannotator/pi-extension": "^0.27.12",
-    "fast-xml-parser": "^5.10.1"
+    "fast-xml-parser": "^5.10.1",
+    "pi-subagents-lite": "^1.13.1"
   }
 }

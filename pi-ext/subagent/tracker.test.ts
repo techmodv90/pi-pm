@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import { AGENT_FAILURE_VISIBLE_MS, AGENT_STALL_AFTER_MS, AgentRunTracker, agentActivityLabel, formatAgentFooter, renderAgentWidget } from "./tracker.ts";
+import { AgentRunTracker } from "./tracker.ts";
 
 test("tracker exposes live agent state and persists its prompt and events", () => {
   const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
@@ -19,11 +19,7 @@ test("tracker exposes live agent state and persists its prompt and events", () =
   const run = tracker.get("run-12345678");
   assert.equal(run?.status, "running");
   assert.equal(run?.events.at(-1)?.summary, "read");
-  assert.equal(formatAgentFooter(tracker.list(), 120), "1 active · 1 open");
-  assert.match(renderAgentWidget(tracker.list(), 80).join("\n"), /t-42/);
-  assert.doesNotMatch(renderAgentWidget(tracker.list(), 80).join("\n"), /deploy race/);
-  assert.match(renderAgentWidget(tracker.list(), 80).join("\n"), /using read/);
-  assert.match(renderAgentWidget(tracker.list(), 120).join("\n"), /↻ 1 · 0 tok \(i 10k\/o 2\.4k\) · 2 tools/);
+  assert.equal(tracker.list().length, 1);
   assert.equal(tracker.stop("run-12345678"), true);
   assert.equal(stopped, true);
 
@@ -33,14 +29,13 @@ test("tracker exposes live agent state and persists its prompt and events", () =
   assert.equal(statSync(join(dir, "prompt.txt")).mode & 0o777, 0o600);
 });
 
-test("tracker retains completed runs but removes them from the active footer", () => {
+test("tracker retains completed runs after finish", () => {
   const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
   const tracker = new AgentRunTracker();
   tracker.start({ runId: "run-1", agent: "task-scout", task: "Inspect", cwd });
   tracker.finish("run-1", "completed");
 
   assert.equal(tracker.get("run-1")?.status, "completed");
-  assert.equal(formatAgentFooter(tracker.list(), 80), "");
 });
 
 test("tracker sync salvages a done completion report from a dead process instead of failing the run", () => {
@@ -79,27 +74,9 @@ test("tracker sync marks a running agent failed when its persisted process is go
 
   assert.equal(tracker.get("orphan")?.status, "failed");
   assert.equal(tracker.get("orphan")?.events.at(-1)?.summary, "agent process exited without a terminal result");
-  assert.doesNotMatch(renderAgentWidget(tracker.list(), 80).join("\n"), /using bash/);
 });
 
-test("tracker marks a live but silent run stalled without making it terminal", () => {
-  const run = {
-    runId: "silent",
-    agent: "task-worker",
-    task: "Build",
-    cwd: "/tmp",
-    status: "running" as const,
-    startedAt: 1,
-    heartbeatAt: 1,
-    activityState: "using bash",
-    events: [],
-  };
-
-  assert.match(agentActivityLabel(run, 1 + AGENT_STALL_AFTER_MS), /stalled: no activity/);
-  assert.equal(run.status, "running");
-});
-
-test("tracker touch refreshes the heartbeat so streaming stdout suppresses the stall label", () => {
+test("tracker touch refreshes the heartbeat without making a streaming run terminal", () => {
   const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-touch-"));
   const tracker = new AgentRunTracker();
   tracker.start({ runId: "streaming", agent: "task-worker", task: "Build", cwd });
@@ -109,7 +86,6 @@ test("tracker touch refreshes the heartbeat so streaming stdout suppresses the s
 
   const run = tracker.get("streaming")!;
   assert.ok(run.heartbeatAt! >= startedAt);
-  assert.equal(agentActivityLabel(run, run.heartbeatAt! + 1_000).includes("stalled"), false);
   assert.equal(run.status, "running");
 
   tracker.finish("streaming", "completed");
@@ -117,25 +93,19 @@ test("tracker touch refreshes the heartbeat so streaming stdout suppresses the s
   assert.notEqual(tracker.get("streaming")?.status, "running");
 });
 
-test("tracker projects managed process and turn lifecycle in the live widget", () => {
+test("tracker records observed lifecycle states on the run", () => {
   const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
   const tracker = new AgentRunTracker();
   tracker.start({ runId: "lifecycle", agent: "task-worker", task: "Build", cwd });
 
   tracker.observeLifecycle("lifecycle", "active", "using bash");
-  assert.equal(agentActivityLabel(tracker.get("lifecycle")!), "active · using bash");
-  tracker.observeLifecycle("lifecycle", "blocked");
-  assert.equal(agentActivityLabel(tracker.get("lifecycle")!), "blocked");
-  tracker.observeLifecycle("lifecycle", "waiting");
-  assert.equal(agentActivityLabel(tracker.get("lifecycle")!), "waiting");
-  tracker.observeLifecycle("lifecycle", "interrupted");
-  assert.equal(agentActivityLabel(tracker.get("lifecycle")!), "interrupted");
-  tracker.observeLifecycle("lifecycle", "finalizing");
-
   const run = tracker.get("lifecycle")!;
-  assert.equal(run.status, "running");
-  assert.equal(agentActivityLabel(run), "finalizing");
-  assert.match(renderAgentWidget([run], 80).join("\n"), /finalizing/);
+  assert.equal(run.lifecycleState, "active");
+  assert.equal(run.lifecycleDetail, "using bash");
+
+  tracker.observeLifecycle("lifecycle", "finalizing");
+  assert.equal(tracker.get("lifecycle")?.lifecycleState, "finalizing");
+  assert.equal(tracker.get("lifecycle")?.status, "running");
 });
 
 test("tracker syncs nested persona runs under their RRI parent", () => {
@@ -148,10 +118,9 @@ test("tracker syncs nested persona runs under their RRI parent", () => {
   parent.sync(cwd);
 
   assert.equal(parent.get("persona-child")?.parentRunId, "rri-parent");
-  const widget = renderAgentWidget(parent.list(), 120).join("\n");
-  assert.match(widget, /rri-persona/);
-  assert.match(widget, /rri-persona.*End User/);
-});test("late events for a cancelled run with deleted worktree do not throw", () => {
+});
+
+test("late events for a cancelled run with deleted worktree do not throw", () => {
   const cwd = mkdtempSync(join(tmpdir(), "task-agent-tracker-"));
   const tracker = new AgentRunTracker();
   tracker.start({ runId: "run-cancelled1", agent: "task-worker", task: "Work", cwd });
@@ -160,20 +129,4 @@ test("tracker syncs nested persona runs under their RRI parent", () => {
     tracker.event("run-cancelled1", "message", "thinking");
     tracker.setModel("run-cancelled1", "model-x");
   });
-});
-
-test("widget keeps recent failures visible with their terminal reason", () => {
-  const now = Date.now();
-  const failed = {
-    runId: "run-failed01", agent: "task-planner", task: "plan", cwd: "/tmp",
-    status: "failed" as const, startedAt: now - 60_000, finishedAt: now - 30_000,
-    terminalReason: "agent process exited without a terminal result", events: [],
-  };
-  const lines = renderAgentWidget([failed], 200, now).join("\n");
-  assert.match(lines, /✗ task-planner/);
-  assert.match(lines, /agent process exited without a terminal result/);
-
-  // Old failures age out; healthy-only lists render nothing.
-  const old = { ...failed, finishedAt: now - AGENT_FAILURE_VISIBLE_MS - 1_000 };
-  assert.deepEqual(renderAgentWidget([old], 200, now), []);
 });

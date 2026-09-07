@@ -236,76 +236,11 @@ function isSameProcess(run: AgentRun): boolean {
   return processStartIdentity(run.pid!) === run.processStartIdentity;
 }
 
-export const AGENT_STALL_AFTER_MS = 2 * 60 * 1000;
-
-export function agentActivityLabel(run: AgentRun, now = Date.now()): string {
-  if (run.status !== "running") return run.terminalReason || run.status;
-  if (run.lifecycleState === "finalizing" || run.lifecycleState === "blocked" || run.lifecycleState === "waiting" || run.lifecycleState === "interrupted") return run.lifecycleState;
-  if (run.heartbeatAt && now - run.heartbeatAt >= AGENT_STALL_AFTER_MS) return `stalled: no activity for ${Math.floor((now - run.heartbeatAt) / 1000)}s`;
-  if (run.lifecycleState === "active") return run.lifecycleDetail ? `active · ${run.lifecycleDetail}` : "active";
-  if (run.lifecycleState === "starting") return "starting";
-  const last = run.events.at(-1);
-  return run.activityState || (last?.type === "message" ? last.summary.split("\n")[0] : last?.type === "tool" ? `using ${last.summary}` : "thinking...");
-}
 
 export const agentRunTracker = new AgentRunTracker();
-
-export function formatAgentFooter(runs: AgentRun[], _width: number, _now = Date.now()): string {
-  const open = runs.filter((run) => run.status === "running");
-  if (!open.length) return "";
-  const active = open.filter((run) => run.lifecycleState === "active" || run.lifecycleState === "starting").length;
-  return `${active} active · ${open.length} open`;
-}
 
 // TUI contract: one rendered line per string. Task text and child-process output
 // contain newlines/control chars that would break pi-tui's diff-based redraw.
 export function singleLine(text: string): string {
   return text.replace(/[\r\n\x00-\x1f\x7f]+/g, " ").trim();
-}
-
-export const AGENT_FAILURE_VISIBLE_MS = 2 * 60 * 1000;
-
-export function renderAgentWidget(runs: AgentRun[], width: number, now = Date.now()): string[] {
-  const active = runs.filter((run) => run.status === "running");
-  // Recently failed/aborted runs stay visible briefly so provider deaths are
-  // diagnosable from the widget instead of only via events.jsonl.
-  const recentFailures = runs.filter(
-    (run) =>
-      (run.status === "failed" || run.status === "aborted") &&
-      run.finishedAt !== undefined &&
-      now - run.finishedAt < AGENT_FAILURE_VISIBLE_MS,
-  );
-  if (!active.length && !recentFailures.length) return [];
-  const truncate = (value: string) => {
-    const flat = singleLine(value);
-    return flat.length <= width ? flat : `${flat.slice(0, Math.max(0, width - 3))}...`;
-  };
-  const elapsed = (run: AgentRun) => {
-    const seconds = Math.max(0, Math.floor((now - run.startedAt) / 1000));
-    return `${Math.floor(seconds / 60)}m${String(seconds % 60).padStart(2, "0")}s`;
-  };
-  const compact = (value: number) => {
-    if (value < 1_000) return String(value);
-    if (value < 1_000_000) return `${(value / 1_000).toFixed(value < 10_000 ? 1 : 0)}k`;
-    return `${(value / 1_000_000).toFixed(1)}m`;
-  };
-  const usage = (run: AgentRun) => {
-    const value = run.usage;
-    return `↻ ${value?.turns || 0} · ${compact(value?.contextTokens || 0)} tok (i ${compact(value?.input || 0)}/o ${compact(value?.output || 0)}) · ${run.events.filter((event) => event.type === "tool").length} tools`;
-  };
-  const lines = ["● Agents"];
-  const roots = active.filter((run) => !run.parentRunId || !active.some((candidate) => candidate.runId === run.parentRunId));
-  const ordered = roots.flatMap((run) => [run, ...active.filter((candidate) => candidate.parentRunId === run.runId)]);
-  ordered.forEach((run, index) => {
-    const child = Boolean(run.parentRunId);
-    const branch = index === ordered.length - 1 ? "└─" : "├─";
-    const activity = agentActivityLabel(run, now);;
-    lines.push(truncate(`${child ? "│  " : ""}${branch} · ${run.agent}  ${run.taskId || run.task || ""} · ${elapsed(run)} · ${usage(run)}`));
-    lines.push(truncate(`${child ? "│  " : ""}${index === ordered.length - 1 ? "   " : "│  "}└ ${activity}`));
-  });
-  recentFailures.forEach((run) => {
-    const reason = run.terminalReason || run.status;
-    lines.push(truncate(`└─ ✗ ${run.agent}  ${run.taskId || run.task || ""} · ${run.status}: ${reason}`));
-  });
-  return lines;
 }
