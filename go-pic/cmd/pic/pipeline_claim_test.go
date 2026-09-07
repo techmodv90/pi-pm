@@ -254,3 +254,62 @@ func TestLeanClaimReviewVerification(t *testing.T) {
 		t.Fatalf("lean verification must reference the run: %#v", verified["summary"])
 	}
 }
+
+func TestLegacyReadBackIntegrity(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+
+	// Historical-style legacy item: full lifecycle through the pack-bound path.
+	legacy := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Legacy task"))
+	legacyID := legacy["id"].(string)
+	seedLegacyPipelineState(t, dbPath, legacyID)
+	legacyClaim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", legacyID, "worker"))
+	legacyRun := legacyClaim["id"].(string)
+	suffix := strings.ReplaceAll(legacyID, "-", "")
+	reviewRun := "pr-" + suffix + "-review"
+	runSQLite(t, dbPath, `
+		UPDATE pipeline_runs SET status='completed',artifact_saved_at=datetime('now'),integrated_patch_path='legacy.patch',integrated_patch_hash='legacy-patch-hash',integrated_at=datetime('now'),completed_at=datetime('now') WHERE id='`+legacyRun+`';
+		INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,candidate_run_id,candidate_patch_hash,result_json,completed_at)
+		SELECT '`+reviewRun+`',task_id,'review',1,'completed','lease-`+suffix+`-review',datetime('now','+1 hour'),instruction_pack_id,instruction_pack_version,instruction_pack_hash,'`+legacyRun+`','legacy-patch-hash','{"review_status":"passed","candidate_run_id":"`+legacyRun+`","candidate_patch_hash":"legacy-patch-hash"}',datetime('now') FROM pipeline_runs WHERE id='`+legacyRun+`';`)
+	asObject(t, runPic(t, bin, root, home, "work-item", "review", legacyID, "passed", "--notes", "ok", "--pipeline-run-id", reviewRun))
+	completion := asObject(t, runPic(t, bin, root, home, "work-item", "completion-save", legacyID, "done", "--pipeline-run-id", legacyRun, "--summary", "legacy done"))
+	verified := asObject(t, runPic(t, bin, root, home, "work-item", "verification-save", legacyID, completion["id"].(string), "passed", "legacy checks", "--actor-role", "contractor"))
+
+	// Lean sibling runs its full lean cycle in the same store.
+	lean := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Lean task"))
+	leanID := lean["id"].(string)
+	leanClaim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", leanID, "worker"))
+	leanRun := leanClaim["id"].(string)
+	leanWorkerRunEvidence(t, dbPath, leanRun)
+	asObject(t, runPic(t, bin, root, home, "work-item", "completion-save", leanID, "done", "--pipeline-run-id", leanRun, "--summary", "lean done"))
+	asObject(t, runPic(t, bin, root, home, "work-item", "verification-save", leanID, reviewRun2For(t, dbPath, leanID), "passed", "lean checks", "--actor-role", "contractor"))
+
+	// Legacy joins still resolve and nothing was mutated by the lean cycle.
+	db := openSQLiteGo(t, dbPath)
+	var packs, activePacks, completions, verifications int
+	if err := db.QueryRow(`SELECT (SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=?),(SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'),(SELECT COUNT(*) FROM work_item_completion_reports WHERE work_item_id=? AND instruction_pack_id='pk-legacy'),(SELECT COUNT(*) FROM work_item_verification_reports WHERE work_item_id=?)`, legacyID, legacyID, legacyID, legacyID).Scan(&packs, &activePacks, &completions, &verifications); err != nil {
+		t.Fatal(err)
+	}
+	if packs != 1 || activePacks != 1 || completions != 1 || verifications != 1 {
+		t.Fatalf("legacy evidence disturbed: packs=%d active=%d completions=%d verifications=%d", packs, activePacks, completions, verifications)
+	}
+	// The legacy verification still joins its completion report and active pack.
+	var joined int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_item_verification_reports v JOIN work_item_completion_reports c ON c.id=v.completion_report_id JOIN work_item_instruction_packs p ON p.id=c.instruction_pack_id AND p.status='active' WHERE v.id=?`, verified["id"].(string)).Scan(&joined); err != nil {
+		t.Fatal(err)
+	}
+	if joined != 1 {
+		t.Fatalf("legacy verification join broken")
+	}
+}
+
+// reviewRun2For inserts a completed lean review run for the task and returns
+// its id, so the lean verification has a run reference.
+func reviewRun2For(t *testing.T, dbPath, taskID string) string {
+	t.Helper()
+	runID := "pr-" + strings.ReplaceAll(taskID, "-", "") + "-review"
+	runSQLite(t, dbPath, `INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,candidate_run_id,candidate_patch_hash,result_json,completed_at)
+		VALUES('`+runID+`','`+taskID+`','review',1,'completed','lease-x',datetime('now','+1 hour'),'',0,'',NULL,'','{"review_status":"passed"}',datetime('now'));`)
+	return runID
+}
