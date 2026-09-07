@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -216,13 +217,29 @@ func TestLeanClaimReviewVerification(t *testing.T) {
 	id := item["id"].(string)
 	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "worker"))
 	runID := claim["id"].(string)
-	leanWorkerRunEvidence(t, dbPath, runID)
+	// The worker run closes through the real scheduler path: pipeline-complete
+	// with the lease token, then pipeline-checkpoint artifact_saved with a
+	// patch file — no raw SQL shortcuts.
+	asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-complete", runID, claim["lease_token"].(string), "completed"))
+	patchPath := filepath.Join(t.TempDir(), "lean.patch")
+	if err := os.WriteFile(patchPath, []byte("lean patch\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-checkpoint", runID, claim["lease_token"].(string), "artifact_saved", "--patch-file", patchPath))
+	// The scheduler marks a consumed run advanced so later mutation claims pass
+	// the awaiting-integration gate.
+	asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-checkpoint", runID, claim["lease_token"].(string), "advanced"))
+	integratedHash := ""
+	if err := openSQLiteGo(t, dbPath).QueryRow(`SELECT integrated_patch_hash FROM pipeline_runs WHERE id=?`, runID).Scan(&integratedHash); err != nil || integratedHash == "" {
+		t.Fatalf("worker run missing integrated hash: %q err=%v", integratedHash, err)
+	}
 
 	// Review claim (lean) on the completed candidate, then a failed verdict.
+	// The scheduler records review verdicts through the real pipeline-complete
+	// command with the lease token — exercise that path, not raw SQL.
 	reviewClaim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "review"))
 	reviewRunID := reviewClaim["id"].(string)
-	reviewClaim["id"] = reviewRunID
-	runSQLite(t, dbPath, `UPDATE pipeline_runs SET status='completed',result_json='{"review_status":"failed","candidate_run_id":"`+runID+`","candidate_patch_hash":"lean-hash"}',completed_at=datetime('now') WHERE id='`+reviewRunID+`';`)
+	asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-complete", reviewRunID, reviewClaim["lease_token"].(string), "completed", "--result-json", `{"review_status":"failed","candidate_run_id":"`+runID+`","candidate_patch_hash":"`+integratedHash+`"}`))
 	asObject(t, runPic(t, bin, root, home, "work-item", "review", id, "failed", "--notes", "needs work", "--pipeline-run-id", reviewRunID))
 
 	// A failed review routes a fix attempt without pack-hash cycle caps.
@@ -231,12 +248,16 @@ func TestLeanClaimReviewVerification(t *testing.T) {
 		t.Fatalf("lean review-fix must bind the rejected candidate: %#v", fixClaim["candidate_run_id"])
 	}
 
-	// Pass the review, complete, and verify: records reference task+run without
-	// pack columns.
-	runSQLite(t, dbPath, `UPDATE pipeline_runs SET result_json='{"review_status":"passed","candidate_run_id":"`+runID+`","candidate_patch_hash":"lean-hash"}' WHERE id='`+reviewRunID+`';`)
-	asObject(t, runPic(t, bin, root, home, "work-item", "review", id, "passed", "--notes", "accepted", "--pipeline-run-id", reviewRunID))
+	// A fix attempt gets its own review run (one attempt, one run) recording the
+	// passed verdict; records reference task+run without pack columns.
+	reviewClaim2 := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "review"))
+	reviewRun2 := reviewClaim2["id"].(string)
+	asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-complete", reviewRun2, reviewClaim2["lease_token"].(string), "completed", "--result-json", `{"review_status":"passed","candidate_run_id":"`+runID+`","candidate_patch_hash":"`+integratedHash+`"}`))
+	asObject(t, runPic(t, bin, root, home, "work-item", "review", id, "passed", "--notes", "accepted", "--pipeline-run-id", reviewRun2))
+	// Integration happens after the passed review (scheduler integrate step).
+	asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-checkpoint", runID, claim["lease_token"].(string), "integrated", "--patch-file", patchPath))
 	asObject(t, runPic(t, bin, root, home, "work-item", "completion-save", id, "done", "--pipeline-run-id", runID, "--summary", "lean done"))
-	verified := asObject(t, runPic(t, bin, root, home, "work-item", "verification-save", id, reviewRunID, "passed", "lean checks passed", "--actor-role", "contractor"))
+	verified := asObject(t, runPic(t, bin, root, home, "work-item", "verification-save", id, reviewRun2, "passed", "lean checks passed", "--actor-role", "contractor"))
 
 	db := openSQLiteGo(t, dbPath)
 	var status string
@@ -250,7 +271,7 @@ func TestLeanClaimReviewVerification(t *testing.T) {
 	if crID != "" {
 		t.Fatalf("lean verification must not reference a completion report: %q", crID)
 	}
-	if !strings.Contains(verified["summary"].(string), reviewRunID) {
+	if !strings.Contains(verified["summary"].(string), reviewRun2) {
 		t.Fatalf("lean verification must reference the run: %#v", verified["summary"])
 	}
 }
