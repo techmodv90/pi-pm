@@ -24,7 +24,7 @@ import { activePackDoneReports, currentFailedReview, isMutationStage, latestVeri
 import { assertCleanGit, assertReviewBaseCurrent, finalizeReviewedIntegration, mergeAggregateBranch, rejectedCandidatePatch, repositoryHead, verificationEnvironmentFingerprint, type AggregateDeliveryState } from "./integration.ts";
 import { DEFAULT_GENERATED_FILES, filterGeneratedFiles, pipelineFailureResult, validateWorkerOutput, validateWorkerPatchArtifact, workerPatch } from "./worker-validation.ts";
 import { REVIEW_FIX_ROUND_LIMIT, assertReviewFixChangedPatch, buildReviewFixCapBlock, reviewCycleCount } from "./corrections.ts";
-import { isPlanningStage, pipelineSpawnParams, planningStages, stageAgent, stagePrompt, predecessorCheckpointFor, workerSessionPath } from "./stage-prompts.ts";
+import { isPlanningStage, pipelineSpawnParams, stageAgent, stagePrompt, predecessorCheckpointFor, workerSessionPath } from "./stage-prompts.ts";
 import { assertRunContractCurrent, buildPipelineDryRun, canonicalReadyLeafIds, isResumableExecutionState, nextPipelineStage, normalizePipelineData, pipelineWorkerBlockReason, resolvePlanProfile, workerIntegrationCandidate, type PlanningProfileState } from "./stage-resolution.ts";
 import { evaluateSkillFamilyRouting, recordSkillRoutingEvent } from "./skill-routing.ts";
 
@@ -232,14 +232,35 @@ export class PipelineScheduler {
   async completeDispatch(runId: string, report: PipelineDispatchReport): Promise<void> {
     const dispatch = findPipelineDispatch(this.cwd, runId);
     if (!dispatch) throw new Error(`no pipeline dispatch for run ${runId}`);
+    // Dispatch-status semantics guard (T004 smoke, 2026-09-07): a returned
+    // review verdict is a COMPLETED review stage whose failed status lives in
+    // the report; dispatch_status=failed means "the stage never ran" and, if
+    // misused, strands the state machine (reviewStatusForCandidate only admits
+    // completed review runs, and pipeline-complete cannot correct a failed run).
+    if (!report.completed && dispatch.stage === "review" && /<review_report\b/.test(report.output || "")) {
+      throw new Error("review dispatch reported failed but its output carries a review report; a returned review verdict is a completed review stage — report it with dispatch_status=completed so the verdict routes the fix round (dispatch_status=failed means the stage never ran)");
+    }
     writePipelineOutputLog(dispatch, report);
     if (report.completed && isMutationStage(dispatch.stage as PipelineStage)) {
+      // Fail-fast report validation (T004 smoke, 2026-09-07): run the same
+      // parseTaskCompletionReport validation finish() applies BEFORE any
+      // terminal transition, so a malformed relay leaves the run `running` and
+      // retryable instead of terminally blocked (blocked is uncorrectable).
+      const taskReport = parseTaskCompletionReport(report.output || "");
       if (!dispatch.worktree) throw new Error(`dispatch ${runId} completed without a prepared worktree`);
       // Synthesize the minimal SubagentResult shape writeWorkerPatch consumes.
       await this.writeWorkerPatch(
         { id: dispatch.runId, task_id: dispatch.taskId, stage: dispatch.stage, child_index: 0, async_dir: dispatch.asyncDir } as unknown as PipelineRun,
         { exitCode: 0, stopReason: "completed", messages: [], stderr: "", errorMessage: "", workspace: { assignedWorktree: dispatch.worktree } } as unknown as SubagentResult,
       );
+      // Fail-fast empty-patch guard (T004 smoke, 2026-09-07): done workers with
+      // no changes and no justification almost always committed their work
+      // inside the task worktree, which breaks the scheduler's uncommitted-diff
+      // patch capture. Surface that at capture time, not two stages later.
+      const patch = workerPatch({ id: dispatch.runId, child_index: 0, async_dir: dispatch.asyncDir } as unknown as PipelineRun);
+      if (taskReport.status === "done" && statSync(patch).size === 0 && !taskReport.no_change_justification) {
+        throw new Error(`worker patch capture is empty (0 bytes) for run ${runId}; if the worker committed its changes inside the worktree, uncommit them (git reset --mixed <base>) and re-emit the completion report — task worktrees must never contain the work as commits; the scheduler captures the uncommitted diff`);
+      }
     } else if (dispatch.worktree) {
       writeFileSync(join(dispatch.asyncDir, "workspace.json"), JSON.stringify({ assignedWorktree: dispatch.worktree }, null, 2), { mode: 0o600 });
     }
@@ -349,14 +370,14 @@ export class PipelineScheduler {
     this.context = ctx;
     this.lastError = "";
     this.roots.add(rootTaskId);
-    const workflow = execPic(["work-item", "workflow-status", rootTaskId], ctx.cwd);
-    // Legacy planning stages are disabled (owner decision 2026-09-07): the
-    // scheduler never launches scan/rri/vision/blueprint/contracts/task_graph.
-    // Contractor-owned planning (rri/contracts/vision prompts) is reached via
-    // work_on_work_item in api/tool.ts, never through the spawn scheduler.
-    if (workflow.next_stage === "scan" || workflow.next_stage === "rri" || planningStages.includes(workflow.next_stage)) {
-      throw new Error(`Work Item ${rootTaskId} next_stage=${workflow.next_stage}: legacy planning stages are disabled. Imported Work Items proceed through owner authorization and lean implementation; planning flows run through task_manager in the main session.`);
-    }
+    // legacy planning stages are disabled (owner decision 2026-09-07): the
+    // scheduler never launches scan/rri/vision/blueprint/contracts/task_graph
+    // because nextPipelineStage can no longer return one. A stale planning
+    // next_stage on an imported parent (pre-lean era) is therefore inert:
+    // scheduling proceeds to the ready lean leaves instead of hard-failing
+    // child close-out (T004 smoke, 2026-09-07). Contractor-owned planning
+    // (rri/contracts/vision prompts) is reached via work_on_work_item in
+    // api/tool.ts, never through the spawn scheduler.
     assertCleanGit(ctx.cwd);
     await this.reconcile();
     return await this.scheduleReady(rootTaskId);
@@ -600,6 +621,19 @@ export class PipelineScheduler {
           skillFamilies = parsed;
         }
         let taskPrompt = workerPrompts.get(taskId) || stagePrompt(stage, taskId, this.cwd);
+        // Fix-round findings relay (T004 smoke, 2026-09-07): dispatch payloads
+        // carry only the original task description, so review findings never
+        // reach the fix-round worker unless attached here — the contractor
+        // relay proved unreliable when done by hand.
+        if (stage === "worker" && claim.candidate_run_id) {
+          const failedReview = this.pipelineRuns(taskId).filter((entry) => entry.stage === "review" && entry.status === "completed" && entry.candidate_run_id === claim.candidate_run_id)
+            .filter((entry) => { try { return JSON.parse(entry.result_json || "{}")?.review_status === "failed"; } catch { return false; } })
+            .pop();
+          const findings = Array.isArray(failedReview?.findings) ? failedReview.findings.filter((finding: unknown) => typeof finding === "string" && (finding as string).trim()) as string[] : [];
+          if (findings.length) {
+            taskPrompt += `\n\nReview findings to address (from the failed review of candidate ${claim.candidate_run_id}):\n${findings.map((finding: string) => `- ${finding}`).join("\n")}`;
+          }
+        }
         if (stage === "rri") taskPrompt += `\n\nComplete RRI source context:\n${JSON.stringify({ work_item: data.work_item, scan_reports: data.scan_reports, requirements: data.requirements || [], owner_decisions: data.owner_decisions || [] })}`;
         const task = { agent: stageAgent(stage), task: taskPrompt, taskId, ...(isMutationStage(stage) || stage === "review" ? { skillFamilies } : {}) };
         const spec = pipelineSpawnParams(stage, task, this.cwd);

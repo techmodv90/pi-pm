@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -10,6 +10,7 @@ import { gateOpenP0P1RriQuestions, openP0P1RriQuestions, planPrimerContext, PLAN
 import { MANAGED_WORKER_DEADLINE_MS } from "../subagent/runner.ts";
 import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
 import { parsePipelineRuns } from "./pipeline-types.ts";
+import { writePipelineDispatch } from "./pipeline-dispatch.ts";
 import { planStagesForProfile } from "../tasking/workflow-modes.ts";
 import { PLANNING_STAGE_ORDER, SUPPLEMENTARY_PLANNING_STAGES } from "./stage-resolution.ts";
 
@@ -435,6 +436,9 @@ test("scheduler rejects legacy planning stages instead of launching them", () =>
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
   assert.match(source, /legacy planning stages are disabled/);
   assert.doesNotMatch(source, /launchGroup\("scan"|scan-rejection|startFullScanFanout/);
+  // T004 smoke fix (2026-09-07): a stale planning next_stage on an imported
+  // parent no longer hard-fails start(); scheduling proceeds to ready leaves.
+  assert.doesNotMatch(source, /throw new Error\(`Work Item \$\{rootTaskId\} next_stage/);
 });
 
 
@@ -867,6 +871,84 @@ test("agent-tool dispatch seam: bind gates the agent id and completion persists 
   assert.match(completeBody, /writePipelineOutputLog\(dispatch, report\)/);
   assert.match(completeBody, /writePipelineStatus\(dispatch, report\)/);
   assert.match(completeBody, /this\.queueReconcile\(\)/);
+  // T004 smoke guards (2026-09-07): review verdicts are completed stages;
+  // worker reports validate and empty patches fail at capture time.
+  assert.match(completeBody, /completed review stage — report it with dispatch_status=completed/);
+  assert.match(completeBody, /parseTaskCompletionReport\(report\.output/);
+  assert.match(completeBody, /patch capture is empty \(0 bytes\)/);
+  // T004 smoke fix (2026-09-07): fix-round dispatches carry the failed review's
+  // findings so they reach the fix worker without a contractor relay.
+  assert.match(source, /Review findings to address \(from the failed review of candidate/);
+});
+
+test("dispatch completion rejects a review verdict misreported as a failed stage", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-system-dispatch-verdict-"));
+  try {
+    const asyncDir = join(cwd, ".pi-subagents", "pipeline", "pr-verdict-guard");
+    writePipelineDispatch({ runId: "pr-verdict-guard", leaseToken: "lease-1", agent: "task-reviewer", stage: "review", taskId: "wi-1", task: "review", asyncDir, worktree: "", initialPatchPath: "", skillFamilies: [] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+    const scheduler = new PipelineScheduler({ events: { on: () => () => {} } } as any) as any;
+    scheduler.cwd = cwd;
+    await assert.rejects(
+      () => scheduler.completeDispatch("pr-verdict-guard", { completed: false, output: '<review_report status="failed"><findings><finding>empty patch</finding></findings></review_report>' }),
+      /completed review stage/,
+    );
+    assert.equal(existsSync(join(asyncDir, "status.json")), false);
+    assert.equal(existsSync(join(asyncDir, "output-0.log")), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("dispatch completion validates worker reports before any terminal transition", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-system-dispatch-report-"));
+  try {
+    const asyncDir = join(cwd, ".pi-subagents", "pipeline", "pr-report-guard");
+    writePipelineDispatch({ runId: "pr-report-guard", leaseToken: "lease-1", agent: "task-worker", stage: "worker", taskId: "wi-1", task: "work", asyncDir, worktree: join(cwd, "unused-worktree"), initialPatchPath: "", skillFamilies: [] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+    const scheduler = new PipelineScheduler({ events: { on: () => () => {} } } as any) as any;
+    scheduler.cwd = cwd;
+    await assert.rejects(
+      () => scheduler.completeDispatch("pr-report-guard", { completed: true, output: "truncated relay without a completion report" }),
+      /completion_report/,
+    );
+    // Nothing terminal persisted: the run stays retryable.
+    assert.equal(existsSync(join(asyncDir, "status.json")), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("dispatch completion fails fast on an empty worker patch without justification", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "task-system-dispatch-empty-"));
+  try {
+    const repo = join(cwd, "wt");
+    mkdirSync(repo);
+    execFileSync("git", ["init", "-q"], { cwd: repo });
+    execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+    execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+    writeFileSync(join(repo, "base.txt"), "base\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+    // The T004 failure mode: the worker committed its change inside the
+    // worktree, so the uncommitted diff — and the captured patch — are empty.
+    writeFileSync(join(repo, "committed.txt"), "committed work\n");
+    execFileSync("git", ["add", "."], { cwd: repo });
+    execFileSync("git", ["commit", "-qm", "worker committed its work"], { cwd: repo });
+    const asyncDir = join(cwd, ".pi-subagents", "pipeline", "pr-empty-guard");
+    writePipelineDispatch({ runId: "pr-empty-guard", leaseToken: "lease-1", agent: "task-worker", stage: "worker", taskId: "wi-1", task: "work", asyncDir, worktree: repo, initialPatchPath: "", skillFamilies: [] });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+    const scheduler = new PipelineScheduler({ events: { on: () => () => {} } } as any) as any;
+    scheduler.cwd = cwd;
+    const report = '<completion_report tip_id="T" version="1" status="done"><files_changed>committed.txt</files_changed><test_results>passed</test_results><issues_discovered>None</issues_discovered><deviations>None</deviations><suggestions>None</suggestions></completion_report>';
+    await assert.rejects(
+      () => scheduler.completeDispatch("pr-empty-guard", { completed: true, output: report }),
+      /patch capture is empty \(0 bytes\)[\s\S]*git reset --mixed/,
+    );
+    assert.equal(existsSync(join(asyncDir, "status.json")), false);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("scheduler worktree provisioning uses the asynchronous launch boundary", () => {
