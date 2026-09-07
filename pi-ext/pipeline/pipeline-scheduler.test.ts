@@ -887,12 +887,15 @@ test("canonical worker circuit guidance keeps repair out of the application sess
   assert.match(reportError, /Do not modify the task-system extension from this application session/);
 });
 
-test("detached worker progress cannot throw through a stale session context", () => {
+test("agent-tool dispatch seam: bind gates the agent id and completion persists terminal status", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const progressBody = source.slice(source.indexOf("private reportProgress("), source.indexOf("private notifyBlockedAttempt("));
-  assert.match(progressBody, /try \{ this\.pi\.events\.emit/);
-  assert.match(progressBody, /catch \{\}/);
-  assert.match(progressBody, /try \{ ctx\.ui\.setStatus/);
+  const bindBody = source.slice(source.indexOf("bindDispatch(runId: string"), source.indexOf("async completeDispatch("));
+  assert.match(bindBody, /bindPipelineDispatch\(dispatch, agentId\)/);
+  assert.match(bindBody, /"workflow", "pipeline-bind"/);
+  const completeBody = source.slice(source.indexOf("async completeDispatch("), source.indexOf("  startSession(ctx"));
+  assert.match(completeBody, /writePipelineOutputLog\(dispatch, report\)/);
+  assert.match(completeBody, /writePipelineStatus\(dispatch, report\)/);
+  assert.match(completeBody, /this\.queueReconcile\(\)/);
 });
 
 test("scheduler worktree provisioning uses the asynchronous launch boundary", () => {

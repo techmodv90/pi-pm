@@ -137,6 +137,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview", "save_rri_interview",
           "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "preview_artifact", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "resolve_escalation", "amend_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
           "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
+          "list_pipeline_dispatches", "bind_pipeline_dispatch", "complete_pipeline_dispatch",
           "relate_work_items", "reset_pipeline_circuit",
         ] as const),
         id: Type.Optional(Type.String({ description: "Work Item ID" })),
@@ -172,6 +173,11 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         decision: Type.Optional(StringEnum(["accepted", "rejected"] as const)),
         change_type: Type.Optional(StringEnum(["contract", "environment", "runner", "artifact"] as const)),
         evidence_json: Type.Optional(Type.String({ description: "JSON evidence supporting a pipeline circuit reset" })),
+        agent_id: Type.Optional(Type.String({ description: "Agent tool id returned by the background spawn; required for bind_pipeline_dispatch" })),
+        output: Type.Optional(Type.String({ description: "Terminal agent output reported with complete_pipeline_dispatch" })),
+        error: Type.Optional(Type.String({ description: "Failure reason reported with complete_pipeline_dispatch when status is failed" })),
+        dispatch_status: Type.Optional(StringEnum(["completed", "failed"] as const)),
+        failure_code: Type.Optional(Type.String({ description: "Optional failure classification reported with complete_pipeline_dispatch" })),
         claimant: Type.Optional(Type.String({ description: "Worker or scheduler claiming the Work Item" })),
         deferrable: Type.Optional(Type.Boolean({ description: "Whether the Work Item is deferred" })),
         escalation_id: Type.Optional(Type.String({ description: "Open escalation ID (wies-…) to resolve with a recorded decision" })),
@@ -634,6 +640,31 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             }
             args = ["workflow", "pipeline-circuit-reset", params.id, "--reason", params.notes, "--change-type", params.change_type, "--evidence-json", evidenceJson, "--actor-role", params.actor_role];
             break;
+          }
+          case "list_pipeline_dispatches": {
+            const pending = pipelineScheduler.listDispatches();
+            return { content: [{ type: "text", text: JSON.stringify(pending, null, 2) }], details: { action: "list_pipeline_dispatches", dispatches: pending } };
+          }
+          case "bind_pipeline_dispatch": {
+            if (!params.id || !params.agent_id) return { content: [{ type: "text", text: "Error: id (pipeline run id) and agent_id required" }], details: {}, isError: true };
+            try {
+              const bound = pipelineScheduler.bindDispatch(params.id, params.agent_id);
+              return { content: [{ type: "text", text: JSON.stringify(bound, null, 2) }], details: { action: "bind_pipeline_dispatch", runId: params.id, agentId: params.agent_id } };
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Bind blocked: ${message}` }], details: { action: "bind_pipeline_dispatch", error: message }, isError: true };
+            }
+          }
+          case "complete_pipeline_dispatch": {
+            if (!params.id || !params.dispatch_status) return { content: [{ type: "text", text: "Error: id (pipeline run id) and dispatch_status (completed|failed) required" }], details: {}, isError: true };
+            if (params.dispatch_status === "failed" && !params.output && !params.error) return { content: [{ type: "text", text: "Error: failed dispatch requires output or error" }], details: {}, isError: true };
+            try {
+              await pipelineScheduler.completeDispatch(params.id, { completed: params.dispatch_status === "completed", output: params.output || "", error: params.error, failureCode: params.failure_code });
+              return { content: [{ type: "text", text: `Dispatch ${params.id} reported ${params.dispatch_status}; scheduler reconcile queued.` }], details: { action: "complete_pipeline_dispatch", runId: params.id, dispatchStatus: params.dispatch_status } };
+            } catch (error) {
+              const message = error instanceof Error ? error.message : String(error);
+              return { content: [{ type: "text", text: `Report blocked: ${message}` }], details: { action: "complete_pipeline_dispatch", error: message }, isError: true };
+            }
           }
           case "work_on_work_item": {
             if (!params.id) {

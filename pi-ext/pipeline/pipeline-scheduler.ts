@@ -14,6 +14,7 @@ import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.
 import { buildTaskVerifyPrompt, buildWorkItemContinuePrompt, buildPlanningHandoffXml, CANONICAL_SCAN_REPORT_XML_FORMAT } from "../tasking/work-item-prompts.ts";
 import { discoverAgents } from "../subagent/agents.ts";
 import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, removeSubagentWorktree, retainWorktreeForResume, startSubagentResilient, type SubagentHandle } from "../subagent/runner.ts";
+import { bindPipelineDispatch, findPipelineDispatch, listPipelineDispatches, writePipelineDispatch, writePipelineOutputLog, writePipelineStatus, type PipelineDispatch, type PipelineDispatchReport } from "./pipeline-dispatch.ts";
 
 import type { SubagentResult } from "../subagent/types.ts";
 import { parsePicShow, type PicShowDocument } from "./pic-show.ts";
@@ -255,6 +256,46 @@ export class PipelineScheduler {
     setImmediate(() => { void this.reconcileSafely(); });
   }
 
+  /** Pending Agent-tool dispatches awaiting a contractor spawn + bind. */
+  listDispatches(): PipelineDispatch[] {
+    return listPipelineDispatches(this.cwd);
+  }
+
+  /** Bind an Agent tool id to a dispatched run — the hard gate: empty ids are rejected. */
+  bindDispatch(runId: string, agentId: string): any {
+    const dispatch = findPipelineDispatch(this.cwd, runId);
+    if (!dispatch) throw new Error(`no pending pipeline dispatch for run ${runId}`);
+    bindPipelineDispatch(dispatch, agentId);
+    const bound = execPic(["workflow", "pipeline-bind", dispatch.runId, dispatch.leaseToken, agentId.trim(), "--async-dir", dispatch.asyncDir, "--child-index", "0"], this.cwd);
+    if (bound.error) throw new Error(bound.error);
+    return bound;
+  }
+
+  /**
+   * Contractor-reported terminal output for a dispatched run. Completed
+   * mutation stages get their worktree patch captured through the same
+   * writeWorkerPatch path the process runner used; the reconcile loop then
+   * advances the state machine exactly as before. Failed reports leave
+   * completed_at/output null and persist a failed status for retry routing.
+   */
+  async completeDispatch(runId: string, report: PipelineDispatchReport): Promise<void> {
+    const dispatch = findPipelineDispatch(this.cwd, runId);
+    if (!dispatch) throw new Error(`no pipeline dispatch for run ${runId}`);
+    writePipelineOutputLog(dispatch, report);
+    if (report.completed && isMutationStage(dispatch.stage as PipelineStage)) {
+      if (!dispatch.worktree) throw new Error(`dispatch ${runId} completed without a prepared worktree`);
+      // Synthesize the minimal SubagentResult shape writeWorkerPatch consumes.
+      await this.writeWorkerPatch(
+        { id: dispatch.runId, task_id: dispatch.taskId, stage: dispatch.stage, child_index: 0, async_dir: dispatch.asyncDir } as unknown as PipelineRun,
+        { exitCode: 0, stopReason: "completed", messages: [], stderr: "", errorMessage: "", workspace: { assignedWorktree: dispatch.worktree } } as unknown as SubagentResult,
+      );
+    } else if (dispatch.worktree) {
+      writeFileSync(join(dispatch.asyncDir, "workspace.json"), JSON.stringify({ assignedWorktree: dispatch.worktree }, null, 2), { mode: 0o600 });
+    }
+    writePipelineStatus(dispatch, report);
+    this.queueReconcile();
+  }
+
 
   private async reconcileSafely(): Promise<void> {
     try {
@@ -338,12 +379,6 @@ export class PipelineScheduler {
     this.stopSession();
     this.pi.sendUserMessage(`Async pipeline paused: ${message}`, { deliverAs: "followUp" });
     ctx.ui.notify(`Async pipeline paused: ${message}`, "warning");
-  }
-
-  private reportProgress(runId: string, taskId: string, stage: PipelineStage, event: string, text: string): void {
-    try { this.pi.events.emit("task-pipeline:progress", { runId, taskId, stage, event, text }); } catch {}
-    const ctx = this.context;
-    if (ctx) try { ctx.ui.setStatus("task-pipeline", `${stage} ${taskId}: ${event}`); } catch {}
   }
 
   private notifyBlockedAttempt(run: PipelineRun, reason: string): void {
@@ -610,6 +645,7 @@ export class PipelineScheduler {
         }
       }
       const subagentRunIds: string[] = [];
+      const dispatches: PipelineDispatch[] = [];
       await new Promise<void>((resolve) => setImmediate(resolve));
       for (let index = 0; index < claims.length; index++) {
         const claim = claims[index]!;
@@ -670,33 +706,51 @@ export class PipelineScheduler {
           if (!prepared.reused && spec.durableWorktreeKey) this.retainedFailures.delete(spec.durableWorktreeKey);
         }
         let runId = "";
-        let handle: SubagentHandle;
-        try {
-          handle = stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)
-            ? startFullScanFanout(spec, agent)
-            : startSubagentResilient({ ...spec, agent }, (update) => {
-                this.reportProgress(runId, taskId, stage, update.event, finalAssistantText(update.result.messages));
-              });
-        } catch (error) {
-          // Durable worker worktree constraint (RLB-GAP-001): a reused retained
-          // worktree keeps its partial work on spawn failure; only fresh
-          // creations are cleaned up.
-          if (spec.preparedWorktree && spec.runId && !spec.reusedRetainedWorktree) removeSubagentWorktree(this.cwd, spec.preparedWorktree, basename(spec.preparedWorktree));
-          throw error;
+        if (stage === "scan" && ["epic", "feature"].includes(data.work_item?.type)) {
+          // Full-scan fanout stays on the process runner until multi-child
+          // dispatch fanout is designed; every other stage dispatches through
+          // the Agent tool seam below.
+          let handle: SubagentHandle;
+          try {
+            handle = startFullScanFanout(spec, agent);
+          } catch (error) {
+            if (spec.preparedWorktree && spec.runId && !spec.reusedRetainedWorktree) removeSubagentWorktree(this.cwd, spec.preparedWorktree, basename(spec.preparedWorktree));
+            throw error;
+          }
+          runId = handle.id;
+          const artifactDir = join(this.cwd, ".pi-subagents", "pipeline", claim.id);
+          mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
+          writeFileSync(join(artifactDir, "status.json"), JSON.stringify({ state: "running", pid: handle.pid, steps: [{ status: "running" }] }), { mode: 0o600 });
+          this.agentRuns.set(runId, { ...claim, skillFamilies, taskPrompt, subagent_run_id: runId, async_dir: artifactDir, child_index: 0 });
+          this.agentHandles.set(runId, handle);
+          void handle.result.then((result) => this.persistAgentResult(result));
+          const bound = execPic(["workflow", "pipeline-bind", claim.id, claim.lease_token, runId, "--async-dir", artifactDir, "--child-index", "0"], this.cwd);
+          if (bound.error) {
+            handle.stop();
+            throw new Error(bound.error);
+          }
+          subagentRunIds.push(runId);
+        } else {
+          // Agent-tool dispatch: persist the dispatch record with the prepared
+          // worktree; the contractor binds the Agent tool id (hard gate: empty
+          // id rejected) and reports terminal output. The run row stays
+          // `claimed` with no async_dir until bind, so reconcile skips it.
+          const artifactDir = join(this.cwd, ".pi-subagents", "pipeline", claim.id);
+          const dispatch: PipelineDispatch = {
+            runId: claim.id,
+            leaseToken: claim.lease_token,
+            agent: spec.agent,
+            stage,
+            taskId,
+            task: taskPrompt,
+            asyncDir: artifactDir,
+            worktree: spec.preparedWorktree || "",
+            initialPatchPath: spec.initialPatchPath,
+            skillFamilies,
+          };
+          writePipelineDispatch(dispatch);
+          dispatches.push(dispatch);
         }
-        runId = handle.id;
-        const artifactDir = join(this.cwd, ".pi-subagents", "pipeline", claim.id);
-        mkdirSync(artifactDir, { recursive: true, mode: 0o700 });
-        writeFileSync(join(artifactDir, "status.json"), JSON.stringify({ state: "running", pid: handle.pid, steps: [{ status: "running" }] }), { mode: 0o600 });
-        this.agentRuns.set(runId, { ...claim, skillFamilies, taskPrompt, subagent_run_id: runId, async_dir: artifactDir, child_index: 0 });
-        this.agentHandles.set(runId, handle);
-        void handle.result.then((result) => this.persistAgentResult(result));
-        const bound = execPic(["workflow", "pipeline-bind", claim.id, claim.lease_token, runId, "--async-dir", artifactDir, "--child-index", "0"], this.cwd);
-        if (bound.error) {
-          handle.stop();
-          throw new Error(bound.error);
-        }
-        subagentRunIds.push(runId);
       }
       return {
         stage,
@@ -704,6 +758,7 @@ export class PipelineScheduler {
         pipelineRunIds: claims.map((claim) => claim.id),
         activePipelineRunIds: [...activeRuns.map((run: PipelineRun) => run.id), ...claims.map((claim) => claim.id)],
         subagentRunIds,
+        dispatches,
       };
     } catch (error) {
       for (const claim of claims) execPic(["workflow", "pipeline-complete", claim.id, claim.lease_token, "failed", "--error", error instanceof Error ? error.message : String(error)], this.cwd);
