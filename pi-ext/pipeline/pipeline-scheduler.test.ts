@@ -5,6 +5,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { currentFailedReview } from "./report-parsing.ts";
 import { gateOpenP0P1RriQuestions, openP0P1RriQuestions, planPrimerContext, planScanRetryWave, PLANNING_DEADLINE_MS } from "./stage-prompts.ts";
 import { MANAGED_WORKER_DEADLINE_MS } from "../subagent/runner.ts";
 import { assertIndexMatchesReviewedPatch, assertReviewBaseCurrent, assertReviewFixChangedPatch, assertRunContractCurrent, buildAutofixContext, buildOwnerRejectionContext, buildPipelineDryRun, buildWorkerCorrectionContext, buildTargetedReReviewInstructions, buildReviewFixCapBlock, canonicalReadyLeafIds, filterGeneratedFiles, finalizeReviewedIntegration, formatPipelineStatus, mergeAggregateBranch, mergeRriTAuthoringResults, normalizePipelineData, nextPipelineStage, parseApplyNumstatPaths, parsePorcelainPaths, parseReviewReport, parseRriTPersonaResult, parseTaskCompletionReport, pipelineFailureResult, buildEscalationResolutionContext, PipelineScheduler, pipelineIntegrationBlockReason, pipelineSpawnParams, pipelineVerificationBlockReason, pipelineWorkerBlockReason, recoverReviewedPatch, rejectedCandidatePatch, renderCanonicalInstructionPackXml, reviewCycleCount, runnerRepairEvidence, synthesizeReviewFindings, validateInstructionPackXml, validateScoutEvidenceXml, validateWorkerChangedFiles, validateWorkerOutput, validateWorkerPatchArtifact, workerIntegrationCandidate, planningHandoff, predecessorCheckpointFor, resolvePlanProfile } from "./pipeline-scheduler.ts";
@@ -1400,6 +1401,37 @@ test("Reviewer context reads durable candidate artifacts without a Completion Re
   assert.match(body, /candidate\.integrated_patch_path/);
   assert.match(body, /Candidate patch evidence hash mismatch/);
   assert.match(body, /patch\.length === 0/);
+});
+
+test("currentFailedReview admits pack-free lean candidate runs", () => {
+  // Lean path: empty pack columns on the run must match when no active pack exists.
+  const leanRuns = [
+    { stage: "worker", id: "pr-lean", status: "completed", artifact_saved_at: "2026-01-01", integrated_at: "", advanced_at: "", instruction_pack_id: "", instruction_pack_version: 0, instruction_pack_hash: "", integrated_patch_hash: "hash-lean" },
+    { stage: "review", status: "completed", candidate_run_id: "pr-lean", candidate_patch_hash: "hash-lean", result_json: "{\"review_status\":\"failed\"}" },
+  ];
+  const leanReview = currentFailedReview(leanRuns, undefined);
+  assert.ok(leanReview, "lean failed review must be detected so the fix worker claims with --review-fix 1");
+  // Legacy: pack-bound candidate still detected against the active pack triple.
+  const legacyRuns = [
+    { stage: "worker", id: "pr-legacy", status: "completed", artifact_saved_at: "2026-01-01", integrated_at: "", advanced_at: "", instruction_pack_id: "wip-1", instruction_pack_version: 2, instruction_pack_hash: "hash-1", integrated_patch_hash: "hash-legacy" },
+    { stage: "review", status: "completed", candidate_run_id: "pr-legacy", candidate_patch_hash: "hash-legacy", result_json: "{\"review_status\":\"failed\"}" },
+  ];
+  assert.ok(currentFailedReview(legacyRuns, { id: "wip-1", version: 2, content_hash: "hash-1" }));
+  // Legacy drift: wrong pack columns still excluded.
+  assert.equal(currentFailedReview(legacyRuns, { id: "wip-1", version: 3, content_hash: "hash-1" }), undefined);
+});
+
+test("review context builder serves lean tasks without TIP bindings", () => {
+  const source = readFileSync(new URL("../tasking/settings.ts", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("export function buildReviewContext"), source.indexOf("// ── Shared interfaces"));
+  // Legacy gate preserved verbatim.
+  assert.match(body, /Review requires exactly one active Task Instruction Pack/);
+  // Lean branch: state-driven (no active packs and no materializations),
+  // candidate bound on empty pack columns instead of the pack triple.
+  assert.match(body, /materializations/);
+  assert.match(body, /lean/);
+  assert.match(body, /candidate\.instruction_pack_id !== ""/);
+  assert.doesNotMatch(body.slice(body.indexOf("instruction-pack-render"), body.indexOf("instruction-pack-render") + 60), /lean/);
 });
 
 test("review verdict is durable before restart-safe candidate integration", () => {

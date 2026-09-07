@@ -41,7 +41,11 @@ export function buildReviewContext(taskId: string, cwd: string): { text?: string
   const task = data.work_item;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const activePacks = (data.instruction_packs || []).filter((pack: any) => pack.status === "active");
-  if (activePacks.length !== 1) return { error: "Review requires exactly one active Task Instruction Pack" };
+  // Lean path (owner decision 2026-09-07): no active pack and no materialization
+  // means the task was claimed on the lean branch — review binds to the
+  // pack-free candidate run instead of the TIP triple.
+  const lean = activePacks.length === 0 && (data.materializations || []).length === 0;
+  if (!lean && activePacks.length !== 1) return { error: "Review requires exactly one active Task Instruction Pack" };
   const pack = activePacks[0];
   const runs = execPic(["workflow", "pipeline-runs", taskId], cwd);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
@@ -49,13 +53,15 @@ export function buildReviewContext(taskId: string, cwd: string): { text?: string
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const candidate = Array.isArray(runs) ? runs.find((run: any) => run.id === activeReview?.candidate_run_id && ["worker", "autofix"].includes(run.stage)) : null;
   if (!activeReview || !candidate) return { error: "Review requires a bound Worker candidate pipeline run" };
-  if (candidate.instruction_pack_id !== pack.id || Number(candidate.instruction_pack_version) !== Number(pack.version) || candidate.instruction_pack_hash !== pack.content_hash) {
+  if (lean) {
+    if (candidate.instruction_pack_id !== "" || candidate.instruction_pack_hash !== "") return { error: "Lean review requires a pack-free candidate run" };
+  } else if (candidate.instruction_pack_id !== pack.id || Number(candidate.instruction_pack_version) !== Number(pack.version) || candidate.instruction_pack_hash !== pack.content_hash) {
     return { error: "Review requires Worker pipeline evidence bound to the active Task Instruction Pack ID, version, and hash" };
   }
   if (!candidate.artifact_saved_at || !candidate.integrated_patch_path || !candidate.integrated_patch_hash) return { error: "Review requires persisted candidate patch evidence" };
   let candidateReport = "";
   try { candidateReport = readFileSync(`${candidate.async_dir}/output-${candidate.child_index || 0}.log`, "utf8"); } catch { return { error: "Persisted candidate Worker output is unavailable" }; }
-  const renderedPack = execPicText(["workflow", "instruction-pack-render", taskId], cwd);
+  const renderedPack = lean ? "" : execPicText(["workflow", "instruction-pack-render", taskId], cwd);
   const items = data.items || [];
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const doneItems = items.filter((i: any) => i.done);
@@ -80,12 +86,16 @@ export function buildReviewContext(taskId: string, cwd: string): { text?: string
 
   let text = `# Review Request: ${task.title}\n\n`;
   text += `**Task ID:** ${task.id}\n`;
-  text += `**TIP:** ${pack.id} v${pack.version}\n`;
-  text += `**TIP Hash:** ${pack.content_hash}\n`;
+  if (lean) {
+    text += `**Mode:** lean (pack-free worker input)\n`;
+  } else {
+    text += `**TIP:** ${pack.id} v${pack.version}\n`;
+    text += `**TIP Hash:** ${pack.content_hash}\n`;
+  }
   text += `**Candidate Run:** ${candidate.id}\n`;
   text += `**Completed by:** ${candidate.agent_model || task.completed_by_model || "unknown"}\n`;
   text += `**Status:** ${task.status}\n\n`;
-  text += `## Authoritative Task Instruction Pack\n\n${renderedPack}\n`;
+  text += lean ? `## Authoritative Worker Input (stored task description, verbatim)\n\n${task.description || ""}\n` : `## Authoritative Task Instruction Pack\n\n${renderedPack}\n`;
   text += `\n## Bound Candidate Worker Report\n\n${candidateReport}\n\n`;
   if (task.notes) {
     text += `## Notes\n${task.notes}\n\n`;

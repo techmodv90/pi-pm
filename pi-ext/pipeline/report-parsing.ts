@@ -40,10 +40,15 @@ export function reviewStatusForCandidate(runs: any[], candidate: any): "passed" 
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
 export function currentFailedReview(runs: any[], activePack: any): any | undefined {
+  // Lean path: with no active pack the expected columns are the empty defaults
+  // a lean run persists, so the same triple comparison admits pack-free runs.
+  const expectedPackId = activePack?.id ?? "";
+  const expectedVersion = Number(activePack?.version || 0);
+  const expectedHash = activePack?.content_hash ?? "";
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const candidate = runs.find((run: any) => isMutationStage(run.stage) && run.status === "completed" && run.artifact_saved_at
-    && !run.integrated_at && run.instruction_pack_id === activePack?.id && Number(run.instruction_pack_version) === Number(activePack?.version)
-    && run.instruction_pack_hash === activePack?.content_hash);
+    && !run.integrated_at && run.instruction_pack_id === expectedPackId && Number(run.instruction_pack_version) === expectedVersion
+    && run.instruction_pack_hash === expectedHash);
   if (!candidate) return undefined;
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const review = runs.find((run: any) => run.stage === "review" && run.status === "completed" && run.candidate_run_id === candidate.id
