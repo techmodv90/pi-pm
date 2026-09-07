@@ -205,6 +205,10 @@ export function pipelineWorkerBlockReason(data: any): string | null {
 export function assertRunContractCurrent(data: any, run: Pick<PipelineRun, "instruction_pack_id" | "instruction_pack_hash" | "effective_contract_snapshot_id" | "effective_contract_snapshot_hash">): void {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
+  // Lean path (owner decision 2026-09-07): a pack-free run on a pack-free task
+  // has no TIP binding to drift — the worker input is the stored description,
+  // immutable in the DB — so contract continuity holds trivially.
+  if (!activePack && run.instruction_pack_id === "" && run.instruction_pack_hash === "") return;
   if (data.canonical) {
     if (!activePack || activePack.id !== run.instruction_pack_id || activePack.content_hash !== run.instruction_pack_hash) {
       throw new Error("worker instruction pack changed; output quarantined until a revised TIP is activated");

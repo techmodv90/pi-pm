@@ -260,6 +260,17 @@ test("normalizePipelineData adapts canonical Work Items without snapshot authori
   assert.doesNotThrow(() => assertRunContractCurrent(data, { instruction_pack_id: "wip-1", instruction_pack_hash: "hash-2" }));
 });
 
+test("lean worker runs pass the contract-continuity check without pack bindings", () => {
+  // Lean path (owner decision 2026-09-07): no active pack and no materialization
+  // means the run was claimed on the lean branch — the worker input is the
+  // stored description, immutable in the DB, so there is no pack to drift.
+  const leanData = { work_item: { id: "wi-lean", type: "task" }, canonical: true, ready: true, instruction_packs: [], materializations: [] };
+  assert.doesNotThrow(() => assertRunContractCurrent(leanData, { instruction_pack_id: "", instruction_pack_hash: "", effective_contract_snapshot_id: "", effective_contract_snapshot_hash: "" }));
+  // A legacy run referencing a pack that no longer matches stays quarantined.
+  const legacyData = { work_item: { id: "wi-1" }, canonical: true, instruction_packs: [{ id: "wip-1", status: "active", content_hash: "hash-1" }] };
+  assert.throws(() => assertRunContractCurrent(legacyData, { instruction_pack_id: "wip-1", instruction_pack_hash: "hash-2" }), /instruction pack changed/);
+});
+
 test("canonical worker handoff renders strict structured TIP XML", () => {
   const xml = renderCanonicalInstructionPackXml(
     { id: "wi-1", title: "Migrate guests", type: "task", priority: "high" },
