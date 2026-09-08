@@ -55,7 +55,7 @@ const workItemArtifactsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_artifact
 // Blueprint disposition evidence constraint (OB-F3-3): the approved Blueprint
 // checkpoint carries the terminal annotation dispositions as durable approval
 // evidence, so the record survives runtime draft and plan cleanup and stays
-// queryable from SQLite. dispositions_json defaults to '' for every other
+// queryable from SQLite. dispositions_json defaults to ” for every other
 // stage; the column is widened on older databases by the guarded migration
 // step in schema_bootstrap.go.
 const workflowCheckpointsTableSQL = `CREATE TABLE IF NOT EXISTS workflow_checkpoints (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','rri_t_scenarios','vision','blueprint','contracts','task_graph')), artifact_id TEXT NOT NULL, artifact_revision INTEGER NOT NULL CHECK(artifact_revision>0), content_hash TEXT NOT NULL, decision_type TEXT NOT NULL, dispositions_json TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,artifact_revision))`
