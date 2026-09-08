@@ -555,6 +555,84 @@ func TestArtifactFileAtomicWrite(t *testing.T) {
 	})
 }
 
+// TestArtifactFileConflictBlocksSave is the RED test for the conflict
+// pre-flight (Feature US4; Plan §API Contract conflict pre-flight): when a
+// file already exists at the deterministic revision-1 path with bytes that
+// differ from the artifact content and no artifact row exists yet, the save
+// must fail with an "artifact file conflict" error naming the path, leave
+// the divergent bytes unchanged, and store no artifact row (pre-flight runs
+// before any DB write, so a conflict strands no committed artifact).
+func TestArtifactFileConflictBlocksSave(t *testing.T) {
+	bin := buildPic(t)
+	root, home, id := initArtifactFileProject(t, bin)
+	db := openArtifactProjectDB(t, root)
+
+	// Given: the planning chain up to contracts is approved (scan accepted,
+	// rri/vision/blueprint approved) so the stage gates are satisfied, and a
+	// divergent contracts-r1.md already exists at the deterministic path
+	// while no contracts artifact row exists.
+	contents := map[string]string{
+		"scan":      "scan content",
+		"rri":       "# RRI Report\n\nRequirement matrix follows.",
+		"vision":    validVisionArtifact,
+		"blueprint": validBlueprintArtifact,
+	}
+	for _, stage := range []string{"scan", "rri", "vision", "blueprint"} {
+		artifact := saveArtifact(t, bin, root, home, id, stage, contents[stage])
+		decision := "approved"
+		if stage == "scan" {
+			decision = "accepted"
+		}
+		runPic(t, bin, root, home, "work-item", "artifact-approve", id, stage, artifact["id"].(string), decision)
+	}
+	conflictPath, err := artifactFilePath(root, id, "contracts", 1)
+	if err != nil {
+		t.Fatalf("artifactFilePath contracts revision 1: %v", err)
+	}
+	if err := writeArtifactFileAtomic(conflictPath, "# Contracts\n"); err != nil {
+		t.Fatalf("pre-create divergent markdown: %v", err)
+	}
+	preExisting, err := os.ReadFile(conflictPath)
+	if err != nil {
+		t.Fatalf("read pre-created markdown: %v", err)
+	}
+
+	// When: an artifact is saved for contracts revision 1 whose content
+	// differs from the pre-created bytes on disk.
+	output := runPicError(t, bin, root, home, "work-item", "artifact-save", id, "contracts", validContractArtifact)
+
+	// Then: the operation fails with a conflict error naming the path.
+	if !strings.Contains(output, "artifact file conflict") {
+		t.Fatalf("save output missing conflict text: %q", output)
+	}
+	if !strings.Contains(output, conflictPath) {
+		t.Fatalf("save output missing conflict path %s: %q", conflictPath, output)
+	}
+	// And: the divergent bytes at the path are unchanged.
+	after, err := os.ReadFile(conflictPath)
+	if err != nil {
+		t.Fatalf("re-read divergent markdown: %v", err)
+	}
+	if string(after) != string(preExisting) {
+		t.Fatalf("conflicting bytes changed after blocked save: %q, want %q", after, preExisting)
+	}
+	// And: no artifact row was stranded by the failed save.
+	var rowCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=? AND stage=?`, id, "contracts").Scan(&rowCount); err != nil {
+		t.Fatalf("count contracts artifact rows: %v", err)
+	}
+	if rowCount != 0 {
+		t.Fatalf("work_item_artifacts contracts rows = %d, want 0 after conflict", rowCount)
+	}
+	var bindCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM artifact_files WHERE work_item_id=? AND stage=?`, id, "contracts").Scan(&bindCount); err != nil {
+		t.Fatalf("count contracts bindings: %v", err)
+	}
+	if bindCount != 0 {
+		t.Fatalf("artifact_files contracts bindings = %d, want 0 after conflict", bindCount)
+	}
+}
+
 func TestArtifactFileProjectFixture(t *testing.T) {
 	bin := buildPic(t)
 	root, home, id := initArtifactFileProject(t, bin)
