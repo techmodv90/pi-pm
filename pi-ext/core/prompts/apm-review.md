@@ -164,11 +164,23 @@ Items on `develop` — own branch, own worker, own reviewer, own verification.
 4. VERDICT       — passed (all PASS) / partial (deferred bugs ticketed) /
                    failed (blocking finding, corrective bug) via
                    verify_aggregate_work_item with the graded JSON
-5. ACCEPTANCE BRIEF — before the owner decides, present one summary:
-                   what the aggregate delivered, deliberate gaps (with the
-                   requirement/task owning each), and open questions. Then ask
-                   the owner to approve; never call accept_aggregate_work_item
-                   yourself
+5. ACCEPTANCE BRIEF — before the owner decides, present one summary using
+                   this exact form, then ask the owner to approve; never call
+                   accept_aggregate_work_item yourself
+
+   ## Acceptance brief — <aggregate id> (<title>)
+
+   **What it delivered**
+   - <concrete deliverable with measured evidence where it exists>
+   - <verified requirements / tasks with their verification result>
+
+   **Gaps (deliberate, not defects)**
+   1. <gap — with the requirement or task that owns it>
+
+   **Open questions**
+   1. <question requiring an owner decision>
+
+   **Ask:** approve `accept_aggregate_work_item` for <aggregate id>?
 ```
 
 ## Guardrails
@@ -178,4 +190,5 @@ Items on `develop` — own branch, own worker, own reviewer, own verification.
 - Never grade a scenario without executed evidence from this session.
 - Never defer a blocking finding to a bug ticket.
 - Never approve with uncited verdicts.
-- Owner acceptance stays with the owner; present the acceptance brief and stop.
+- Owner acceptance stays with the owner; present the acceptance brief in the
+  exact form above and stop.
