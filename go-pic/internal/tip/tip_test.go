@@ -8,7 +8,7 @@ import (
 
 func TestVerificationGateParsing(t *testing.T) {
 	gate, ok := ParseVerificationGate(map[string]any{
-		"seam":            "cli-materialize",
+		"seam":             "cli-materialize",
 		"requirement_keys": []any{"REQ-001"},
 		"obligation_keys":  []any{"OB-1", "OB-2"},
 		"command":          "go test ./...",

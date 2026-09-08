@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/earendil-works/task-system/go-pic/internal/acceptance"
 	"github.com/earendil-works/task-system/go-pic/internal/apm"
+	"github.com/earendil-works/task-system/go-pic/internal/pipeline"
 	"github.com/earendil-works/task-system/go-pic/internal/profile"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
@@ -42,37 +43,37 @@ func cmdWorkflow(args []string) error {
 	case "events":
 		return workflowList(db, rest, `SELECT * FROM work_item_events WHERE work_item_id=? ORDER BY created_at DESC`)
 	case "escalation-save":
-		return workflowEscalationSave(db, rest)
+		return pipeline.EscalationSave(db, rest)
 	case "escalation-resolve":
-		return workflowEscalationResolve(db, rest)
+		return pipeline.EscalationResolve(db, rest)
 	case "pipeline-claim":
-		return workflowPipelineClaim(db, rest)
+		return pipeline.Claim(db, rest)
 	case "pipeline-circuit-reset":
-		return workflowPipelineCircuitReset(db, rest)
+		return pipeline.CircuitReset(db, rest)
 	case "pipeline-bind":
-		return workflowPipelineBind(db, rest)
+		return pipeline.Bind(db, rest)
 	case "pipeline-renew":
-		return workflowPipelineRenew(db, rest)
+		return pipeline.Renew(db, rest)
 	case "pipeline-model":
-		return workflowPipelineModel(db, rest)
+		return pipeline.Model(db, rest)
 	case "pipeline-complete":
-		return workflowPipelineComplete(db, rest)
+		return pipeline.Complete(db, rest)
 	case "review-fix-block":
-		return workflowReviewFixBlock(db, rest)
+		return pipeline.ReviewFixBlock(db, rest)
 	case "review-decision":
-		return workflowReviewDecision(db, rest)
+		return pipeline.ReviewDecision(db, rest)
 	case "pipeline-runs":
-		return workflowPipelineRuns(db, rest)
+		return pipeline.Runs(db, rest)
 	case "pipeline-show":
-		return workflowPipelineShow(db, rest)
+		return pipeline.Show(db, rest)
 	case "pipeline-active":
-		return workflowPipelineActive(db, rest)
+		return pipeline.Active(db, rest)
 	case "pipeline-group":
-		return workflowPipelineGroup(db, rest)
+		return pipeline.Group(db, rest)
 	case "pipeline-checkpoint":
-		return workflowPipelineCheckpoint(db, rest)
+		return pipeline.Checkpoint(db, rest)
 	case "pipeline-pending":
-		return workflowPipelinePending(db, rest)
+		return pipeline.Pending(db, rest)
 	case "profile-list":
 		return profile.ProfileList(db, rest)
 	case "profile-promotion-evaluate":

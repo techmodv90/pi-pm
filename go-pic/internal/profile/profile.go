@@ -13,7 +13,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/earendil-works/task-system/go-pic/internal/pipeline"
+	"github.com/earendil-works/task-system/go-pic/internal/stage"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 )
@@ -141,18 +141,18 @@ func Ensure(tx *sql.Tx, id string) (map[string]ItemProfile, error) {
 			if err = json.Unmarshal([]byte(stagesJSON), &stages); err != nil || len(stages) == 0 {
 				return nil, fmt.Errorf("corrupt persisted %s profile for Work Item %s", name, id)
 			}
-			for _, stage := range stages {
-				if !store.Contains(pipeline.Stages, stage) {
-					return nil, fmt.Errorf("invalid stage %q in persisted %s profile for Work Item %s", stage, name, id)
+			for _, st := range stages {
+				if !stage.Contains(st) {
+					return nil, fmt.Errorf("invalid stage %q in persisted %s profile for Work Item %s", st, name, id)
 				}
 			}
 			profiles[name] = ItemProfile{Name: name, Version: version, PlanningDepth: storedDepth, Stages: stages, ContentHash: hash}
 			continue
 		}
 		stages := LifecycleStagesByName(name, depth, planStages)
-		for _, stage := range stages {
-			if !store.Contains(pipeline.Stages, stage) {
-				return nil, fmt.Errorf("unknown pipeline stage %q in %s profile", stage, name)
+		for _, st := range stages {
+			if !stage.Contains(st) {
+				return nil, fmt.Errorf("unknown pipeline stage %q in %s profile", st, name)
 			}
 		}
 		profileHash := ContentHash(name, version+1, depth, stages)

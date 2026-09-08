@@ -151,6 +151,7 @@ type TaskPlanDocumentNode struct {
 	Acceptance         string            `json:"acceptance,omitempty"`
 	DependsOnRationale map[string]string `json:"depends_on_rationale,omitempty"`
 }
+
 func ParseTaskPlanJSON(blueprint string) (TaskPlanDocument, error) {
 	match := regexp.MustCompile("(?s)```task-plan-json\\s*(.*?)```").FindStringSubmatch(blueprint)
 	if len(match) != 2 {
@@ -241,6 +242,7 @@ func ParseTaskPlanJSON(blueprint string) (TaskPlanDocument, error) {
 	}
 	return plan, nil
 }
+
 type RequirementSnapshot struct {
 	RequirementID      string `json:"requirement_id"`
 	RequirementKey     string `json:"requirement_key"`
@@ -249,6 +251,7 @@ type RequirementSnapshot struct {
 	AcceptanceCriteria string `json:"acceptance_criteria"`
 	SourceHash         string `json:"source_hash"`
 }
+
 func ActivateInstructionPack(tx *sql.Tx, packID string) error {
 	var workItemID string
 	if err := tx.QueryRow(`SELECT work_item_id FROM work_item_instruction_packs WHERE id=? AND status='inactive'`, packID).Scan(&workItemID); err != nil {
@@ -495,6 +498,7 @@ func MaterializedInstructionPack(node TaskPlanDocumentNode, schemaVersion int, r
 	}
 	return data, HashJSON(canonical), nil
 }
+
 // SaveInput carries the parsed content of one instruction-pack save request.
 type SaveInput struct {
 	ContentJSON        string
