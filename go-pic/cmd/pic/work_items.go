@@ -48,6 +48,9 @@ func cmdWorkItem(args []string) error {
 		}
 		item, err := workItemByID(db, args[1])
 		if err == nil {
+			err = attachWorkItemGraph(db, item)
+		}
+		if err == nil {
 			writeJSON(os.Stdout, item)
 		}
 		return err
