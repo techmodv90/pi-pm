@@ -226,6 +226,8 @@ export function buildAggregateVerifyPrompt(data: any): string {
     "## Submit",
     "Then call `verify_aggregate_work_item` with this Work Item ID, `verification_status` passed, failed, partial, or blocked, a `summary` evidence summary, the graded scenario JSON as `rri_t_evidence_json` ({\"scenarios\":[{\"id\":\"<scenario id verbatim from artifact>\",\"persona\":\"QA / Tester\",\"dimension\":\"D3\",\"stress_axis\":\"ERROR\",\"requirement_id\":\"REQ-1\",\"procedure\":\"<verbatim from artifact>\",\"evidence\":\"<command run and observed output>\",\"result\":\"PASS\"}],\"not_applicable\":[{\"id\":\"<scenario id verbatim from artifact>\",\"persona\":\"QA / Tester\",\"dimension\":\"D3\",\"stress_axis\":\"ERROR\",\"requirement_id\":\"REQ-1\",\"reason\":\"<why it cannot run>\"}]}), and `actor_role=contractor`.",
     "Do not call owner acceptance. A passed aggregate verification creates the single owner decision gate; a failed or partial result must identify targeted corrections and retain the RRI-T evidence.",
+    "## Acceptance Brief (mandatory before the owner decides)",
+    "When asking the owner to approve the aggregate, present one summary first: what the aggregate delivered, deliberate gaps (each with the requirement or task that owns it), and any open questions. Ask for the approval decision only after that brief — never request acceptance without it.",
   ].filter(Boolean).join("\n");
 }
 

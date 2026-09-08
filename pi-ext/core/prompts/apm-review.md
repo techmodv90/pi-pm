@@ -164,8 +164,11 @@ Items on `develop` — own branch, own worker, own reviewer, own verification.
 4. VERDICT       — passed (all PASS) / partial (deferred bugs ticketed) /
                    failed (blocking finding, corrective bug) via
                    verify_aggregate_work_item with the graded JSON
-5. HANDOFF       — owner acceptance is the owner's call; never call
-                   accept_aggregate_work_item yourself
+5. ACCEPTANCE BRIEF — before the owner decides, present one summary:
+                   what the aggregate delivered, deliberate gaps (with the
+                   requirement/task owning each), and open questions. Then ask
+                   the owner to approve; never call accept_aggregate_work_item
+                   yourself
 ```
 
 ## Guardrails
@@ -175,4 +178,4 @@ Items on `develop` — own branch, own worker, own reviewer, own verification.
 - Never grade a scenario without executed evidence from this session.
 - Never defer a blocking finding to a bug ticket.
 - Never approve with uncited verdicts.
-- Owner acceptance stays with the owner; report and stop.
+- Owner acceptance stays with the owner; present the acceptance brief and stop.
