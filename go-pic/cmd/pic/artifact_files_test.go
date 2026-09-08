@@ -703,6 +703,103 @@ func TestArtifactFileIntegrityCheck(t *testing.T) {
 	}
 }
 
+// TestArtifactFileBackfill is the RED test for historical backfill (Feature
+// US6; Plan API Contract backfill recovery intent): a file backfill run for
+// a work item whose artifact rows predate the artifact_files projection must
+// bind every artifact row to an artifact_files row with content_sha256 equal
+// to the canonical content_hash and project the exact stored content bytes
+// at the deterministic path, overwriting any divergent pre-existing bytes.
+// The artifact-backfill command is not routed yet (T014 deliberately skipped
+// routing to avoid pre-satisfying this RED phase), so the first failure is
+// the unknown command at the invocation point (T013/T014 RED precedent).
+func TestArtifactFileBackfill(t *testing.T) {
+	bin := buildPic(t)
+	root, home, id := initArtifactFileProject(t, bin)
+	db := openArtifactProjectDB(t, root)
+
+	// Given: two artifact rows saved through the CLI and then reverted to a
+	// pre-projection historical state — their artifact_files bindings are
+	// deleted, the scan file is removed entirely, and the rri path holds
+	// divergent pre-existing bytes that canonical content must overwrite.
+	scanArtifact := saveArtifact(t, bin, root, home, id, "scan", "scan content")
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", scanArtifact["id"].(string), "accepted")
+	rriArtifact := saveArtifact(t, bin, root, home, id, "rri", "# RRI Report\n\nRequirement matrix follows.")
+	if _, err := db.Exec(`DELETE FROM artifact_files WHERE work_item_id=?`, id); err != nil {
+		t.Fatalf("reset artifact_files to historical state: %v", err)
+	}
+	scanPath, err := artifactFilePath(root, id, "scan", 1)
+	if err != nil {
+		t.Fatalf("artifactFilePath scan: %v", err)
+	}
+	if err := os.Remove(scanPath); err != nil {
+		t.Fatalf("remove historical scan markdown: %v", err)
+	}
+	rriPath, err := artifactFilePath(root, id, "rri", 1)
+	if err != nil {
+		t.Fatalf("artifactFilePath rri: %v", err)
+	}
+	if err := os.WriteFile(rriPath, []byte("divergent pre-existing bytes"), 0o600); err != nil {
+		t.Fatalf("pre-create divergent rri markdown: %v", err)
+	}
+	var bindCount, artifactCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM artifact_files WHERE work_item_id=?`, id).Scan(&bindCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM work_item_artifacts WHERE work_item_id=?`, id).Scan(&artifactCount); err != nil {
+		t.Fatal(err)
+	}
+	if bindCount != 0 || artifactCount != 2 {
+		t.Fatalf("historical fixture: artifact_files=%d work_item_artifacts=%d, want 0 unbound rows over 2 artifacts", bindCount, artifactCount)
+	}
+
+	// When: a file backfill is run for work_item_id id.
+	runPic(t, bin, root, home, "work-item", "artifact-backfill", id)
+
+	// Then: every artifact row is bound to an artifact_files row with
+	// content_sha256 equal to content_hash, and each bound file holds the
+	// exact stored content — canonical bytes overwrite the divergent rri
+	// file and backfill the missing scan file.
+	fixtures := []struct {
+		stage    string
+		artifact map[string]any
+	}{
+		{"scan", scanArtifact},
+		{"rri", rriArtifact},
+	}
+	for _, fixture := range fixtures {
+		artifactID := fixture.artifact["id"].(string)
+		_, content, contentHash := artifactFileRow(t, db, id, fixture.stage)
+		var boundPath, boundSHA string
+		if err := db.QueryRow(`SELECT file_path,content_sha256 FROM artifact_files WHERE artifact_id=?`, artifactID).Scan(&boundPath, &boundSHA); err != nil {
+			t.Fatalf("artifact %s (%s) not bound after backfill: %v", artifactID, fixture.stage, err)
+		}
+		wantPath, err := artifactFilePath(root, id, fixture.stage, 1)
+		if err != nil {
+			t.Fatalf("artifactFilePath %s: %v", fixture.stage, err)
+		}
+		if boundPath != wantPath {
+			t.Fatalf("%s binding file_path = %q, want %q", fixture.stage, boundPath, wantPath)
+		}
+		if boundSHA != contentHash {
+			t.Fatalf("%s binding content_sha256 = %q, want content_hash %q", fixture.stage, boundSHA, contentHash)
+		}
+		got, err := os.ReadFile(wantPath)
+		if err != nil {
+			t.Fatalf("%s markdown missing at %s after backfill: %v", fixture.stage, wantPath, err)
+		}
+		if string(got) != content {
+			t.Fatalf("%s projected bytes = %q, want exact stored content %q", fixture.stage, got, content)
+		}
+	}
+	// And: the backfill binds exactly one row per artifact — no strays.
+	if err := db.QueryRow(`SELECT COUNT(*) FROM artifact_files WHERE work_item_id=?`, id).Scan(&bindCount); err != nil {
+		t.Fatal(err)
+	}
+	if bindCount != 2 {
+		t.Fatalf("artifact_files rows after backfill = %d, want one per artifact (2)", bindCount)
+	}
+}
+
 func TestArtifactFileProjectFixture(t *testing.T) {
 	bin := buildPic(t)
 	root, home, id := initArtifactFileProject(t, bin)
