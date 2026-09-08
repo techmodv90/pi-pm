@@ -188,7 +188,7 @@ func TestPlanningDepthStandaloneIsFixedLeanProfile(t *testing.T) {
 		if _, err := db.Exec(`INSERT INTO work_items(id,type,title,planning_depth) VALUES(?,?,?,?)`, id, "task", depth, depth); err != nil {
 			t.Fatal(err)
 		}
-		stages, err := planningStagesForWorkItem(db, id)
+		stages, _, _, _, err := computePlanStagesForWorkItem(db, id)
 		if err != nil {
 			t.Fatal(err)
 		}
