@@ -21,6 +21,15 @@ aggregate instead.
 > Child patches were already reviewed per-task (task-reviewer, hash-bound).
 > Do not re-review children. This review operates on the integrated branch.
 
+## Branch tier policy (owner decision 2026-09-08)
+
+- Feature-level review: evidence runs against the feature's delivery branch
+  (`feat/*` or its parent feature branch); reviewed work merges there. Never
+  touch `develop` at feature level.
+- Epic-level verification: the epic branch (containing verified `feat/*`
+  branches) merges into `develop`. Only aggregate verification at epic tier
+  integrates to `develop`.
+
 ## Input
 
 - target: {INPUT} — a Work Item ID (`wi-…`) at `next_stage:
