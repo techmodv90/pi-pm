@@ -3649,10 +3649,14 @@ func workItemAggregateVerify(db *sql.DB, args []string) error {
 			return deliveryErr
 		}
 		if mode == "branch" {
-			if opts["branch-name"] == "" || opts["head-commit"] == "" || opts["base-commit"] == "" || opts["branch-name"] != branchName {
+			// Re-verification rebinds the delivery evidence: a stale persisted
+			// branch binding (e.g. verify ran from the wrong checkout) must be
+			// recoverable, since no other transition can rebind it. Acceptance
+			// still validates the unchanged head/base against the working tree.
+			if opts["branch-name"] == "" || opts["head-commit"] == "" || opts["base-commit"] == "" {
 				return errors.New("branch aggregate verification requires the bound branch name, head commit, and current base commit")
 			}
-			if _, err = tx.Exec(`UPDATE work_item_delivery_states SET base_commit=?,verified_head=?,verification_report_id=?,merge_status='',merged_commit='',merge_error='',updated_at=datetime('now') WHERE work_item_id=?`, opts["base-commit"], opts["head-commit"], id, args[0]); err != nil {
+			if _, err = tx.Exec(`UPDATE work_item_delivery_states SET branch_name=?, base_commit=?, verified_head=?, verification_report_id=?, merge_status='',merged_commit='',merge_error='',updated_at=datetime('now') WHERE work_item_id=?`, opts["branch-name"], opts["base-commit"], opts["head-commit"], id, args[0]); err != nil {
 				return err
 			}
 		} else if _, err = tx.Exec(`UPDATE work_item_delivery_states SET verification_report_id=?,merge_status='',merged_commit='',merge_error='',updated_at=datetime('now') WHERE work_item_id=?`, id, args[0]); err != nil {

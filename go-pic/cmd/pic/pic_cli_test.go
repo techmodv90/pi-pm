@@ -2245,6 +2245,40 @@ func TestFailedAggregateVerificationCreatesCorrectiveBug(t *testing.T) {
 	}
 }
 
+func TestAggregateVerifyRebindsStaleDeliveryBranch(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	feature := asObject(t, runPic(t, bin, root, home, "work-item", "create", "feature", "Rebind Feature"))
+	leaf := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Rebind Child", "--parent", feature["id"].(string)))
+	featureID := feature["id"].(string)
+	dbPath := filepath.Join(root, ".pi", "tasks.db")
+	runPic(t, bin, root, home, "work-item", "status", leaf["id"].(string), "done")
+	runSQLite(t, dbPath, `INSERT INTO work_item_delivery_states(work_item_id,integration_mode,branch_name,base_branch,base_commit) VALUES('`+featureID+`','branch','feature/stale','develop','stale-base')`)
+
+	// Re-verification rebinds the delivery evidence: branch_name, verified
+	// head, and base commit all move to the branch the review actually ran on
+	// (a stale binding must not wedge the aggregate out of every transition).
+	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", featureID, "passed", "rebound to the reviewed delivery branch", "--actor-role", "contractor", "--branch-name", "feature/delivery", "--head-commit", "head-2", "--base-commit", "base-2"))
+	db, err := openSQLite(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	var boundBranch, verifiedHead, baseCommit string
+	if err := db.QueryRow(`SELECT branch_name,verified_head,base_commit FROM work_item_delivery_states WHERE work_item_id=?`, featureID).Scan(&boundBranch, &verifiedHead, &baseCommit); err != nil {
+		t.Fatal(err)
+	}
+	if boundBranch != "feature/delivery" || verifiedHead != "head-2" || baseCommit != "base-2" {
+		t.Fatalf("delivery state not rebound: branch=%q head=%q base=%q", boundBranch, verifiedHead, baseCommit)
+	}
+
+	// Acceptance then succeeds with the unchanged rebound evidence.
+	decision := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-accept", featureID, report["id"].(string), "accepted", "ship it", "--actor-role", "owner", "--head-commit", "head-2", "--base-commit", "base-2"))
+	if decision["decision"] != "accepted" {
+		t.Fatalf("aggregate decision = %#v", decision)
+	}
+}
+
 func TestAggregateDeliveryLifecycle(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
