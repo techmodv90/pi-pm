@@ -18,7 +18,7 @@ func TestValidateGherkinSteps(t *testing.T) {
 		{name: "case insensitive", text: "given a task\nwhen it runs\nthen it closes"},
 		{name: "missing then", text: "Given a task\nWhen it runs", wantErr: "Then"},
 		{name: "missing given", text: "When it runs\nThen it closes", wantErr: "Given"},
-			{name: "non behavioral prose", text: "the task works well", wantErr: "require Given, When, and Then steps"},
+		{name: "non behavioral prose", text: "the task works well", wantErr: "require Given, When, and Then steps"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

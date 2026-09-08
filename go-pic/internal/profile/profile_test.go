@@ -28,11 +28,11 @@ func TestLifecycleForStage(t *testing.T) {
 func TestPlanStagesForProfile(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
-		name    string
-		kind    string
-		parent  string
-		depth   string
-		want    []string
+		name   string
+		kind   string
+		parent string
+		depth  string
+		want   []string
 	}{
 		{name: "orphan executable gets minimal plan", kind: "task", parent: "", depth: "standard", want: []string{"scan", "rri", "task_graph"}},
 		{name: "full depth", kind: "epic", parent: "", depth: "full", want: []string{"scan", "rri", "vision", "blueprint", "contracts", "task_graph"}},
