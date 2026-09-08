@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/dashboard"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/schema"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
@@ -90,7 +91,7 @@ func webRequest(t *testing.T, method, path string, body any) *httptest.ResponseR
 	}
 	req := httptest.NewRequest(method, path, bytes.NewReader(data))
 	res := httptest.NewRecorder()
-	handleAPI(res, req)
+	dashboard.HandleAPI(res, req)
 	return res
 }
 
@@ -168,7 +169,7 @@ func TestWebAPIUsesGlobalProjectRegistry(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/projects", nil)
 	res := httptest.NewRecorder()
-	handleAPI(res, req)
+	dashboard.HandleAPI(res, req)
 	var body map[string]any
 	if err := json.Unmarshal(res.Body.Bytes(), &body); err != nil {
 		t.Fatal(err)
@@ -181,7 +182,7 @@ func TestWebAPIUsesGlobalProjectRegistry(t *testing.T) {
 	projectID := projects[0].(map[string]any)["id"].(string)
 	req = httptest.NewRequest(http.MethodGet, "/api/projects/"+projectID+"/summary", nil)
 	res = httptest.NewRecorder()
-	handleAPI(res, req)
+	dashboard.HandleAPI(res, req)
 	var summary map[string]any
 	if err := json.Unmarshal(res.Body.Bytes(), &summary); err != nil {
 		t.Fatal(err)

@@ -1,7 +1,6 @@
 package main
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
@@ -10,28 +9,11 @@ import (
 	"os"
 )
 
-func openDB() (*sql.DB, error) {
-	cwd, _ := os.Getwd()
-	dbPath := project.FindDB(cwd)
-	if dbPath == "" {
-		return nil, errors.New("No task database found. Run: pic init")
-	}
-	if err := project.InitDB(dbPath); err != nil {
-		return nil, fmt.Errorf("update task database schema: %w", err)
-	}
-	db, err := project.OpenSQLite(dbPath)
-	if err != nil {
-		return nil, err
-	}
-	db.SetMaxOpenConns(1)
-	return db, nil
-}
-
 func cmdShow(args []string) error {
 	if len(args) < 1 {
 		return errors.New("show requires id")
 	}
-	db, err := openDB()
+	db, err := project.OpenDB()
 	if err != nil {
 		return err
 	}
@@ -71,7 +53,7 @@ func cmdShow(args []string) error {
 }
 
 func cmdList(args []string) error {
-	db, err := openDB()
+	db, err := project.OpenDB()
 	if err != nil {
 		return err
 	}

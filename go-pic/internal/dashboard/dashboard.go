@@ -1,137 +1,27 @@
-package main
+package dashboard
 
 import (
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/earendil-works/task-system/go-pic/internal/project"
-	"github.com/earendil-works/task-system/go-pic/internal/store"
-	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/earendil-works/task-system/go-pic/internal/project"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 )
 
-func cmdActivity(args []string) error {
-	if len(args) == 0 {
-		return errors.New("activity subcommand required")
-	}
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	switch args[0] {
-	case "update":
-		opts, err := store.ParseOptions(args[1:])
-		if err != nil {
-			return err
-		}
-		session := opts["session"]
-		if session == "" {
-			return errors.New("--session is required")
-		}
-		_, err = db.Exec(`INSERT INTO session_activity (session_id, task_id, status, current_step_label, last_skill, updated_at) VALUES (?, ?, ?, ?, ?, datetime('now')) ON CONFLICT(session_id) DO UPDATE SET task_id = COALESCE(NULLIF(excluded.task_id, ''), task_id), status = excluded.status, current_step_label = COALESCE(NULLIF(excluded.current_step_label, ''), current_step_label), last_skill = COALESCE(NULLIF(excluded.last_skill, ''), last_skill), updated_at = datetime('now')`, session, opts["task"], project.FirstNonEmpty(opts["status"], "active"), opts["step"], opts["skill"])
-		if err != nil {
-			return err
-		}
-		store.WriteJSON(os.Stdout, map[string]any{"ok": true})
-		return nil
-	case "list":
-		rows, err := store.QueryMaps(db, `SELECT sa.session_id,sa.task_id,COALESCE(wi.title,'') as task_title,sa.status,COALESCE(children.done,0) as done,COALESCE(children.total,0) as total,sa.last_skill,sa.updated_at FROM session_activity sa LEFT JOIN work_items wi ON wi.id=sa.task_id AND sa.task_id!='' LEFT JOIN (SELECT parent_id,SUM(CASE WHEN status='done' THEN 1 ELSE 0 END) as done,COUNT(*) as total FROM work_items WHERE parent_id IS NOT NULL GROUP BY parent_id) children ON children.parent_id=sa.task_id WHERE sa.status='active' AND sa.task_id!='' AND datetime(sa.updated_at)>datetime('now','-30 seconds') ORDER BY datetime(sa.updated_at) DESC`)
-		if err != nil {
-			return err
-		}
-		if rows == nil {
-			rows = []map[string]any{}
-		}
-		store.WriteJSON(os.Stdout, rows)
-		return nil
-	default:
-		return fmt.Errorf("unknown activity subcommand: %s", args[0])
-	}
-}
+// Version is injected by the pic CLI entrypoint so the dashboard health
+// payload reports the binary version.
+var Version string
 
-func cmdSearch(args []string) error {
-	if len(args) < 1 {
-		return errors.New("search requires query")
-	}
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	q := "%" + strings.ToLower(args[0]) + "%"
-	results, _ := store.QueryMaps(db, `SELECT type,id,title,status,priority,parent_id FROM work_items WHERE lower(title) LIKE ? OR lower(description) LIKE ? ORDER BY created_at,id`, q, q)
-	store.WriteJSON(os.Stdout, results)
-	return nil
-}
-
-func cmdMarkdown(args []string) error {
-	db, err := openDB()
-	if err != nil {
-		return err
-	}
-	defer db.Close()
-	targetType, id, query := "list", "", ""
-	for i := 0; i < len(args); i++ {
-		switch args[i] {
-		case "--work-item":
-			i++
-			if i >= len(args) {
-				return errors.New("--work-item requires a value")
-			}
-			targetType, id = "work-item", args[i]
-		case "--search":
-			i++
-			if i >= len(args) {
-				return errors.New("--search requires a value")
-			}
-			targetType, query = "search", args[i]
-		default:
-			return fmt.Errorf("unknown markdown option: %s", args[i])
-		}
-	}
-	text, err := markdownText(db, targetType, id, query)
-	if err != nil {
-		return err
-	}
-	fmt.Print(text)
-	return nil
-}
-
-func markdownText(db *sql.DB, targetType, id, query string) (string, error) {
-	switch targetType {
-	case "work-item":
-		item, err := store.QueryOne(db, `SELECT * FROM work_items WHERE id=?`, id)
-		if err != nil {
-			return fmt.Sprintf("# Error: Work Item %s not found", id), nil
-		}
-		children, _ := store.QueryMaps(db, `SELECT * FROM work_items WHERE parent_id=? ORDER BY created_at,id`, id)
-		var b strings.Builder
-		fmt.Fprintf(&b, "# %s\n\nType: %s\nStatus: %s\n\n", item["title"], item["type"], item["status"])
-		for _, child := range children {
-			fmt.Fprintf(&b, "- %s (%s)\n", child["title"], child["status"])
-		}
-		return b.String(), nil
-	case "search":
-		return fmt.Sprintf("Search results for %q:\n", query), nil
-	default:
-		items, _ := store.QueryMaps(db, `SELECT * FROM work_items ORDER BY created_at DESC`)
-		var b strings.Builder
-		b.WriteString("# Work Items\n\n")
-		for _, item := range items {
-			fmt.Fprintf(&b, "- %s (%s)\n", item["title"], item["status"])
-		}
-		return b.String(), nil
-	}
-}
-
-func cmdWeb(args []string) error {
+func Web(args []string) error {
 	port, host := "4377", "127.0.0.1"
 	for i := 0; i < len(args); i++ {
 		switch args[i] {
@@ -158,14 +48,14 @@ func cmdWeb(args []string) error {
 	}
 	mux.HandleFunc("/health", health)
 	mux.HandleFunc("/healthz", health)
-	mux.HandleFunc("/api/", handleAPI)
+	mux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) { HandleAPI(w, r) })
 	mux.HandleFunc("/", serveDashboard)
 	fmt.Fprintf(os.Stderr, "pic web listening on http://%s:%s\n", host, port)
 	return http.ListenAndServe(host+":"+port, mux)
 }
 
 func healthData() map[string]any {
-	return map[string]any{"ok": true, "implementation": "go", "version": picVersion, "dashboard_assets": dashboardBuildDir() != ""}
+	return map[string]any{"ok": true, "implementation": "go", "version": Version, "dashboard_assets": dashboardBuildDir() != ""}
 }
 
 func serveDashboard(w http.ResponseWriter, r *http.Request) {
@@ -210,7 +100,7 @@ func writeJSONStatus(w http.ResponseWriter, status int, value any) {
 	_, _ = w.Write(data)
 }
 
-func decodeJSONBody(r *http.Request) (map[string]any, error) {
+func DecodeJSONBody(r *http.Request) (map[string]any, error) {
 	defer r.Body.Close()
 	const maxBytes = 65536
 	data, err := io.ReadAll(io.LimitReader(r.Body, maxBytes+1))
@@ -230,7 +120,7 @@ func decodeJSONBody(r *http.Request) (map[string]any, error) {
 	return body, nil
 }
 
-func validateString(value any, field string, minLength, maxLength int) (string, error) {
+func ValidateString(value any, field string, minLength, maxLength int) (string, error) {
 	text, ok := value.(string)
 	if !ok {
 		return "", fmt.Errorf("%s must be a string", field)
@@ -245,7 +135,7 @@ func validateString(value any, field string, minLength, maxLength int) (string, 
 	return text, nil
 }
 
-func validateEnum(value any, field string, allowed []string) (string, error) {
+func ValidateEnum(value any, field string, allowed []string) (string, error) {
 	text, ok := value.(string)
 	if !ok {
 		return "", fmt.Errorf("%s must be a string", field)
@@ -296,6 +186,7 @@ func openProjectDB(path string) (*sql.DB, error) {
 	db.SetMaxOpenConns(1)
 	return db, nil
 }
+
 func closeProjectDB(db *sql.DB) {
 	if db != nil {
 		_ = db.Close()
@@ -327,7 +218,7 @@ func workItemDetailForWeb(db *sql.DB, id string) (map[string]any, bool) {
 	return map[string]any{"workItem": item, "ready": ready, "children": children, "descendants": descendants, "dependencies": dependencies, "gates": gates, "artifacts": artifacts, "checkpoints": checkpoints, "instructionPacks": packs, "authorizations": authorizations, "completionReports": completions, "verificationReports": verifications, "routingEvents": routingEvents}, true
 }
 
-func handleAPI(w http.ResponseWriter, r *http.Request) {
+func HandleAPI(w http.ResponseWriter, r *http.Request) {
 	registry := project.ReadRegistry()
 	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 	if len(parts) == 2 && parts[0] == "api" && parts[1] == "projects" && r.Method == http.MethodGet {
@@ -398,7 +289,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONResponse(w, map[string]any{"workItems": items})
 	case len(parts) == 4 && parts[3] == "work-items" && r.Method == http.MethodPost:
-		body, err := decodeJSONBody(r)
+		body, err := DecodeJSONBody(r)
 		if err != nil {
 			writeJSONStatus(w, 400, map[string]any{"error": err.Error()})
 			return
@@ -431,7 +322,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONResponse(w, map[string]any{"workItem": item})
 	case len(parts) == 6 && parts[3] == "work-items" && parts[5] == "labels" && (r.Method == http.MethodPost || r.Method == http.MethodDelete):
-		body, err := decodeJSONBody(r)
+		body, err := DecodeJSONBody(r)
 		if err != nil {
 			writeJSONStatus(w, 400, map[string]any{"error": err.Error()})
 			return
@@ -462,7 +353,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			writeJSONStatus(w, 404, map[string]any{"error": "Work Item not found"})
 		}
 	case len(parts) == 6 && parts[3] == "work-items" && parts[5] == "status" && r.Method == http.MethodPatch:
-		body, err := decodeJSONBody(r)
+		body, err := DecodeJSONBody(r)
 		status := store.PersistedText(body["status"])
 		if err != nil || !store.Contains([]string{"open", "in_progress", "done", "cancelled"}, status) {
 			writeJSONStatus(w, 400, map[string]any{"error": "valid status is required"})
@@ -598,43 +489,4 @@ func webSearch(registry project.Registry, query string) map[string]any {
 		}
 	}
 	return map[string]any{"query": query, "results": results, "totalCount": len(results)}
-}
-
-func workflowEventAdd(db *sql.DB, args []string) error {
-	if len(args) < 2 {
-		return errors.New("event-add requires Work Item id and event type")
-	}
-	opts, err := store.ParseOptions(args[2:])
-	if err != nil {
-		return err
-	}
-	workItemID, eventType := args[0], args[1]
-	if _, err := workitem.ByID(db, workItemID); err != nil {
-		return err
-	}
-	if eventType == "verify_completed" {
-		return errors.New("verify_completed events are managed by verification-save")
-	}
-	tx, err := db.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if eventType == "implementation_started" || eventType == "review_started" {
-		if _, err = tx.Exec(`UPDATE work_items SET status='in_progress',review_status='pending' WHERE id=?`, workItemID); err != nil {
-			return err
-		}
-	} else if eventType == "review_failed" {
-		if _, err = tx.Exec(`UPDATE work_items SET status='in_progress',review_status='failed' WHERE id=?`, workItemID); err != nil {
-			return err
-		}
-	}
-	id := "wie-" + store.ShortID()
-	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,actor_model,summary,payload_json) VALUES(?,?,?,?,?,?,?)`, id, workItemID, eventType, opts["actor-role"], opts["actor-model"], opts["summary"], store.NormalizeJSONText(opts["payload-json"])); err != nil {
-		return err
-	}
-	if err = tx.Commit(); err != nil {
-		return err
-	}
-	return store.OutputOne(db, `SELECT * FROM work_item_events WHERE id=?`, id)
 }

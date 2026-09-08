@@ -304,3 +304,20 @@ func FindDB(start string) string {
 	}
 	return ""
 }
+
+func OpenDB() (*sql.DB, error) {
+	cwd, _ := os.Getwd()
+	dbPath := FindDB(cwd)
+	if dbPath == "" {
+		return nil, errors.New("No task database found. Run: pic init")
+	}
+	if err := InitDB(dbPath); err != nil {
+		return nil, fmt.Errorf("update task database schema: %w", err)
+	}
+	db, err := OpenSQLite(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	db.SetMaxOpenConns(1)
+	return db, nil
+}

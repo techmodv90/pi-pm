@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"github.com/earendil-works/task-system/go-pic/internal/dashboard"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"net/http/httptest"
 	"os"
@@ -101,7 +102,7 @@ func TestLegacyProjectRegistryParity(t *testing.T) {
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
 		_ = os.WriteFile(path, []byte(`{"projects":[{"id":"proj-test","name":"test","root_path":"/tmp/test","database_path":"/tmp/test/.pi/tasks.db","created_at":"a","updated_at":"b"}],"current_project_id":"proj-test"}`), 0o644)
 		r := project.ReadRegistry()
-		if len(r.Projects) != 1 || r.Projects[0] .RootDir() != "/tmp/test" || r.CurrentProjectID != "proj-test" {
+		if len(r.Projects) != 1 || r.Projects[0].RootDir() != "/tmp/test" || r.CurrentProjectID != "proj-test" {
 			t.Fatalf("%#v", r)
 		}
 	})
@@ -112,7 +113,7 @@ func TestLegacyProjectRegistryParity(t *testing.T) {
 		_ = os.MkdirAll(filepath.Dir(path), 0o755)
 		_ = os.WriteFile(path, []byte(`{"projects":[{"id":"proj-test","name":"test","rootPath":"/tmp/test","databasePath":"/tmp/test/.pi/tasks.db","createdAt":"a","updatedAt":"b"}],"currentProjectId":"proj-test"}`), 0o644)
 		r := project.ReadRegistry()
-		if r.Projects[0] .RootDir() != "/tmp/test" || r.CurrentProjectID != "proj-test" {
+		if r.Projects[0].RootDir() != "/tmp/test" || r.CurrentProjectID != "proj-test" {
 			t.Fatalf("%#v", r)
 		}
 	})
@@ -217,7 +218,7 @@ func TestLegacyProjectRegistryParity(t *testing.T) {
 func TestLegacyWebRequestParity(t *testing.T) {
 	decode := func(body string) (map[string]any, error) {
 		r := httptest.NewRequest("POST", "/", strings.NewReader(body))
-		return decodeJSONBody(r)
+		return dashboard.DecodeJSONBody(r)
 	}
 	t.Run("readJsonBody parses valid JSON", func(t *testing.T) {
 		v, err := decode(`{"key":"value"}`)
@@ -239,43 +240,43 @@ func TestLegacyWebRequestParity(t *testing.T) {
 	})
 	t.Run("readJsonBody returns error for oversized body", func(t *testing.T) {
 		r := httptest.NewRequest("POST", "/", bytes.NewReader(bytes.Repeat([]byte("x"), 80000)))
-		_, err := decodeJSONBody(r)
+		_, err := dashboard.DecodeJSONBody(r)
 		if err == nil || !strings.Contains(err.Error(), "exceeds") {
 			t.Fatalf("%v", err)
 		}
 	})
 	t.Run("validateString accepts valid string", func(t *testing.T) {
-		if _, err := validateString("hello", "title", 1, 300); err != nil {
+		if _, err := dashboard.ValidateString("hello", "title", 1, 300); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("validateString rejects non-string", func(t *testing.T) {
-		if _, err := validateString(123, "title", 1, 300); err == nil || !strings.Contains(err.Error(), "string") {
+		if _, err := dashboard.ValidateString(123, "title", 1, 300); err == nil || !strings.Contains(err.Error(), "string") {
 			t.Fatalf("%v", err)
 		}
 	})
 	t.Run("validateString rejects empty string", func(t *testing.T) {
-		if _, err := validateString("", "title", 1, 300); err == nil || !strings.Contains(err.Error(), "at least") {
+		if _, err := dashboard.ValidateString("", "title", 1, 300); err == nil || !strings.Contains(err.Error(), "at least") {
 			t.Fatalf("%v", err)
 		}
 	})
 	t.Run("validateString rejects too long string", func(t *testing.T) {
-		if _, err := validateString(strings.Repeat("x", 400), "title", 1, 300); err == nil || !strings.Contains(err.Error(), "at most") {
+		if _, err := dashboard.ValidateString(strings.Repeat("x", 400), "title", 1, 300); err == nil || !strings.Contains(err.Error(), "at most") {
 			t.Fatalf("%v", err)
 		}
 	})
 	t.Run("validateEnum accepts valid value", func(t *testing.T) {
-		if _, err := validateEnum("high", "priority", []string{"low", "medium", "high"}); err != nil {
+		if _, err := dashboard.ValidateEnum("high", "priority", []string{"low", "medium", "high"}); err != nil {
 			t.Fatal(err)
 		}
 	})
 	t.Run("validateEnum rejects invalid value", func(t *testing.T) {
-		if _, err := validateEnum("urgent", "priority", []string{"low", "medium", "high"}); err == nil || !strings.Contains(err.Error(), "one of") {
+		if _, err := dashboard.ValidateEnum("urgent", "priority", []string{"low", "medium", "high"}); err == nil || !strings.Contains(err.Error(), "one of") {
 			t.Fatalf("%v", err)
 		}
 	})
 	t.Run("validateEnum rejects non-string", func(t *testing.T) {
-		if _, err := validateEnum(nil, "status", []string{"open", "done"}); err == nil || !strings.Contains(err.Error(), "string") {
+		if _, err := dashboard.ValidateEnum(nil, "status", []string{"open", "done"}); err == nil || !strings.Contains(err.Error(), "string") {
 			t.Fatalf("%v", err)
 		}
 	})

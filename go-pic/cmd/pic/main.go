@@ -3,6 +3,8 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/activity"
+	"github.com/earendil-works/task-system/go-pic/internal/dashboard"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"os"
@@ -27,6 +29,7 @@ type Project struct {
 }
 
 func main() {
+	dashboard.Version = picVersion
 	if err := run(os.Args[1:]); err != nil {
 		store.WriteJSON(os.Stderr, map[string]string{"error": err.Error()})
 		os.Exit(1)
@@ -50,13 +53,13 @@ func run(args []string) error {
 	case "workflow":
 		return cmdWorkflow(args[1:])
 	case "activity":
-		return cmdActivity(args[1:])
+		return activity.Activity(args[1:])
 	case "search":
-		return cmdSearch(args[1:])
+		return activity.Search(args[1:])
 	case "markdown":
-		return cmdMarkdown(args[1:])
+		return activity.Markdown(args[1:])
 	case "web":
-		return cmdWeb(args[1:])
+		return dashboard.Web(args[1:])
 	case "list":
 		return cmdList(args[1:])
 	case "show":

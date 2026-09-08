@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
@@ -16,7 +17,7 @@ func cmdWorkflow(args []string) error {
 	if agent := os.Getenv("PI_TASK_AGENT_NAME"); agent != "" && !store.Contains([]string{"instruction-pack-render", "instruction-packs", "verifications", "events", "pipeline-runs", "pipeline-show", "pipeline-group", "profile-list", "profile-promotion-evaluate"}, args[0]) {
 		return fmt.Errorf("%s cannot mutate workflow lifecycle through pic", agent)
 	}
-	db, err := openDB()
+	db, err := project.OpenDB()
 	if err != nil {
 		return err
 	}

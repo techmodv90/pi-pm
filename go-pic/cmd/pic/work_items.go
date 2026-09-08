@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"os"
 
@@ -16,7 +17,7 @@ func cmdWorkItem(args []string) error {
 	if agent := os.Getenv("PI_TASK_AGENT_NAME"); agent != "" && !store.Contains([]string{"list", "show", "artifact-save", "workflow-status"}, args[0]) {
 		return fmt.Errorf("%s cannot mutate Work Item lifecycle through pic", agent)
 	}
-	db, err := openDB()
+	db, err := project.OpenDB()
 	if err != nil {
 		return err
 	}

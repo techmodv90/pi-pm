@@ -1,4 +1,4 @@
-package main
+package dashboard
 
 import (
 	"os"
@@ -15,6 +15,7 @@ func TestDashboardBuildDirUsesConfiguredAssets(t *testing.T) {
 	if got := dashboardBuildDir(); got != dir {
 		t.Fatalf("dashboardBuildDir() = %q, want %q", got, dir)
 	}
+	Version = "test"
 	if healthData()["dashboard_assets"] != true {
 		t.Fatalf("healthData() = %#v", healthData())
 	}
