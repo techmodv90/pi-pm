@@ -92,6 +92,84 @@ func workItemArtifactCheck(db *sql.DB, args []string) error {
 	return nil
 }
 
+// workItemArtifactBackfill projects the exact stored content of every
+// work_item_artifacts row to its deterministic markdown path and binds it
+// through artifact_files (Plan API Contract `pic work-item artifact-backfill`,
+// US6 historical recovery). Canonical overwrite: divergent pre-existing bytes
+// at the deterministic path are replaced by the stored content. Rows already
+// bound and already canonical are skipped.
+func workItemArtifactBackfill(db *sql.DB, args []string) error {
+	if len(args) != 1 || args[0] == "" {
+		return errors.New("usage: pic work-item artifact-backfill <id>")
+	}
+	if _, err := workItemByID(db, args[0]); err != nil {
+		return err
+	}
+
+	type artifactRow struct {
+		id          string
+		stage       string
+		revision    int
+		content     string
+		contentHash string
+	}
+	var pending []artifactRow
+	rows, err := db.Query(`SELECT id,stage,revision,content,content_hash FROM work_item_artifacts WHERE work_item_id=? ORDER BY stage,revision`, args[0])
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var row artifactRow
+		if err := rows.Scan(&row.id, &row.stage, &row.revision, &row.content, &row.contentHash); err != nil {
+			return err
+		}
+		pending = append(pending, row)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	defer rows.Close()
+	root := artifactProjectRoot()
+	written, bound, skipped := 0, 0, 0
+	for _, row := range pending {
+		artifactID, stage, content, contentHash, revision := row.id, row.stage, row.content, row.contentHash, row.revision
+		path, err := artifactFilePath(root, args[0], stage, revision)
+		if err != nil {
+			return err
+		}
+		var existingPath string
+		err = db.QueryRow(`SELECT file_path FROM artifact_files WHERE artifact_id=?`, artifactID).Scan(&existingPath)
+		switch {
+		case err == nil:
+			matches, hashErr := artifactFileHashMatches(path, content)
+			if hashErr != nil && !os.IsNotExist(hashErr) {
+				return hashErr
+			}
+			if existingPath == path && matches {
+				skipped++
+				continue
+			}
+		case errors.Is(err, sql.ErrNoRows):
+			// historical row: no binding yet
+		default:
+			return err
+		}
+		if err := writeArtifactFileAtomic(path, content); err != nil {
+			return err
+		}
+		written++
+		if err == nil {
+			continue
+		}
+		if err := bindArtifactFile(db, artifactID, args[0], stage, revision, path, contentHash); err != nil {
+			return err
+		}
+		bound++
+	}
+	writeJSON(os.Stdout, map[string]any{"written": written, "bound": bound, "skipped": skipped})
+	return nil
+}
+
 // bindArtifactFile records the artifact_files binding row for a projected
 // markdown file. A single INSERT is its own transaction; the caller treats
 // failure as a best-effort projection failure (warning event, empty path).

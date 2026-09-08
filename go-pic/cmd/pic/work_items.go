@@ -86,6 +86,8 @@ func cmdWorkItem(args []string) error {
 		return workItemArtifactSave(db, args[1:])
 	case "artifact-check":
 		return workItemArtifactCheck(db, args[1:])
+	case "artifact-backfill":
+		return workItemArtifactBackfill(db, args[1:])
 	case "rri-finalize":
 		return workItemRriFinalize(db, args[1:])
 	case "artifact-approve":
