@@ -111,9 +111,9 @@
     <section class="detail-section"><div class="section-heading"><h3>Gates</h3><span>{detail.gates.length}</span></div>{#if detail.gates.length === 0}<p class="empty-state compact">No Work Item gates.</p>{:else}<ul class="artifact-list">{#each detail.gates as row (value(row, 'gate_work_item_id'))}<li><button class="text-button" onclick={() => openItem(value(row, 'gate_work_item_id'))}>{value(row, 'title') || value(row, 'gate_work_item_id')}</button><span class="status-badge {value(row, 'status')}">{value(row, 'status')}</span></li>{/each}</ul>{/if}</section>
   </div>
 
-  <section class="detail-section" data-testid="artifact-revisions">
+  <section class="detail-section">
     <div class="section-heading"><h3>Artifact Revisions</h3><span>{detail.artifacts.length}</span></div>
-    {#if detail.artifacts.length === 0}<p class="empty-state compact">No staged artifacts.</p>{:else}<div class="artifact-table">{#each detail.artifacts as artifact (value(artifact, 'id'))}<div data-testid="artifact-revision"><strong>{value(artifact, 'stage')}</strong><span>Revision {value(artifact, 'revision')}</span><code>{value(artifact, 'content_hash')}</code></div>{/each}</div>{/if}
+    {#if detail.artifacts.length === 0}<p class="empty-state compact">No staged artifacts.</p>{:else}<div class="artifact-table">{#each detail.artifacts as artifact (value(artifact, 'id'))}<div><strong>{value(artifact, 'stage')}</strong><span>Revision {value(artifact, 'revision')}</span><code>{value(artifact, 'content_hash')}</code></div>{/each}</div>{/if}
   </section>
 
   <div class="detail-columns">

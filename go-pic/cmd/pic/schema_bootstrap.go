@@ -30,7 +30,6 @@ var canonicalSchemaStatements = []string{
 		`CREATE TABLE IF NOT EXISTS work_item_gates (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, gate_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,gate_work_item_id), CHECK(work_item_id!=gate_work_item_id))`,
 		`CREATE TABLE IF NOT EXISTS work_item_relations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, relation_type TEXT NOT NULL CHECK(relation_type IN ('blocks','gates','related')), related_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,relation_type,related_work_item_id), CHECK(work_item_id!=related_work_item_id))`,
 		workItemArtifactsTableSQL,
-		artifactFilesTableSQL,
 		workflowCheckpointsTableSQL,
 		`CREATE TABLE IF NOT EXISTS implementation_authorizations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, task_graph_checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), authorized_by TEXT NOT NULL, revoked_at TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
 		`CREATE TABLE IF NOT EXISTS work_item_materializations (root_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), node_key TEXT NOT NULL, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(root_work_item_id,checkpoint_id,node_key))`,
@@ -197,17 +196,6 @@ func schemaMigrationSteps() []schemaMigration {
 		}},
 		{version: 8, name: "decomposition_policy_projection", apply: applyDecompositionProjectionColumns},
 		{version: 9, name: "blueprint_annotation_evidence", apply: applyBlueprintAnnotationEvidenceColumn},
-		{version: 10, name: "artifact_files_table", apply: func(db schemaDB) error {
-			// Databases recorded past canonical_baseline (v4) skip that version
-			// entirely, so the artifact_files table must also ship as its own
-			// ordered migration for the normal upgrade path. CREATE TABLE IF
-			// NOT EXISTS keeps fresh databases (where v4 already created it)
-			// idempotent.
-			if _, err := db.Exec(artifactFilesTableSQL); err != nil {
-				return fmt.Errorf("artifact_files table migration: %w", err)
-			}
-			return nil
-		}},
 	}
 }
 
