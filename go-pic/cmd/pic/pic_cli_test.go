@@ -2446,7 +2446,7 @@ func TestDependencyRelationsConvergentBackfill(t *testing.T) {
 	// The dependency-to-relations backfill must converge on every open, not
 	// only when migration 6 first applies: post-migration APM imports write
 	// task-graph edges into the retired work_item_dependencies table, and the
-	// readiness SQL (workItemReadySQL) reads only work_item_relations. Without
+	// readiness SQL (workitem.ReadySQL) reads only work_item_relations. Without
 	// the per-open backfill, dep-blocked leaves compute ready=true and the
 	// scheduler launches them out of dependency order.
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")

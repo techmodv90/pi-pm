@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 	"strings"
 )
@@ -41,7 +42,7 @@ func cmdWorkflow(args []string) error {
 	case "instruction-packs":
 		return workflowInstructionPacks(db, rest)
 	case "completion-save":
-		return workItemCompletionSave(db, rest)
+		return workitem.CompletionSave(db, rest)
 	case "verifications":
 		return workflowVerificationList(db, rest)
 	case "event-add":

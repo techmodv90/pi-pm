@@ -1,6 +1,4 @@
-package main
-
-import "fmt"
+package workitem
 
 // Transition oracle constraint: workflow-status reports these hints as
 // structured next_actions, and gate rejections cite the same oracle so every
@@ -22,9 +20,9 @@ func toolAction(id, action, args, label, actor string) NextAction {
 	return NextAction{ID: id, Kind: "tool", Action: action, Args: args, Label: label, Actor: actor}
 }
 
-// nextActionHints returns the exact actions valid at a workflow stage. The done
+// NextActionHints returns the exact actions valid at a workflow stage. The done
 // stage yields no hints on purpose: there is nothing left to run.
-func nextActionHints(stage string) []NextAction {
+func NextActionHints(stage string) []NextAction {
 	switch stage {
 	case "implement":
 		return []NextAction{
@@ -51,28 +49,14 @@ func nextActionHints(stage string) []NextAction {
 	}
 }
 
-// withNextActions attaches the stage's structured oracle actions to a
+// WithNextActions attaches the stage's structured oracle actions to a
 // workflow-status map. The Task Graph approval checkpoint additionally carries
 // the five granularity questions the owner reviews before approving.
-func withNextActions(status map[string]any) map[string]any {
+func WithNextActions(status map[string]any) map[string]any {
 	if next, ok := status["next_stage"].(string); ok {
-		if hints := nextActionHints(next); len(hints) > 0 {
+		if hints := NextActionHints(next); len(hints) > 0 {
 			status["next_actions"] = hints
 		}
 	}
 	return status
-}
-
-// nextActionHint renders the first action for a stage as gate-rejection text.
-func nextActionHint(stage string) string {
-	hints := nextActionHints(stage)
-	if len(hints) == 0 {
-		return ""
-	}
-	first := hints[0]
-	hint := fmt.Sprintf("%s %s", first.Action, first.Args)
-	if first.Actor != "" {
-		hint += fmt.Sprintf(" (actor_role=%s)", first.Actor)
-	}
-	return fmt.Sprintf("Next: %s", hint)
 }

@@ -569,7 +569,7 @@ func applyCanonicalBackfills(db schemaDB) error {
 // tables onto work_item_relations blocks/gates rows. The migration runner
 // applies version 6 exactly once, but edges keep arriving after that (the APM
 // import writes work_item_dependencies rows post-migration), and the readiness
-// SQL (workItemReadySQL) reads only work_item_relations — so this backfill must
+// SQL (workitem.ReadySQL) reads only work_item_relations — so this backfill must
 // converge on every open, not just at migration time. INSERT OR IGNORE keeps it
 // idempotent under the wir-migrated- id scheme.
 func applyConvergentDependencyBackfill(db schemaDB) error {

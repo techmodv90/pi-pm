@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"io"
 	"net/http"
 	"os"
@@ -300,17 +301,17 @@ func closeProjectDB(db *sql.DB) {
 }
 
 func workItemDetailForWeb(db *sql.DB, id string) (map[string]any, bool) {
-	item, err := workItemByID(db, id)
+	item, err := workitem.ByID(db, id)
 	if err != nil {
 		return nil, false
 	}
-	children, _ := queryMaps(db, `SELECT `+workItemColumns+` FROM work_items WHERE parent_id=? ORDER BY created_at,id`, id)
+	children, _ := queryMaps(db, `SELECT `+workitem.Columns+` FROM work_items WHERE parent_id=? ORDER BY created_at,id`, id)
 	descendants, _ := queryMaps(db, `WITH RECURSIVE tree(id,depth) AS (
 		SELECT id,1 FROM work_items WHERE parent_id=?
 		UNION ALL SELECT wi.id,tree.depth+1 FROM work_items wi JOIN tree ON wi.parent_id=tree.id
-	) SELECT `+workItemColumns+`,tree.depth FROM work_items JOIN tree USING(id) ORDER BY tree.depth,created_at,id`, id)
-	_ = attachWorkItemLabels(db, children)
-	_ = attachWorkItemLabels(db, descendants)
+	) SELECT `+workitem.Columns+`,tree.depth FROM work_items JOIN tree USING(id) ORDER BY tree.depth,created_at,id`, id)
+	_ = workitem.AttachLabels(db, children)
+	_ = workitem.AttachLabels(db, descendants)
 	dependencies, _ := queryMaps(db, `SELECT r.id,r.work_item_id,r.related_work_item_id AS depends_on_work_item_id,r.rationale,blocker.title,blocker.type,blocker.status FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=? AND r.relation_type='blocks'`, id)
 	gates, _ := queryMaps(db, `SELECT r.id,r.work_item_id,r.related_work_item_id AS gate_work_item_id,gate_item.title,gate_item.status FROM work_item_relations r JOIN work_items gate_item ON gate_item.id=r.related_work_item_id WHERE r.work_item_id=? AND r.relation_type='gates'`, id)
 	artifacts, _ := queryMaps(db, `SELECT * FROM work_item_artifacts WHERE work_item_id=? ORDER BY stage,revision DESC`, id)
@@ -319,7 +320,7 @@ func workItemDetailForWeb(db *sql.DB, id string) (map[string]any, bool) {
 	completions, _ := queryMaps(db, `SELECT * FROM work_item_completion_reports WHERE work_item_id=? ORDER BY datetime(created_at) DESC,rowid DESC`, id)
 	verifications, _ := queryMaps(db, `SELECT * FROM work_item_verification_reports WHERE work_item_id=? ORDER BY datetime(created_at) DESC,rowid DESC`, id)
 	authorizations, _ := queryMaps(db, `SELECT * FROM implementation_authorizations WHERE work_item_id=? ORDER BY created_at DESC,id DESC`, id)
-	ready, _ := rowExists(db, `SELECT 1 FROM work_items wi WHERE wi.id=? AND `+workItemReadySQL, id)
+	ready, _ := rowExists(db, `SELECT 1 FROM work_items wi WHERE wi.id=? AND `+workitem.ReadySQL, id)
 	routingEvents, _ := queryMaps(db, `SELECT event_type, created_at AS createdAt, summary, payload_json AS payloadJson FROM work_item_events WHERE work_item_id=? AND event_type='skill_family_routing' AND json_valid(payload_json) ORDER BY datetime(created_at) DESC, rowid DESC LIMIT 10`, id)
 	return map[string]any{"workItem": item, "ready": ready, "children": children, "descendants": descendants, "dependencies": dependencies, "gates": gates, "artifacts": artifacts, "checkpoints": checkpoints, "instructionPacks": packs, "authorizations": authorizations, "completionReports": completions, "verificationReports": verifications, "routingEvents": routingEvents}, true
 }
@@ -372,9 +373,9 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSONResponse(w, map[string]any{"labels": labels})
 	case len(parts) == 5 && parts[3] == "work-items" && parts[4] == "ready" && r.Method == http.MethodGet:
-		items, err := queryMaps(db, `SELECT `+workItemColumns+` FROM work_items wi WHERE `+workItemReadySQL+` ORDER BY created_at,id`)
+		items, err := queryMaps(db, `SELECT `+workitem.Columns+` FROM work_items wi WHERE `+workitem.ReadySQL+` ORDER BY created_at,id`)
 		if err == nil {
-			err = attachWorkItemLabels(db, items)
+			err = workitem.AttachLabels(db, items)
 		}
 		if err != nil {
 			writeJSONStatus(w, 500, map[string]any{"error": err.Error()})
@@ -388,7 +389,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 				filterArgs = append(filterArgs, "--"+key, value)
 			}
 		}
-		items, err := workItemList(db, filterArgs)
+		items, err := workitem.List(db, filterArgs)
 		if err != nil {
 			writeJSONStatus(w, 400, map[string]any{"error": err.Error()})
 			return
@@ -418,13 +419,13 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			}
 			args = append(args, "--labels", strings.Join(values, ","))
 		}
-		if err := workItemCreate(db, args); err != nil {
+		if err := workitem.Create(db, args); err != nil {
 			writeJSONStatus(w, 400, map[string]any{"error": err.Error()})
 			return
 		}
-		item, _ := queryOne(db, `SELECT `+workItemColumns+` FROM work_items ORDER BY rowid DESC LIMIT 1`)
+		item, _ := queryOne(db, `SELECT `+workitem.Columns+` FROM work_items ORDER BY rowid DESC LIMIT 1`)
 		if item != nil {
-			_ = attachWorkItemLabels(db, []map[string]any{item})
+			_ = workitem.AttachLabels(db, []map[string]any{item})
 		}
 		writeJSONResponse(w, map[string]any{"workItem": item})
 	case len(parts) == 6 && parts[3] == "work-items" && parts[5] == "labels" && (r.Method == http.MethodPost || r.Method == http.MethodDelete):
@@ -446,11 +447,11 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodDelete {
 			action = "remove"
 		}
-		if err := workItemLabel(db, []string{action, parts[4], strings.Join(values, ",")}); err != nil {
+		if err := workitem.Label(db, []string{action, parts[4], strings.Join(values, ",")}); err != nil {
 			writeJSONStatus(w, 400, map[string]any{"error": err.Error()})
 			return
 		}
-		item, _ := workItemByID(db, parts[4])
+		item, _ := workitem.ByID(db, parts[4])
 		writeJSONResponse(w, map[string]any{"workItem": item})
 	case len(parts) == 5 && parts[3] == "work-items" && r.Method == http.MethodGet:
 		if detail, ok := workItemDetailForWeb(db, parts[4]); ok {
@@ -465,7 +466,7 @@ func handleAPI(w http.ResponseWriter, r *http.Request) {
 			writeJSONStatus(w, 400, map[string]any{"error": "valid status is required"})
 			return
 		}
-		item, err := workItemSetStatus(db, parts[4], status)
+		item, err := workitem.SetStatus(db, parts[4], status)
 		if err != nil {
 			writeJSONStatus(w, 404, map[string]any{"error": err.Error()})
 			return
@@ -521,7 +522,7 @@ func projectSummary(db *sql.DB, project registryProject) map[string]any {
 	types, _ := queryKeyCounts(db, `SELECT type as key,COUNT(*) as count FROM work_items GROUP BY type`)
 	priorities, _ := queryKeyCounts(db, `SELECT COALESCE(priority,'medium') as key,COUNT(*) as count FROM work_items GROUP BY priority`)
 	reviews, _ := queryKeyCounts(db, `SELECT CASE WHEN review_status IS NULL OR review_status='' THEN 'none' ELSE review_status END as key,COUNT(*) as count FROM work_items GROUP BY key`)
-	ready, _ := queryKeyCounts(db, `SELECT CASE WHEN `+workItemReadySQL+` THEN 'ready' ELSE 'blocked' END as key,COUNT(*) as count FROM work_items wi GROUP BY key`)
+	ready, _ := queryKeyCounts(db, `SELECT CASE WHEN `+workitem.ReadySQL+` THEN 'ready' ELSE 'blocked' END as key,COUNT(*) as count FROM work_items wi GROUP BY key`)
 	var latest string
 	_ = db.QueryRow(`SELECT COALESCE(MAX(created_at),'') FROM work_items`).Scan(&latest)
 	return map[string]any{"projectId": project.ID, "projectName": project.Name, "rootPath": project.rootPath(), "health": "ok", "statusCounts": statuses, "typeCounts": types, "priorityCounts": priorities, "reviewCounts": reviews, "readinessCounts": ready, "latestActivity": latest}
@@ -606,7 +607,7 @@ func workflowEventAdd(db *sql.DB, args []string) error {
 		return err
 	}
 	workItemID, eventType := args[0], args[1]
-	if _, err := workItemByID(db, workItemID); err != nil {
+	if _, err := workitem.ByID(db, workItemID); err != nil {
 		return err
 	}
 	if eventType == "verify_completed" {

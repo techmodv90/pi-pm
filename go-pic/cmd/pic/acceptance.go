@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 	"regexp"
 	"strconv"
@@ -358,7 +359,7 @@ func workflowProfilePromotionEvaluate(db *sql.DB, args []string) error {
 	if !contains(lifecycleProfileNames, profileName) {
 		return fmt.Errorf("invalid reusable profile name %q", profileName)
 	}
-	if _, err := workItemByID(db, workItemID); err != nil {
+	if _, err := workitem.ByID(db, workItemID); err != nil {
 		return err
 	}
 	opts, err := parseOptions(args[2:])

@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 )
 
@@ -37,11 +38,11 @@ func cmdShow(args []string) error {
 	if ok, err := rowExists(db, `SELECT 1 FROM work_items WHERE id=?`, id); err != nil {
 		return err
 	} else if ok {
-		item, err := workItemByID(db, id)
+		item, err := workitem.ByID(db, id)
 		if err != nil {
 			return err
 		}
-		children, _ := queryMaps(db, `SELECT `+workItemColumns+` FROM work_items WHERE parent_id=? ORDER BY created_at,id`, id)
+		children, _ := queryMaps(db, `SELECT `+workitem.Columns+` FROM work_items WHERE parent_id=? ORDER BY created_at,id`, id)
 		dependencies, _ := queryMaps(db, `SELECT r.id,r.work_item_id,r.related_work_item_id AS depends_on_work_item_id,r.rationale,blocker.title,blocker.type,blocker.status,blocker.review_status FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=? AND r.relation_type='blocks'`, id)
 		relations, _ := queryMaps(db, `SELECT r.*,related.title,related.type,related.status FROM work_item_relations r JOIN work_items related ON related.id=r.related_work_item_id WHERE r.work_item_id=? ORDER BY r.created_at,r.id`, id)
 		artifacts, _ := queryMaps(db, `SELECT * FROM work_item_artifacts WHERE work_item_id=? ORDER BY stage,revision DESC`, id)
@@ -55,10 +56,10 @@ func cmdShow(args []string) error {
 		requirements, _ := queryMaps(db, `SELECT * FROM requirements WHERE task_id=? OR epic_id=? ORDER BY requirement_key,id`, id, id)
 		planningOwnerDecisions, _ := queryMaps(db, `SELECT * FROM owner_decisions WHERE task_id=? OR epic_id=? ORDER BY datetime(created_at),rowid`, id, id)
 		escalations, _ := queryMaps(db, `SELECT * FROM work_item_escalations WHERE work_item_id=? ORDER BY datetime(created_at),rowid`, id)
-		ready, _ := rowExists(db, `SELECT 1 FROM work_items wi WHERE wi.id=? AND `+workItemReadySQL, id)
+		ready, _ := rowExists(db, `SELECT 1 FROM work_items wi WHERE wi.id=? AND `+workitem.ReadySQL, id)
 		var executionState any
 		if contains([]string{"task", "bug", "chore"}, fmt.Sprint(item["type"])) {
-			state, _ := loadWorkItemExecutionState(db, id)
+			state, _ := workitem.LoadExecutionState(db, id)
 			executionState = state
 		}
 		writeJSON(os.Stdout, map[string]any{"work_item": item, "ready": ready, "execution_state": executionState, "children": children, "dependencies": dependencies, "relations": relations, "artifacts": artifacts, "checkpoints": checkpoints, "instruction_packs": packs, "materializations": materializations, "profiles": profiles, "completion_reports": completionReports, "verification_reports": verificationReports, "owner_decisions": ownerDecisions, "requirements": requirements, "planning_owner_decisions": planningOwnerDecisions, "escalations": escalations})
@@ -73,7 +74,7 @@ func cmdList(args []string) error {
 		return err
 	}
 	defer db.Close()
-	results, err := workItemList(db, args)
+	results, err := workitem.List(db, args)
 	if err == nil {
 		writeJSON(os.Stdout, results)
 	}

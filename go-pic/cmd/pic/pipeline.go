@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/earendil-works/task-system/go-pic/internal/tip"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -79,7 +80,7 @@ func prepareInstructionPackForFirstClaim(tx *sql.Tx, taskID string) error {
 	if node == nil {
 		return fmt.Errorf("materialized node %s is missing from the approved task graph", nodeKey)
 	}
-	requirements, err := validateTaskGraphRequirementCoverage(tx, rootID, plan)
+	requirements, err := workitem.ValidateTaskGraphRequirementCoverage(tx, rootID, plan)
 	if err != nil {
 		return err
 	}
@@ -103,7 +104,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 		return errors.New("pipeline-claim requires task id and stage")
 	}
 	taskID, stage := args[0], args[1]
-	if _, err := workItemByID(db, taskID); err != nil {
+	if _, err := workitem.ByID(db, taskID); err != nil {
 		return err
 	}
 	if !contains(pipelineStages, stage) {
@@ -168,7 +169,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	profileVersion, profileHash = currentProfile.Version, currentProfile.ContentHash
 	if lifecycle == "plan" {
 		planStages := currentProfile.Stages
-		planningIndex := indexOfStage(planStages, stage)
+		planningIndex := workitem.IndexOfStage(planStages, stage)
 		if planningIndex < 0 {
 			return fmt.Errorf("pipeline claim rejected: stage %s is not part of this Work Item planning profile", stage)
 		}
@@ -177,7 +178,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 				var approved int
 				// Claim gating reads only owner-decided checkpoints: a rejected
 				// newer revision never clears (or blocks as) an approval.
-				if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_checkpoints WHERE work_item_id=? AND stage=? AND decision_type=?)`, taskID, requiredStage, approvedCheckpointDecision(requiredStage)).Scan(&approved); err != nil {
+				if err = tx.QueryRow(`SELECT EXISTS(SELECT 1 FROM workflow_checkpoints WHERE work_item_id=? AND stage=? AND decision_type=?)`, taskID, requiredStage, workitem.ApprovedCheckpointDecision(requiredStage)).Scan(&approved); err != nil {
 					return err
 				}
 				if index < planningIndex && approved == 0 {
@@ -219,7 +220,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 			if activePacks != 1 {
 				return fmt.Errorf("Work Item %s requires exactly one active instruction pack", taskID)
 			}
-			eligibility := workItemReadySQL
+			eligibility := workitem.ReadySQL
 			if stage == "review" || (stage == "worker" && opts["review-fix"] == "1") {
 				eligibility = `wi.type IN ('task','bug','chore') AND wi.status IN ('open','in_progress') AND wi.deferred=0 AND wi.claimed_at='' AND NOT EXISTS (
 					SELECT 1 FROM work_item_relations r JOIN work_items blocker ON blocker.id=r.related_work_item_id WHERE r.work_item_id=wi.id AND r.relation_type='blocks' AND blocker.status!='done'
@@ -441,7 +442,7 @@ func workflowPipelineCircuitReset(db *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	if validateWorkflowActor(opts["actor-role"], "owner") != nil {
+	if workitem.ValidateWorkflowActor(opts["actor-role"], "owner") != nil {
 		return errors.New("pipeline circuit reset requires actor_role=owner")
 	}
 	if opts["reason"] == "" {
@@ -631,7 +632,7 @@ func workflowEscalationResolve(db *sql.DB, args []string) error {
 	}
 	taskID, escalationID := args[0], args[1]
 	opts, err := parseOptions(args[3:])
-	if err != nil || validateWorkflowActor(opts["actor-role"], "contractor") != nil {
+	if err != nil || workitem.ValidateWorkflowActor(opts["actor-role"], "contractor") != nil {
 		return errors.New("escalation resolution requires actor_role=contractor")
 	}
 	var resolution map[string]any
@@ -765,7 +766,7 @@ func workflowReviewDecision(db *sql.DB, args []string) error {
 	if err != nil {
 		return err
 	}
-	if validateWorkflowActor(opts["actor-role"], "owner") != nil {
+	if workitem.ValidateWorkflowActor(opts["actor-role"], "owner") != nil {
 		return errors.New("review-decision requires actor_role=owner")
 	}
 	if decision != "fix" {

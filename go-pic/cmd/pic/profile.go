@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 )
 
@@ -26,7 +27,7 @@ const workItemProfilesTableSQL = `CREATE TABLE IF NOT EXISTS work_item_profiles 
 )`
 
 var lifecycleProfileNames = []string{"plan", "implement", "qa"}
-var validPlanningDepths = []string{"quick", "standard", "designed", "full"}
+var validPlanningDepths = workitem.ValidPlanningDepths
 
 type workItemProfile struct {
 	Name          string
@@ -37,7 +38,7 @@ type workItemProfile struct {
 }
 
 func validPlanningDepth(depth string) bool {
-	return contains(validPlanningDepths, depth)
+	return workitem.ValidPlanningDepth(depth)
 }
 
 // lifecycleForStage maps a pipeline stage onto its lifecycle profile name.
@@ -175,7 +176,7 @@ func workflowProfileList(db *sql.DB, args []string) error {
 	if len(args) < 1 {
 		return errors.New("workflow profile-list requires Work Item id")
 	}
-	if _, err := workItemByID(db, args[0]); err != nil {
+	if _, err := workitem.ByID(db, args[0]); err != nil {
 		return err
 	}
 	rows, err := queryMaps(db, `SELECT * FROM work_item_profiles WHERE work_item_id=? ORDER BY profile_name,profile_version`, args[0])

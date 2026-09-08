@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -641,7 +642,7 @@ func createApmWorkItems(db *sql.DB, doc *apmDoc, graph *apmGraph, importLabel st
 	if _, err := tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority,deferred,planning_depth) VALUES(?,'epic',NULLIF('',''),?,?, 'medium',0,'full')`, epicID, graph.EpicName, epicDesc); err != nil {
 		return "", fmt.Errorf("insert epic: %w", err)
 	}
-	if err := addWorkItemLabels(tx, epicID, []string{graph.MilestoneLabel, importLabel}); err != nil {
+	if err := workitem.AddLabels(tx, epicID, []string{graph.MilestoneLabel, importLabel}); err != nil {
 		return "", fmt.Errorf("label epic: %w", err)
 	}
 
@@ -662,7 +663,7 @@ func createApmWorkItems(db *sql.DB, doc *apmDoc, graph *apmGraph, importLabel st
 				return "", fmt.Errorf("insert feature edge %s: %w", key, err)
 			}
 		}
-		if err := addWorkItemLabels(tx, id, []string{"apm-feature"}); err != nil {
+		if err := workitem.AddLabels(tx, id, []string{"apm-feature"}); err != nil {
 			return "", fmt.Errorf("label feature %s: %w", key, err)
 		}
 	}
@@ -680,7 +681,7 @@ func createApmWorkItems(db *sql.DB, doc *apmDoc, graph *apmGraph, importLabel st
 		if _, err := tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority,deferred,planning_depth) VALUES(?,'task',?,?,?,'medium',0,'full')`, id, featureIDs[t.Feature], taskTitle(t.Verbatim), desc); err != nil {
 			return "", fmt.Errorf("insert task %s: %w", t.TID, err)
 		}
-		if err := addWorkItemLabels(tx, id, []string{"apm-task"}); err != nil {
+		if err := workitem.AddLabels(tx, id, []string{"apm-task"}); err != nil {
 			return "", fmt.Errorf("label task %s: %w", t.TID, err)
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 
 	"github.com/earendil-works/task-system/go-pic/internal/tip"
@@ -17,7 +18,7 @@ func workflowInstructionPackSave(db *sql.DB, args []string) error {
 		return errors.New("instruction-pack-save requires Work Item id")
 	}
 	workItemID := args[0]
-	if _, err := workItemByID(db, workItemID); err != nil {
+	if _, err := workitem.ByID(db, workItemID); err != nil {
 		return err
 	}
 	opts, err := parseOptions(args[1:])
