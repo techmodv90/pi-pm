@@ -35,6 +35,7 @@ func openCorrectiveDB(t *testing.T, root string) *sql.DB {
 // TestCorrectivePassed: a passed aggregate verification creates no corrective
 // Bug, no link, no relation, and no corrective event.
 func TestCorrectivePassed(t *testing.T) {
+	t.Parallel()
 	bin, root, home, epicID, childID := setupCorrectiveAggregate(t)
 	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", epicID, "passed", "delivery verified", "--actor-role", "contractor"))
 	if report["status"] != "passed" || report["corrective_bug_id"] != "" {
@@ -59,6 +60,7 @@ func TestCorrectivePassed(t *testing.T) {
 // TestCorrectiveFailed: a failed report links a single corrective Bug with an
 // owner-decision-pending policy and waits for explicit owner approval.
 func TestCorrectiveFailed(t *testing.T) {
+	t.Parallel()
 	bin, root, home, epicID, _ := setupCorrectiveAggregate(t)
 	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", epicID, "failed", "release check failed", "--actor-role", "contractor"))
 	bugID, _ := report["corrective_bug_id"].(string)
@@ -89,6 +91,7 @@ func TestCorrectiveFailed(t *testing.T) {
 // link a single corrective Bug with automatic scheduling and an owner
 // notification.
 func TestCorrectivePartial(t *testing.T) {
+	t.Parallel()
 	bin, root, home, epicID, status := setupCorrectiveAggregate(t)
 	_ = status
 	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", epicID, "partial", "partial release", "--actor-role", "contractor"))
@@ -112,6 +115,7 @@ func TestCorrectivePartial(t *testing.T) {
 }
 
 func TestCorrectiveBlocked(t *testing.T) {
+	t.Parallel()
 	bin, root, home, epicID, _ := setupCorrectiveAggregate(t)
 	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", epicID, "blocked", "environment blocked release", "--actor-role", "contractor"))
 	bugID, _ := report["corrective_bug_id"].(string)
@@ -137,6 +141,7 @@ func TestCorrectiveBlocked(t *testing.T) {
 // corrective Bug; duplicate linkage for the same report is rejected; and a new
 // report produces its own distinct Bug without disturbing earlier linkage.
 func TestCorrectiveExactlyOnce(t *testing.T) {
+	t.Parallel()
 	bin, root, home, epicID, _ := setupCorrectiveAggregate(t)
 	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", epicID, "failed", "release check failed", "--actor-role", "contractor"))
 	bugID := report["corrective_bug_id"].(string)
@@ -169,6 +174,7 @@ func TestCorrectiveExactlyOnce(t *testing.T) {
 // status after an ambiguous response returns the existing linked corrective Bug
 // instead of creating a duplicate Bug or report pair.
 func TestCorrectiveRetryDedup(t *testing.T) {
+	t.Parallel()
 	bin, root, home, epicID, _ := setupCorrectiveAggregate(t)
 	first := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", epicID, "failed", "release check failed", "--actor-role", "contractor"))
 	bugID, _ := first["corrective_bug_id"].(string)
@@ -195,6 +201,7 @@ func TestCorrectiveRetryDedup(t *testing.T) {
 // TestCorrectiveImmutable: creating a corrective Bug never reopens or rewrites
 // a completed descendant or its evidence.
 func TestCorrectiveImmutable(t *testing.T) {
+	t.Parallel()
 	bin, root, home, epicID, childID := setupCorrectiveAggregate(t)
 	db := openCorrectiveDB(t, root)
 	runSQLite(t, filepath.Join(root, ".pi", "tasks.db"), `INSERT INTO requirements(id,task_id,requirement_key,title,acceptance_criteria,status) VALUES('req-imm','`+childID+`','REQ-IMM','Immutable','Given done When reported Then unchanged','pending')`)

@@ -10,6 +10,7 @@ import (
 )
 
 func TestWorkflowPipelineShowReturnsFullRunRow(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Show run diagnostics", "--parent", func() string {
@@ -32,6 +33,7 @@ func TestWorkflowPipelineShowReturnsFullRunRow(t *testing.T) {
 }
 
 func TestWorkflowStatusIncludesIntegrationEvidence(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Evidence parent"))

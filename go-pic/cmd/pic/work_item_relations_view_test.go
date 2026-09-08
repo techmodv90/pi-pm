@@ -9,6 +9,7 @@ import (
 )
 
 func TestWorkItemShowIncludesChildrenAndDependencyEdges(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Graph parent"))

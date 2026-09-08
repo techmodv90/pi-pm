@@ -40,6 +40,7 @@ func countProfiles(t *testing.T, db *sql.DB, id string) int {
 }
 
 func TestProfileResolutionPersistsExactlyOnce(t *testing.T) {
+	t.Parallel()
 	db, id := profileTestDB(t)
 	defer db.Close()
 	tx, err := db.Begin()
@@ -99,6 +100,7 @@ func TestProfileResolutionPersistsExactlyOnce(t *testing.T) {
 }
 
 func TestProfileResolutionRejectsUnknownDepth(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	// Simulate a stale or manually edited database that predates the planning
 	// depth CHECK constraint, so an unknown depth can actually reach the
@@ -138,6 +140,7 @@ func TestProfileResolutionRejectsUnknownDepth(t *testing.T) {
 }
 
 func TestPlanningDepthSelectsAggregateStages(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
@@ -178,6 +181,7 @@ func TestPlanningDepthSelectsAggregateStages(t *testing.T) {
 }
 
 func TestPlanningDepthStandaloneIsFixedLeanProfile(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
@@ -203,6 +207,7 @@ func TestPlanningDepthStandaloneIsFixedLeanProfile(t *testing.T) {
 }
 
 func TestPipelineStageProfileBinding(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Bind profile"))
@@ -247,6 +252,7 @@ func openSQLiteGo(t *testing.T, dbPath string) *sql.DB {
 }
 
 func TestPipelineStageProfileMismatchRejected(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Mismatch", "--planning-depth", "standard"))
@@ -260,6 +266,7 @@ func TestPipelineStageProfileMismatchRejected(t *testing.T) {
 }
 
 func TestPipelineStageInvalidPredecessorRejected(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Ordered"))
@@ -270,6 +277,7 @@ func TestPipelineStageInvalidPredecessorRejected(t *testing.T) {
 }
 
 func TestLegacyPipelineStageVocabularyMigrated(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	// Build a legacy pipeline_runs with the retired stage vocabulary
 	// (scan,worker,review,qa,verify); the canonical CHECK rejects 'qa'/'verify',
@@ -318,6 +326,7 @@ func TestLegacyPipelineStageVocabularyMigrated(t *testing.T) {
 }
 
 func TestLegacyPipelineRowsRemainReadableAfterMigration(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	// Build a legacy schema that predates the profile columns.
 	db, err := project.OpenSQLite(dbPath)
@@ -365,6 +374,7 @@ func TestLegacyPipelineRowsRemainReadableAfterMigration(t *testing.T) {
 }
 
 func TestLegacyPipelineProfileListReadOnly(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "feature", "List profiles"))

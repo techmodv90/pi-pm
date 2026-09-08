@@ -21,6 +21,7 @@ INSERT INTO work_item_instruction_packs(id,work_item_id,checkpoint_id,version,st
 }
 
 func TestPipelineClaimFixture(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
@@ -49,6 +50,7 @@ func TestPipelineClaimFixture(t *testing.T) {
 }
 
 func TestLeanClaimRouting(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
@@ -70,6 +72,7 @@ func TestLeanClaimRouting(t *testing.T) {
 }
 
 func TestLeanClaimClaim(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
@@ -112,6 +115,7 @@ func TestLeanClaimClaim(t *testing.T) {
 }
 
 func TestLeanClaimSingleWriter(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
@@ -135,6 +139,7 @@ func TestLeanClaimSingleWriter(t *testing.T) {
 }
 
 func TestLeanClaimEndToEnd(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
@@ -181,6 +186,7 @@ func leanWorkerRunEvidence(t *testing.T, dbPath, runID string) {
 }
 
 func TestLeanClaimCompletion(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
@@ -210,6 +216,7 @@ func TestLeanClaimCompletion(t *testing.T) {
 }
 
 func TestLeanClaimReviewVerification(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
@@ -277,6 +284,7 @@ func TestLeanClaimReviewVerification(t *testing.T) {
 }
 
 func TestLegacyReadBackIntegrity(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	dbPath := filepath.Join(root, ".pi", "tasks.db")

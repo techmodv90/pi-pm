@@ -193,6 +193,7 @@ func TestWebAPIUsesGlobalProjectRegistry(t *testing.T) {
 }
 
 func TestVersionReportsGoImplementation(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	out := asObject(t, runPic(t, bin, t.TempDir(), t.TempDir(), "--version"))
 	if out["implementation"] != "go" || out["sqlite"] != "modernc.org/sqlite" {
@@ -201,6 +202,7 @@ func TestVersionReportsGoImplementation(t *testing.T) {
 }
 
 func TestInitAndProjectCommands(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	if _, err := os.Stat(filepath.Join(root, ".pi", "tasks.db")); err != nil {
@@ -233,6 +235,7 @@ func TestInitAndProjectCommands(t *testing.T) {
 }
 
 func TestWorkItemCommandCutover(t *testing.T) {
+	t.Parallel()
 	bin := buildProductionPic(t)
 	root, home := initProject(t, bin)
 	db, err := project.OpenSQLite(filepath.Join(root, ".pi", "tasks.db"))
@@ -287,6 +290,7 @@ func activateTestWorkItemTIP(t *testing.T, dbPath, id string) {
 }
 
 func TestWorkflowMigrationPreservesLegacyRows(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
@@ -321,6 +325,7 @@ func TestWorkflowMigrationPreservesLegacyRows(t *testing.T) {
 }
 
 func TestWorkItemSchemaMigration(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
@@ -386,6 +391,7 @@ func TestWorkItemSchemaMigration(t *testing.T) {
 }
 
 func TestWorkItemCRUDAndContainment(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Canonical Epic"))
@@ -420,6 +426,7 @@ func TestWorkItemCRUDAndContainment(t *testing.T) {
 }
 
 func TestWorkItemLabels(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	parent := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Labeled Epic", "--labels", "backend,release-v1"))
@@ -456,6 +463,7 @@ func TestWorkItemLabels(t *testing.T) {
 }
 
 func TestNativeWorkItemGenericShowUsesCanonicalShape(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 
@@ -477,6 +485,7 @@ func TestNativeWorkItemGenericShowUsesCanonicalShape(t *testing.T) {
 }
 
 func TestWorkItemReadinessAndClaim(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Delivery"))
@@ -522,6 +531,7 @@ func TestWorkItemReadinessAndClaim(t *testing.T) {
 }
 
 func TestWorkItemRelateControlsReadinessByRelationType(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	blocker := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Blocker"))
@@ -609,6 +619,7 @@ func glossaryApplyPayload(t *testing.T) string {
 }
 
 func TestAggregateWorkItemVerificationAndClosure(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Close Epic"))
@@ -643,6 +654,7 @@ func TestAggregateWorkItemVerificationAndClosure(t *testing.T) {
 }
 
 func TestFailedAggregateVerificationCreatesCorrectiveBug(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Correct aggregate"))
@@ -666,6 +678,7 @@ func TestFailedAggregateVerificationCreatesCorrectiveBug(t *testing.T) {
 }
 
 func TestAggregateVerifyRebindsStaleDeliveryBranch(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	feature := asObject(t, runPic(t, bin, root, home, "work-item", "create", "feature", "Rebind Feature"))
@@ -700,6 +713,7 @@ func TestAggregateVerifyRebindsStaleDeliveryBranch(t *testing.T) {
 }
 
 func TestAggregateDeliveryLifecycle(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	feature := asObject(t, runPic(t, bin, root, home, "work-item", "create", "feature", "Deliver Feature"))
@@ -750,6 +764,7 @@ func TestAggregateDeliveryLifecycle(t *testing.T) {
 }
 
 func TestTaskPlanRejectsDependencyCycle(t *testing.T) {
+	t.Parallel()
 	plan := `{"version":1,"execution_policy":"parallel_allowed","nodes":[{"key":"T01","name":"One","goal":"One","requirement_keys":["REQ-001"],"depends_on":["T02"],"priority":"P1","module":"x","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"true","required":true}]},{"key":"T02","name":"Two","goal":"Two","requirement_keys":["REQ-001"],"depends_on":["T01"],"priority":"P1","module":"x","files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"true","required":true}]}]}`
 	_, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + plan + "\n```")
 	if err == nil || !strings.Contains(err.Error(), "dependency cycle") {
@@ -758,6 +773,7 @@ func TestTaskPlanRejectsDependencyCycle(t *testing.T) {
 }
 
 func TestTaskPlanV2RequiresExplicitSkillFamilies(t *testing.T) {
+	t.Parallel()
 	base := `{"version":2,"execution_policy":"strict_sequential","nodes":[{"key":"T01","name":"One","goal":"One","requirement_keys":["REQ-001"],"depends_on":[],"priority":"P1","module":"x",%s"files":["x.go"],"business_rules":["rule"],"validation_rules":["rule"],"error_handling":["rule"],"state_transitions":["rule"],"contract_obligations":["rule"],"constraints":{"scope_roots":["x.go"]},"verification":[{"command":"true","required":true}]}]}`
 	if _, err := tip.ParseTaskPlanJSON("```task-plan-json\n" + strings.Replace(base, "%s", "", 1) + "\n```"); err == nil || !strings.Contains(err.Error(), "requires skillFamilies") {
 		t.Fatalf("missing skillFamilies error = %v", err)
@@ -769,6 +785,7 @@ func TestTaskPlanV2RequiresExplicitSkillFamilies(t *testing.T) {
 }
 
 func TestFindDBFromGitWorktree(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
 	if err := project.InitDB(dbPath); err != nil {
@@ -819,6 +836,7 @@ func createLegacyVerificationFixture(t *testing.T, bin, root, home, taskID strin
 }
 
 func TestValidateInstructionPackVerificationContract(t *testing.T) {
+	t.Parallel()
 	base := tip.InstructionPackContent{
 		Goal: "Change source", Files: []string{"src/main.ts"}, BusinessRules: []any{"rule"}, ValidationRules: []any{"rule"},
 		ErrorHandling: []any{"rule"}, StateTransitions: []any{"rule"}, ContractObligations: []any{"rule"}, SchemaVersion: 2,
@@ -841,6 +859,7 @@ func TestValidateInstructionPackVerificationContract(t *testing.T) {
 }
 
 func TestPipelineClaimAcceptsCurrentPlanningStageWithoutTIP(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Durable planning"))
@@ -858,6 +877,7 @@ func TestPipelineClaimAcceptsCurrentPlanningStageWithoutTIP(t *testing.T) {
 }
 
 func TestPipelineClaimBindsCanonicalWorkItemTIP(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Canonical pipeline leaf"))
@@ -875,6 +895,7 @@ func TestPipelineClaimBindsCanonicalWorkItemTIP(t *testing.T) {
 }
 
 func TestCurrentExecutionRejectsStaleReviewVerdict(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Candidate lineage"))
@@ -900,6 +921,7 @@ func TestCurrentExecutionRejectsStaleReviewVerdict(t *testing.T) {
 }
 
 func TestVerificationAfterAllPipelineActivityAnchorsCompletionReport(t *testing.T) {
+	t.Parallel()
 	setup := func(t *testing.T) (string, string, string, string) {
 		t.Helper()
 		bin := buildPic(t)
@@ -956,6 +978,7 @@ func TestVerificationAfterAllPipelineActivityAnchorsCompletionReport(t *testing.
 }
 
 func TestTIPRevisionInvalidatesActiveExecution(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Revise active execution"))
@@ -983,6 +1006,7 @@ Then it completes'); INSERT INTO work_item_artifacts(id,work_item_id,stage,revis
 }
 
 func TestCancellationRevokesPipelineLease(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Cancel execution"))
@@ -1005,6 +1029,7 @@ func TestCancellationRevokesPipelineLease(t *testing.T) {
 }
 
 func TestEpicCancellationCascadesToActiveDescendants(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Cancel delivery"))
@@ -1040,6 +1065,7 @@ func TestEpicCancellationCascadesToActiveDescendants(t *testing.T) {
 }
 
 func TestExecutableOwnerAcceptanceIsRemoved(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Contractor-owned closure"))
@@ -1049,6 +1075,7 @@ func TestExecutableOwnerAcceptanceIsRemoved(t *testing.T) {
 }
 
 func TestReadinessRelationsRejectTransitiveCycle(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	a := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "A"))["id"].(string)
@@ -1062,6 +1089,7 @@ func TestReadinessRelationsRejectTransitiveCycle(t *testing.T) {
 }
 
 func TestExpiredWorkerLeaseReopensWorkItem(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Expire worker"))
@@ -1079,6 +1107,7 @@ func TestExpiredWorkerLeaseReopensWorkItem(t *testing.T) {
 }
 
 func TestPipelinePendingRetiresStaleGenerations(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Bounded recovery"))
@@ -1104,6 +1133,7 @@ func TestPipelinePendingRetiresStaleGenerations(t *testing.T) {
 }
 
 func TestPipelineReviewClaimAcceptsInProgressCandidate(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Review handoff"))
@@ -1121,6 +1151,7 @@ func TestPipelineReviewClaimAcceptsInProgressCandidate(t *testing.T) {
 }
 
 func TestPipelineReviewRetryAcceptsReopenedCandidate(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Review retry"))
@@ -1138,6 +1169,7 @@ func TestPipelineReviewRetryAcceptsReopenedCandidate(t *testing.T) {
 }
 
 func TestMaterializedChildClaimRequiresCurrentParentAuthorization(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	parent := asObject(t, runPic(t, bin, root, home, "work-item", "create", "feature", "Authorized graph"))
@@ -1159,6 +1191,7 @@ func TestMaterializedChildClaimRequiresCurrentParentAuthorization(t *testing.T) 
 }
 
 func TestCanonicalWorkItemReviewAndCompletionEvidence(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Canonical evidence leaf"))
@@ -1181,6 +1214,7 @@ func TestCanonicalWorkItemReviewAndCompletionEvidence(t *testing.T) {
 }
 
 func TestExecutableWorkItemLifecycleUsesTIPAndGuardedClosure(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Executable lifecycle"))
@@ -1238,6 +1272,7 @@ func TestExecutableWorkItemLifecycleUsesTIPAndGuardedClosure(t *testing.T) {
 }
 
 func TestPipelineCircuitResetRestoresCanonicalRunnerRetry(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Retry runner"))
@@ -1294,6 +1329,7 @@ func TestPipelineCircuitResetRestoresCanonicalRunnerRetry(t *testing.T) {
 }
 
 func TestReviewFixCapPersistsBlockedOwnerAction(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Review fix cap"))
@@ -1342,6 +1378,7 @@ func TestReviewFixCapPersistsBlockedOwnerAction(t *testing.T) {
 }
 
 func TestReviewDecisionFixClearsOwnerApprovalBlock(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Review decision fix"))
@@ -1398,6 +1435,7 @@ func TestReviewDecisionFixClearsOwnerApprovalBlock(t *testing.T) {
 }
 
 func TestPipelineCircuitResetClearsAutomaticWorkerRetryLimit(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Auto retry limit"))
@@ -1438,6 +1476,7 @@ func TestPipelineCircuitResetClearsAutomaticWorkerRetryLimit(t *testing.T) {
 // are all stale/inactive (npvn.app wi-b83be214 incident). Reset falls back to
 // the latest inactive pack.
 func TestPipelineCircuitResetWorksWithoutActivePack(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Reset without active pack"))
@@ -1466,6 +1505,7 @@ func TestPipelineCircuitResetWorksWithoutActivePack(t *testing.T) {
 }
 
 func TestTransientWorkerDeathsDoNotExhaustUnchangedPackRetryLimit(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Transient deaths"))
@@ -1491,6 +1531,7 @@ func TestTransientWorkerDeathsDoNotExhaustUnchangedPackRetryLimit(t *testing.T) 
 }
 
 func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
@@ -1548,6 +1589,7 @@ func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 }
 
 func TestInitDBRepairsStalePipelineForeignKey(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
@@ -1721,6 +1763,7 @@ func TestWebAPISkillRouting(t *testing.T) {
 }
 
 func TestRemainingCommandGroups(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 
@@ -1740,6 +1783,7 @@ func TestRemainingCommandGroups(t *testing.T) {
 }
 
 func TestWorkItemEscalationLifecycle(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	item := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Escalation leaf"))
@@ -2058,6 +2102,7 @@ func TestRriTScenarioIdentityContract(t *testing.T) {
 // requirements set. The DB gate still applies to planning-era aggregates that
 // have requirement rows.
 func TestRriTLeanAggregateSpecBoundScenario(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	epica := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Lean Epic"))
@@ -2088,6 +2133,7 @@ func TestRriTLeanAggregateSpecBoundScenario(t *testing.T) {
 }
 
 func TestInstructionPackRendersContractInterfaces(t *testing.T) {
+	t.Parallel()
 	node := tip.TaskPlanDocumentNode{
 		Key: "T01", Type: "task", Name: "Persist", RequirementKeys: []string{"REQ-001"},
 		Provides: []string{"OBL-001"}, Consumes: []string{"OBL-002"}, EvidenceFor: []string{"OBL-001"}, ObligationKeys: []string{"OBL-001"},
@@ -2119,6 +2165,7 @@ func TestInstructionPackRendersContractInterfaces(t *testing.T) {
 }
 
 func TestSchemaMigrationsVersioned(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
@@ -2208,6 +2255,7 @@ func TestSchemaMigrationsVersioned(t *testing.T) {
 }
 
 func TestPartialLegacyStateMigrates(t *testing.T) {
+	t.Parallel()
 	tasksOnly := filepath.Join(t.TempDir(), "tasks.db")
 	db, err := project.OpenSQLite(tasksOnly)
 	if err != nil {
@@ -2263,6 +2311,7 @@ func TestPartialLegacyStateMigrates(t *testing.T) {
 }
 
 func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
@@ -2357,6 +2406,7 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 // that pins one *sql.Conn observes foreign_keys=OFF and legacy_alter_table=ON
 // inside the step's transaction.
 func TestSchemaMigrationPragmasRunOnThePinnedConnection(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
@@ -2391,6 +2441,7 @@ func TestSchemaMigrationPragmasRunOnThePinnedConnection(t *testing.T) {
 const v2BlueprintArtifact = `{"decomposition_policy_version":2,"project_info":{"project":"Task System","nature":"CLI + pipeline + team","date":"2026-08-29"},"goals":{"primary_goal":"Reliable workflow","target_audience":"Owner and agents","key_message":"Every transition is durable"},"architecture":{"building_blocks":["CLI","Scheduler","SQLite"],"connection_summary":"CLI drives scheduler state","data_flow":"Inputs -> CLI -> SQLite"},"tech_stack":[{"layer":"Backend","choice":"Go","rationale":"Existing","reuse":"go-pic"}],"file_structure":[{"path":"go-pic/cmd/pic","purpose":"Workflow backend"}],"rri_requirements_matrix":[{"blueprint_section":"Lifecycle","requirements":["REQ-001"],"source_questions":["Q1"]},{"blueprint_section":"Delivery","requirements":["REQ-002"],"source_questions":["Q2"]}],"verification_seams":[{"id":"cli-materialize","surface":"pic work-item materialize against a temporary SQLite database","isolates":"materialization atomicity and idempotency","prior_art":"TestWorkItemGraphMaterialization"},{"id":"go-tests","surface":"go test ./... in the repository","isolates":"package-level behavior regressions"}]}`
 
 func TestDecompositionProjectionMigration(t *testing.T) {
+	t.Parallel()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
@@ -2447,6 +2498,7 @@ func querySQLiteColumn(t *testing.T, dbPath string, query string) string {
 }
 
 func TestDependencyRelationsConvergentBackfill(t *testing.T) {
+	t.Parallel()
 	// The dependency-to-relations backfill must converge on every open, not
 	// only when migration 6 first applies: post-migration APM imports write
 	// task-graph edges into the retired work_item_dependencies table, and the

@@ -248,6 +248,7 @@ func writeApmProjectWithTasks(t *testing.T, tasksMD string) (bin string, root st
 }
 
 func TestApmImportFixture(t *testing.T) {
+	t.Parallel()
 	doc, err := apm.ParseTasksMD(validTasksMD)
 	if err != nil {
 		t.Fatalf("parse valid fixture: %v", err)
@@ -324,6 +325,7 @@ func TestApmImportFixture(t *testing.T) {
 }
 
 func TestApmImportRuleD(t *testing.T) {
+	t.Parallel()
 	base, err := apm.ParseTasksMD(validTasksMD)
 	if err != nil {
 		t.Fatal(err)
@@ -397,6 +399,7 @@ func TestApmImportRuleD(t *testing.T) {
 }
 
 func TestApmImportDryRun(t *testing.T) {
+	t.Parallel()
 	bin, root, home := writeApmProject(t)
 	out := runPic(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0", "--dry-run")
 	graph := asObject(t, out)
@@ -474,6 +477,7 @@ func TestApmImportDryRun(t *testing.T) {
 }
 
 func TestApmImportAbort(t *testing.T) {
+	t.Parallel()
 	corrupt := strings.Replace(validTasksMD, "Phase 4: T014 → T015", "Phase 4: T014 → T015 → T099", 1)
 	bin, root, home := writeApmProjectWithTasks(t, corrupt)
 	out := runPicError(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0")
@@ -490,6 +494,7 @@ func TestApmImportAbort(t *testing.T) {
 }
 
 func TestApmImportAbortNotApproved(t *testing.T) {
+	t.Parallel()
 	draft := strings.Replace(validTasksMD, "**Status:** Approved", "**Status:** Draft", 1)
 	bin, root, home := writeApmProjectWithTasks(t, draft)
 	out := runPicError(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0")
@@ -503,6 +508,7 @@ func TestApmImportAbortNotApproved(t *testing.T) {
 }
 
 func TestApmImportCreatesWorkItems(t *testing.T) {
+	t.Parallel()
 	bin, root, home := writeApmProject(t)
 	result := asObject(t, runPic(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0"))
 	if result["imported"] != true {
@@ -567,6 +573,7 @@ func fmtJSON(t *testing.T, v any) string {
 }
 
 func TestApmImportGates(t *testing.T) {
+	t.Parallel()
 	t.Run("missing companion plan", func(t *testing.T) {
 		bin, root, home := writeApmProject(t)
 		if err := os.Remove(filepath.Join(root, ".apm", "specs", "demo", "SampleFeature.plan.md")); err != nil {
@@ -598,6 +605,7 @@ func TestApmImportGates(t *testing.T) {
 }
 
 func TestApmImportReimport(t *testing.T) {
+	t.Parallel()
 	bin, root, home := writeApmProject(t)
 	first := asObject(t, runPic(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0"))
 	out := runPicError(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0")
@@ -610,6 +618,7 @@ func TestApmImportReimport(t *testing.T) {
 }
 
 func TestApmImportNoCrossFeatureEdges(t *testing.T) {
+	t.Parallel()
 	bin, root, home := writeApmProject(t)
 	runPic(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0")
 	// Feature parent ids: F2/F3 tasks must not depend on any F1 task.
@@ -648,6 +657,7 @@ func TestApmImportNoCrossFeatureEdges(t *testing.T) {
 }
 
 func TestApmImportPhase5Epic(t *testing.T) {
+	t.Parallel()
 	bin, root, home := writeApmProject(t)
 	result := asObject(t, runPic(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0"))
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "show", result["epic_id"].(string)))
@@ -668,6 +678,7 @@ func TestApmImportPhase5Epic(t *testing.T) {
 }
 
 func TestApmImportLabels(t *testing.T) {
+	t.Parallel()
 	bin, root, home := writeApmProject(t)
 	result := asObject(t, runPic(t, bin, root, home, "workflow", "import-apm", ".apm/specs/demo/SampleFeature.tasks.md", "--milestone", "v1.0"))
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "show", result["epic_id"].(string)))
@@ -680,6 +691,7 @@ func TestApmImportLabels(t *testing.T) {
 }
 
 func TestApmImportNoGit(t *testing.T) {
+	t.Parallel()
 	// initProject creates no git repository; import must succeed without one.
 	bin, root, home := writeApmProject(t)
 	if _, err := os.Stat(filepath.Join(root, ".git")); err == nil {
@@ -689,6 +701,7 @@ func TestApmImportNoGit(t *testing.T) {
 }
 
 func TestWorkflowCommandDispatch(t *testing.T) {
+	t.Parallel()
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
 	out := runPicError(t, bin, root, home, "workflow", "import-apm")
@@ -745,6 +758,7 @@ func altLabel(labels []any) string {
 }
 
 func TestApmImportGherkinEmbed(t *testing.T) {
+	t.Parallel()
 	// Pillar 4: every US-tagged task carries its verbatim Gherkin scenario
 	// from the companion .feature; untagged tasks carry none.
 	bin, root, home := writeApmProject(t)
@@ -798,6 +812,7 @@ func TestApmImportGherkinEmbed(t *testing.T) {
 }
 
 func TestApmImportRuleDScenarioGaps(t *testing.T) {
+	t.Parallel()
 	// Fail closed: a scenario missing its @US tag, or a Scenario Map US with
 	// no tagged scenario, aborts the import.
 	cases := map[string]string{
