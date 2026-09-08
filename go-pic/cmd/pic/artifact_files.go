@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"database/sql"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -45,6 +46,50 @@ func artifactFileHashMatches(path string, content string) (bool, error) {
 	sum := sha256.Sum256([]byte(content))
 	existingSum := sha256.Sum256(existing)
 	return string(sum[:]) == string(existingSum[:]), nil
+}
+
+// workItemArtifactCheck reports per-bound-artifact file integrity (Plan API
+// Contract `pic work-item artifact-check`, NC-7 on-demand hash comparison):
+// for each artifact_files row of the work item it compares the bound file's
+// bytes against content_sha256 (hashJSON semantics) and reports status ok,
+// drift, or missing.
+func workItemArtifactCheck(db *sql.DB, args []string) error {
+	if len(args) != 1 || args[0] == "" {
+		return errors.New("usage: pic work-item artifact-check <id>")
+	}
+	if _, err := workItemByID(db, args[0]); err != nil {
+		return err
+	}
+	rows, err := db.Query(`SELECT artifact_id,file_path,content_sha256 FROM artifact_files WHERE work_item_id=? ORDER BY artifact_id`, args[0])
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	report := []map[string]any{}
+	for rows.Next() {
+		var artifactID, filePath, contentSHA256 string
+		if err := rows.Scan(&artifactID, &filePath, &contentSHA256); err != nil {
+			return err
+		}
+		status := "ok"
+		existing, readErr := os.ReadFile(filePath)
+		switch {
+		case readErr == nil:
+			if hashJSON(string(existing)) != contentSHA256 {
+				status = "drift"
+			}
+		case os.IsNotExist(readErr):
+			status = "missing"
+		default:
+			return readErr
+		}
+		report = append(report, map[string]any{"artifact_id": artifactID, "file_path": filePath, "status": status})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	writeJSON(os.Stdout, report)
+	return nil
 }
 
 // bindArtifactFile records the artifact_files binding row for a projected
