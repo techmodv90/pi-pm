@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"os"
 
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
@@ -12,7 +13,7 @@ func cmdWorkItem(args []string) error {
 	if len(args) == 0 {
 		return errors.New("work-item subcommand required")
 	}
-	if agent := os.Getenv("PI_TASK_AGENT_NAME"); agent != "" && !contains([]string{"list", "show", "artifact-save", "workflow-status"}, args[0]) {
+	if agent := os.Getenv("PI_TASK_AGENT_NAME"); agent != "" && !store.Contains([]string{"list", "show", "artifact-save", "workflow-status"}, args[0]) {
 		return fmt.Errorf("%s cannot mutate Work Item lifecycle through pic", agent)
 	}
 	db, err := openDB()
@@ -26,7 +27,7 @@ func cmdWorkItem(args []string) error {
 	case "list":
 		rows, err := workitem.List(db, args[1:])
 		if err == nil {
-			writeJSON(os.Stdout, rows)
+			store.WriteJSON(os.Stdout, rows)
 		}
 		return err
 	case "label":
@@ -40,18 +41,18 @@ func cmdWorkItem(args []string) error {
 			err = attachWorkItemGraph(db, item)
 		}
 		if err == nil {
-			writeJSON(os.Stdout, item)
+			store.WriteJSON(os.Stdout, item)
 		}
 		return err
 	case "update":
 		return workitem.Update(db, args[1:])
 	case "status":
-		if len(args) != 3 || !contains([]string{"open", "in_progress", "done", "cancelled"}, args[2]) {
+		if len(args) != 3 || !store.Contains([]string{"open", "in_progress", "done", "cancelled"}, args[2]) {
 			return errors.New("usage: pic work-item status <id> <open|in_progress|done|cancelled>")
 		}
 		item, err := workitem.SetStatus(db, args[1], args[2])
 		if err == nil {
-			writeJSON(os.Stdout, item)
+			store.WriteJSON(os.Stdout, item)
 		}
 		return err
 	case "depend":
@@ -64,12 +65,12 @@ func cmdWorkItem(args []string) error {
 		}
 		return workitem.AddRelation(db, []string{args[1], args[3]}, args[2])
 	case "ready":
-		rows, err := queryMaps(db, `SELECT `+workitem.Columns+` FROM work_items wi WHERE `+workitem.ReadySQL+` ORDER BY created_at,id`)
+		rows, err := store.QueryMaps(db, `SELECT `+workitem.Columns+` FROM work_items wi WHERE `+workitem.ReadySQL+` ORDER BY created_at,id`)
 		if err == nil {
 			err = workitem.AttachLabels(db, rows)
 		}
 		if err == nil {
-			writeJSON(os.Stdout, rows)
+			store.WriteJSON(os.Stdout, rows)
 		}
 		return err
 	case "claim":

@@ -3,7 +3,9 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/schema"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,10 +15,10 @@ import (
 func profileTestDB(t *testing.T) (*sql.DB, string) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,7 +102,7 @@ func TestProfileResolutionRejectsUnknownDepth(t *testing.T) {
 	// Simulate a stale or manually edited database that predates the planning
 	// depth CHECK constraint, so an unknown depth can actually reach the
 	// defensive resolver and must be rejected without partial profile rows.
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -111,10 +113,10 @@ func TestProfileResolutionRejectsUnknownDepth(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,10 +138,10 @@ func TestProfileResolutionRejectsUnknownDepth(t *testing.T) {
 
 func TestPlanningDepthSelectsAggregateStages(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +170,7 @@ func TestPlanningDepthSelectsAggregateStages(t *testing.T) {
 			}
 		}
 		// RRI and Task Graph are always mandatory aggregates.
-		if !contains(stages, "rri") || !contains(stages, "task_graph") {
+		if !store.Contains(stages, "rri") || !store.Contains(stages, "task_graph") {
 			t.Fatalf("depth %s missing mandatory rri/task_graph: %v", depth, stages)
 		}
 	}
@@ -176,10 +178,10 @@ func TestPlanningDepthSelectsAggregateStages(t *testing.T) {
 
 func TestPlanningDepthStandaloneIsFixedLeanProfile(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,13 +209,13 @@ func TestPipelineStageProfileBinding(t *testing.T) {
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
 
 	claim := asObject(t, runPic(t, bin, root, home, "workflow", "pipeline-claim", id, "scan"))
-	if claim["stage"] != "scan" || toInt(claim["profile_version"]) != 1 {
+	if claim["stage"] != "scan" || store.ToInt(claim["profile_version"]) != 1 {
 		t.Fatalf("scan claim did not bind profile: %#v", claim)
 	}
-	if persistedText(claim["profile_hash"]) == "" {
+	if store.PersistedText(claim["profile_hash"]) == "" {
 		t.Fatalf("scan claim missing profile hash: %#v", claim)
 	}
-	expectedHash := persistedText(claim["profile_hash"])
+	expectedHash := store.PersistedText(claim["profile_hash"])
 
 	// Stale profile hash is rejected.
 	if out := runPicError(t, bin, root, home, "workflow", "pipeline-claim", id, "rri", "--profile-hash", "deadbeef"); !strings.Contains(out, "profile hash changed") {
@@ -235,7 +237,7 @@ func TestPipelineStageProfileBinding(t *testing.T) {
 
 func openSQLiteGo(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,7 +273,7 @@ func TestLegacyPipelineStageVocabularyMigrated(t *testing.T) {
 	// Build a legacy pipeline_runs with the retired stage vocabulary
 	// (scan,worker,review,qa,verify); the canonical CHECK rejects 'qa'/'verify',
 	// so migration must translate them instead of failing the rebuild copy.
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,10 +289,10 @@ func TestLegacyPipelineStageVocabularyMigrated(t *testing.T) {
 	}
 	db.Close()
 
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatalf("migration failed on legacy stage vocabulary: %v", err)
 	}
-	read, err := openSQLite(dbPath)
+	read, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -308,7 +310,7 @@ func TestLegacyPipelineStageVocabularyMigrated(t *testing.T) {
 	if stage != "review" {
 		t.Fatalf("legacy verify stage = %q, want review", stage)
 	}
-	rows, err := queryMaps(read, `SELECT * FROM pipeline_runs WHERE task_id=?`, "wi-legacy")
+	rows, err := store.QueryMaps(read, `SELECT * FROM pipeline_runs WHERE task_id=?`, "wi-legacy")
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("legacy runs not fully preserved: rows=%d err=%v", len(rows), err)
 	}
@@ -317,7 +319,7 @@ func TestLegacyPipelineStageVocabularyMigrated(t *testing.T) {
 func TestLegacyPipelineRowsRemainReadableAfterMigration(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
 	// Build a legacy schema that predates the profile columns.
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -331,10 +333,10 @@ func TestLegacyPipelineRowsRemainReadableAfterMigration(t *testing.T) {
 	}
 	db.Close()
 
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	read, err := openSQLite(dbPath)
+	read, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,7 +353,7 @@ func TestLegacyPipelineRowsRemainReadableAfterMigration(t *testing.T) {
 		t.Fatalf("legacy run content not preserved: status=%s stage=%s profile_version=%d", status, stage, profileVersion)
 	}
 	// The legacy run remains visible through the canonical runs query.
-	rows, err := queryMaps(read, `SELECT * FROM pipeline_runs WHERE task_id=?`, "wi-legacy")
+	rows, err := store.QueryMaps(read, `SELECT * FROM pipeline_runs WHERE task_id=?`, "wi-legacy")
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("legacy run not readable: rows=%d err=%v", len(rows), err)
 	}

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 	"path/filepath"
@@ -500,11 +501,11 @@ func writeApmGraphJSON(graph *apmGraph, imported bool, epicID string) {
 	if epicID != "" {
 		payload["epic_id"] = epicID
 	}
-	writeJSON(os.Stdout, payload)
+	store.WriteJSON(os.Stdout, payload)
 }
 
 func apmImportError(err error, discrepancies []string) error {
-	writeJSON(os.Stdout, map[string]any{"error": err.Error(), "discrepancies": discrepancies, "imported": false})
+	store.WriteJSON(os.Stdout, map[string]any{"error": err.Error(), "discrepancies": discrepancies, "imported": false})
 	return errSilentImport
 }
 
@@ -524,7 +525,7 @@ func cmdWorkflowImportApm(db *sql.DB, args []string) error {
 		}
 		flagArgs = append(flagArgs, a)
 	}
-	opts, err := parseOptions(flagArgs)
+	opts, err := store.ParseOptions(flagArgs)
 	if err != nil {
 		return err
 	}
@@ -631,7 +632,7 @@ func createApmWorkItems(db *sql.DB, doc *apmDoc, graph *apmGraph, importLabel st
 		return "", err
 	}
 
-	epicID = "wi-" + shortID()
+	epicID = "wi-" + store.ShortID()
 	epicDesc := "Imported from " + doc.PlanPath + "\n\nAggregate verification commands (Phase 5, not Work Items):\n"
 	for _, cmd := range graph.VerificationCommands {
 		epicDesc += "- " + cmd + "\n"
@@ -653,13 +654,13 @@ func createApmWorkItems(db *sql.DB, doc *apmDoc, graph *apmGraph, importLabel st
 		titles[f.Key] = f.Name
 	}
 	for i, key := range featureKeys {
-		id := "wi-" + shortID()
+		id := "wi-" + store.ShortID()
 		featureIDs[key] = id
 		if _, err := tx.Exec(`INSERT INTO work_items(id,type,parent_id,title,description,priority,deferred,planning_depth) VALUES(?,'feature',?,?,?, 'medium',0,'full')`, id, epicID, titles[key], "Imported "+titles[key]+" for "+graph.EpicName); err != nil {
 			return "", fmt.Errorf("insert feature %s: %w", key, err)
 		}
 		if i > 0 {
-			if _, err := tx.Exec(`INSERT INTO work_item_dependencies(id,work_item_id,depends_on_work_item_id) VALUES(?,?,?)`, "wid-"+shortID(), id, featureIDs[featureKeys[i-1]]); err != nil {
+			if _, err := tx.Exec(`INSERT INTO work_item_dependencies(id,work_item_id,depends_on_work_item_id) VALUES(?,?,?)`, "wid-"+store.ShortID(), id, featureIDs[featureKeys[i-1]]); err != nil {
 				return "", fmt.Errorf("insert feature edge %s: %w", key, err)
 			}
 		}
@@ -670,7 +671,7 @@ func createApmWorkItems(db *sql.DB, doc *apmDoc, graph *apmGraph, importLabel st
 
 	taskIDs := map[string]string{}
 	for _, t := range graph.Tasks {
-		id := "wi-" + shortID()
+		id := "wi-" + store.ShortID()
 		taskIDs[t.TID] = id
 		desc := t.Verbatim + "\n\nAcceptance criteria:\n" + t.Acceptance
 		for _, us := range strings.Fields(t.US) {
@@ -687,7 +688,7 @@ func createApmWorkItems(db *sql.DB, doc *apmDoc, graph *apmGraph, importLabel st
 	}
 	for _, t := range graph.Tasks {
 		for _, dep := range t.DependsOn {
-			if _, err := tx.Exec(`INSERT INTO work_item_dependencies(id,work_item_id,depends_on_work_item_id) VALUES(?,?,?)`, "wid-"+shortID(), taskIDs[t.TID], taskIDs[dep]); err != nil {
+			if _, err := tx.Exec(`INSERT INTO work_item_dependencies(id,work_item_id,depends_on_work_item_id) VALUES(?,?,?)`, "wid-"+store.ShortID(), taskIDs[t.TID], taskIDs[dep]); err != nil {
 				return "", fmt.Errorf("insert task edge %s->%s: %w", t.TID, dep, err)
 			}
 		}

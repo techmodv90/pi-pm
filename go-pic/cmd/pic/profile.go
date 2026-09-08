@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 )
@@ -48,7 +49,7 @@ func lifecycleForStage(stage string) string {
 // Vision, Blueprint, and Contracts are only present for the depths that
 // require them.
 func planStagesForProfile(kind, parentID, depth string) []string {
-	if contains([]string{"task", "bug", "chore"}, kind) && parentID == "" {
+	if store.Contains([]string{"task", "bug", "chore"}, kind) && parentID == "" {
 		return []string{"scan", "rri", "task_graph"}
 	}
 	switch depth {
@@ -79,7 +80,7 @@ func profileContentHash(name string, version int, depth string, stages []string)
 
 // workItemDepthInfo returns the persisted kind, parent, and planning depth for
 // a Work Item, validating the depth value against the known set.
-func workItemDepthInfo(db databaseQueryer, id string) (kind, parentID, depth string, err error) {
+func workItemDepthInfo(db store.Queryer, id string) (kind, parentID, depth string, err error) {
 	if err = db.QueryRow(`SELECT type,COALESCE(parent_id,''),COALESCE(planning_depth,'full') FROM work_items WHERE id=?`, id).Scan(&kind, &parentID, &depth); err != nil {
 		return "", "", "", err
 	}
@@ -92,7 +93,7 @@ func workItemDepthInfo(db databaseQueryer, id string) (kind, parentID, depth str
 // computePlanStagesForWorkItem resolves the Plan profile stages for a Work Item
 // without mutating the database. It prefers a persisted profile and falls back
 // to deterministic type/depth resolution when no profile has been persisted yet.
-func computePlanStagesForWorkItem(db databaseQueryer, id string) ([]string, string, int, string, error) {
+func computePlanStagesForWorkItem(db store.Queryer, id string) ([]string, string, int, string, error) {
 	kind, parentID, depth, err := workItemDepthInfo(db, id)
 	if err != nil {
 		return nil, "", 0, "", err
@@ -138,7 +139,7 @@ func ensureWorkItemProfiles(tx *sql.Tx, id string) (map[string]workItemProfile, 
 				return nil, fmt.Errorf("corrupt persisted %s profile for Work Item %s", name, id)
 			}
 			for _, stage := range stages {
-				if !contains(pipelineStages, stage) {
+				if !store.Contains(pipelineStages, stage) {
 					return nil, fmt.Errorf("invalid stage %q in persisted %s profile for Work Item %s", stage, name, id)
 				}
 			}
@@ -147,13 +148,13 @@ func ensureWorkItemProfiles(tx *sql.Tx, id string) (map[string]workItemProfile, 
 		}
 		stages := lifecycleStagesByName(name, depth, planStages)
 		for _, stage := range stages {
-			if !contains(pipelineStages, stage) {
+			if !store.Contains(pipelineStages, stage) {
 				return nil, fmt.Errorf("unknown pipeline stage %q in %s profile", stage, name)
 			}
 		}
 		profileHash := profileContentHash(name, version+1, depth, stages)
 		stagesJSON, _ := json.Marshal(stages)
-		if _, err = tx.Exec(`INSERT INTO work_item_profiles(id,work_item_id,profile_name,profile_version,planning_depth,stages_json,content_hash) VALUES(?,?,?,?,?,?,?)`, "wiprof-"+shortID(), id, name, version+1, depth, string(stagesJSON), profileHash); err != nil {
+		if _, err = tx.Exec(`INSERT INTO work_item_profiles(id,work_item_id,profile_name,profile_version,planning_depth,stages_json,content_hash) VALUES(?,?,?,?,?,?,?)`, "wiprof-"+store.ShortID(), id, name, version+1, depth, string(stagesJSON), profileHash); err != nil {
 			return nil, err
 		}
 		profiles[name] = workItemProfile{Name: name, Version: version + 1, PlanningDepth: depth, Stages: stages, ContentHash: profileHash}
@@ -168,10 +169,10 @@ func workflowProfileList(db *sql.DB, args []string) error {
 	if _, err := workitem.ByID(db, args[0]); err != nil {
 		return err
 	}
-	rows, err := queryMaps(db, `SELECT * FROM work_item_profiles WHERE work_item_id=? ORDER BY profile_name,profile_version`, args[0])
+	rows, err := store.QueryMaps(db, `SELECT * FROM work_item_profiles WHERE work_item_id=? ORDER BY profile_name,profile_version`, args[0])
 	if err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, rows)
+	store.WriteJSON(os.Stdout, rows)
 	return nil
 }

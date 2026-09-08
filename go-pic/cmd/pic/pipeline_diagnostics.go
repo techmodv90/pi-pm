@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"os"
 )
 
@@ -18,13 +19,13 @@ func workflowPipelineShow(db *sql.DB, args []string) error {
 	// Terminal-run diagnostics surface (RLB-GAP-005): pipeline-active only
 	// returns claimed/running runs, so blocked/failed/completed run error
 	// reasons had no sanctioned read path.
-	rows, err := queryMaps(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+	rows, err := store.QueryMaps(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
 	if err != nil {
 		return err
 	}
 	if len(rows) == 0 {
 		return fmt.Errorf("no pipeline run found: %s", args[0])
 	}
-	writeJSON(os.Stdout, rows[0])
+	store.WriteJSON(os.Stdout, rows[0])
 	return nil
 }

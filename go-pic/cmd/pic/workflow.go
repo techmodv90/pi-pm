@@ -2,30 +2,18 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
-	"strings"
 )
-
-type workflowExecer interface {
-	Exec(string, ...any) (sql.Result, error)
-}
-type workflowQueryer interface {
-	QueryRow(string, ...any) *sql.Row
-}
-type workflowStore interface {
-	databaseQueryer
-	workflowExecer
-}
 
 func cmdWorkflow(args []string) error {
 	if len(args) == 0 {
 		return errors.New("workflow subcommand required")
 	}
-	if agent := os.Getenv("PI_TASK_AGENT_NAME"); agent != "" && !contains([]string{"instruction-pack-render", "instruction-packs", "verifications", "events", "pipeline-runs", "pipeline-show", "pipeline-group", "profile-list", "profile-promotion-evaluate"}, args[0]) {
+	if agent := os.Getenv("PI_TASK_AGENT_NAME"); agent != "" && !store.Contains([]string{"instruction-pack-render", "instruction-packs", "verifications", "events", "pipeline-runs", "pipeline-show", "pipeline-group", "profile-list", "profile-promotion-evaluate"}, args[0]) {
 		return fmt.Errorf("%s cannot mutate workflow lifecycle through pic", agent)
 	}
 	db, err := openDB()
@@ -103,84 +91,16 @@ func workflowList(db *sql.DB, args []string, query string) error {
 	if len(args) < 1 {
 		return errors.New("Work Item id required")
 	}
-	rows, err := queryMaps(db, query, args[0])
+	rows, err := store.QueryMaps(db, query, args[0])
 	if err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, rows)
+	store.WriteJSON(os.Stdout, rows)
 	return nil
 }
 
-func normalizeJSONText(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return ""
-	}
-	var parsed any
-	if json.Unmarshal([]byte(value), &parsed) != nil {
-		return value
-	}
-	data, _ := json.Marshal(parsed)
-	return string(data)
-}
-
-func parseOptions(args []string) (map[string]string, error) {
-	opts := map[string]string{}
-	for i := 0; i < len(args); i++ {
-		if !strings.HasPrefix(args[i], "--") {
-			return nil, fmt.Errorf("unexpected argument: %s", args[i])
-		}
-		key := strings.TrimPrefix(args[i], "--")
-		if key == "" || i+1 >= len(args) || strings.HasPrefix(args[i+1], "--") {
-			return nil, fmt.Errorf("option --%s requires a value", key)
-		}
-		opts[key] = args[i+1]
-		i++
-	}
-	return opts, nil
-}
-
-func outputOne(db databaseQueryer, query string, args ...any) error {
-	row, err := queryOne(db, query, args...)
-	if err != nil {
-		return err
-	}
-	writeJSON(os.Stdout, row)
-	return nil
-}
-
-func persistedText(value any) string {
-	if value == nil {
-		return ""
-	}
-	return fmt.Sprint(value)
-}
-
-func nullIfEmpty(value string) any {
-	if value == "" {
-		return nil
-	}
-	return value
-}
-
-func addEvent(db workflowExecer, workItemID, eventType, role, summary string, payload any) error {
-	return addEventWithModel(db, workItemID, eventType, role, "", summary, payload)
-}
-
-func addEventWithModel(db workflowExecer, workItemID, eventType, role, model, summary string, payload any) error {
-	data, _ := json.Marshal(payload)
-	_, err := db.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,actor_model,summary,payload_json) VALUES(?,?,?,?,?,?,?)`, "wie-"+shortID(), workItemID, eventType, role, model, summary, string(data))
-	return err
-}
-
-func verificationText(value any) string {
-	if value == nil {
-		return ""
-	}
-	return fmt.Sprint(value)
-}
-
-func ownerDecision(db workflowExecer, workItemID, relatedType, relatedID, decisionType, decision, notes string) error {
-	return addEvent(db, workItemID, "owner_decision", "owner", notes, map[string]any{"decision_type": decisionType, "decision": decision, "related_type": relatedType, "related_id": relatedID})
+func ownerDecision(db store.Execer, workItemID, relatedType, relatedID, decisionType, decision, notes string) error {
+	return store.AddEvent(db, workItemID, "owner_decision", "owner", notes, map[string]any{"decision_type": decisionType, "decision": decision, "related_type": relatedType, "related_id": relatedID})
 }
 
 func firstAny(values ...any) any {

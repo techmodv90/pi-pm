@@ -19,8 +19,8 @@ type Queryer interface {
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-func queryOne(db Queryer, query string, args ...any) (map[string]any, error) {
-	rows, err := queryMaps(db, query, args...)
+func QueryOne(db Queryer, query string, args ...any) (map[string]any, error) {
+	rows, err := QueryMaps(db, query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -30,7 +30,7 @@ func queryOne(db Queryer, query string, args ...any) (map[string]any, error) {
 	return rows[0], nil
 }
 
-func queryMaps(db Queryer, query string, args ...any) ([]map[string]any, error) {
+func QueryMaps(db Queryer, query string, args ...any) ([]map[string]any, error) {
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -52,14 +52,14 @@ func queryMaps(db Queryer, query string, args ...any) ([]map[string]any, error) 
 		}
 		row := map[string]any{}
 		for i, col := range cols {
-			row[col] = normalizeDBValue(values[i])
+			row[col] = NormalizeDBValue(values[i])
 		}
 		result = append(result, row)
 	}
 	return result, rows.Err()
 }
 
-func normalizeDBValue(value any) any {
+func NormalizeDBValue(value any) any {
 	switch v := value.(type) {
 	case []byte:
 		return string(v)
@@ -79,14 +79,14 @@ func RowExists(db RowQueryer, query string, args ...any) (bool, error) {
 	return err == nil, err
 }
 
-func normalizeChoice(value string, allowed []string, fallback string) string {
-	if contains(allowed, value) {
+func NormalizeChoice(value string, allowed []string, fallback string) string {
+	if Contains(allowed, value) {
 		return value
 	}
 	return fallback
 }
 
-func contains(values []string, value string) bool {
+func Contains(values []string, value string) bool {
 	for _, v := range values {
 		if v == value {
 			return true
@@ -95,14 +95,14 @@ func contains(values []string, value string) bool {
 	return false
 }
 
-func boolInt(value bool) int {
+func BoolInt(value bool) int {
 	if value {
 		return 1
 	}
 	return 0
 }
 
-func toInt(value any) int {
+func ToInt(value any) int {
 	switch v := value.(type) {
 	case int64:
 		return int(v)
@@ -128,7 +128,7 @@ type Store interface {
 	Execer
 }
 
-func parseOptions(args []string) (map[string]string, error) {
+func ParseOptions(args []string) (map[string]string, error) {
 	opts := map[string]string{}
 	for i := 0; i < len(args); i++ {
 		if !strings.HasPrefix(args[i], "--") {
@@ -144,47 +144,47 @@ func parseOptions(args []string) (map[string]string, error) {
 	return opts, nil
 }
 
-func outputOne(db Queryer, query string, args ...any) error {
-	row, err := queryOne(db, query, args...)
+func OutputOne(db Queryer, query string, args ...any) error {
+	row, err := QueryOne(db, query, args...)
 	if err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, row)
+	WriteJSON(os.Stdout, row)
 	return nil
 }
 
-func persistedText(value any) string {
+func PersistedText(value any) string {
 	if value == nil {
 		return ""
 	}
 	return fmt.Sprint(value)
 }
 
-func nullIfEmpty(value string) any {
+func NullIfEmpty(value string) any {
 	if value == "" {
 		return nil
 	}
 	return value
 }
 
-func addEvent(db Execer, workItemID, eventType, role, summary string, payload any) error {
-	return addEventWithModel(db, workItemID, eventType, role, "", summary, payload)
+func AddEvent(db Execer, workItemID, eventType, role, summary string, payload any) error {
+	return AddEventWithModel(db, workItemID, eventType, role, "", summary, payload)
 }
 
-func addEventWithModel(db Execer, workItemID, eventType, role, model, summary string, payload any) error {
+func AddEventWithModel(db Execer, workItemID, eventType, role, model, summary string, payload any) error {
 	data, _ := json.Marshal(payload)
-	_, err := db.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,actor_model,summary,payload_json) VALUES(?,?,?,?,?,?,?)`, "wie-"+shortID(), workItemID, eventType, role, model, summary, string(data))
+	_, err := db.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,actor_model,summary,payload_json) VALUES(?,?,?,?,?,?,?)`, "wie-"+ShortID(), workItemID, eventType, role, model, summary, string(data))
 	return err
 }
 
-func verificationText(value any) string {
+func VerificationText(value any) string {
 	if value == nil {
 		return ""
 	}
 	return fmt.Sprint(value)
 }
 
-func normalizeJSONText(value string) string {
+func NormalizeJSONText(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return ""
 	}
@@ -196,7 +196,7 @@ func normalizeJSONText(value string) string {
 	return string(data)
 }
 
-func writeJSON(file *os.File, value any) {
+func WriteJSON(file *os.File, value any) {
 	data, err := json.Marshal(value)
 	if err != nil {
 		fmt.Fprintf(file, `{"error":%q}`+"\n", err.Error())
@@ -205,7 +205,7 @@ func writeJSON(file *os.File, value any) {
 	file.Write(append(data, '\n'))
 }
 
-func shortID() string {
+func ShortID() string {
 	var bytes [4]byte
 	if _, err := rand.Read(bytes[:]); err != nil {
 		return strings.ToLower(hex.EncodeToString([]byte(fmt.Sprint(time.Now().UnixNano()))))[:8]
@@ -215,6 +215,6 @@ func shortID() string {
 
 // hashJSON delegates to the tip package so artifact and pack hashing share one
 // canonical implementation.
-func hashJSON(value any) string {
+func HashJSON(value any) string {
 	return tip.HashJSON(value)
 }

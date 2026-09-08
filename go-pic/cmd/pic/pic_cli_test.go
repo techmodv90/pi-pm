@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/schema"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"net/http"
 	"net/http/httptest"
@@ -203,7 +205,7 @@ func TestInitAndProjectCommands(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(root, ".pi", "tasks.db")); err != nil {
 		t.Fatalf("tasks.db not created: %v", err)
 	}
-	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	db, err := project.OpenSQLite(filepath.Join(root, ".pi", "tasks.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +234,7 @@ func TestInitAndProjectCommands(t *testing.T) {
 func TestWorkItemCommandCutover(t *testing.T) {
 	bin := buildProductionPic(t)
 	root, home := initProject(t, bin)
-	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	db, err := project.OpenSQLite(filepath.Join(root, ".pi", "tasks.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +287,7 @@ func activateTestWorkItemTIP(t *testing.T, dbPath, id string) {
 
 func TestWorkflowMigrationPreservesLegacyRows(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -300,10 +302,10 @@ func TestWorkflowMigrationPreservesLegacyRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -319,7 +321,7 @@ func TestWorkflowMigrationPreservesLegacyRows(t *testing.T) {
 
 func TestWorkItemSchemaMigration(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -336,11 +338,11 @@ func TestWorkItemSchemaMigration(t *testing.T) {
 	}
 
 	for range 2 {
-		if err := initDB(dbPath); err != nil {
+		if err := project.InitDB(dbPath); err != nil {
 			t.Fatal(err)
 		}
 	}
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -622,7 +624,7 @@ func TestAggregateWorkItemVerificationAndClosure(t *testing.T) {
 	if report["status"] != "passed" {
 		t.Fatalf("aggregate report = %#v", report)
 	}
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -646,7 +648,7 @@ func TestFailedAggregateVerificationCreatesCorrectiveBug(t *testing.T) {
 	completed := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Completed child", "--parent", epic["id"].(string)))
 	runPic(t, bin, root, home, "work-item", "status", completed["id"].(string), "done")
 	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", epic["id"].(string), "failed", "release check failed", "--actor-role", "contractor"))
-	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	db, err := project.OpenSQLite(filepath.Join(root, ".pi", "tasks.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -676,7 +678,7 @@ func TestAggregateVerifyRebindsStaleDeliveryBranch(t *testing.T) {
 	// head, and base commit all move to the branch the review actually ran on
 	// (a stale binding must not wedge the aggregate out of every transition).
 	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", featureID, "passed", "rebound to the reviewed delivery branch", "--actor-role", "contractor", "--branch-name", "feature/delivery", "--head-commit", "head-2", "--base-commit", "base-2"))
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -768,7 +770,7 @@ func TestTaskPlanV2RequiresExplicitSkillFamilies(t *testing.T) {
 func TestFindDBFromGitWorktree(t *testing.T) {
 	root := t.TempDir()
 	dbPath := filepath.Join(root, ".pi", "tasks.db")
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
 	for _, args := range [][]string{{"init"}, {"config", "user.email", "test@example.com"}, {"config", "user.name", "Test"}, {"commit", "--allow-empty", "-m", "initial"}} {
@@ -784,10 +786,10 @@ func TestFindDBFromGitWorktree(t *testing.T) {
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("git worktree add failed: %v\n%s", err, out)
 	}
-	got, gotErr := filepath.EvalSymlinks(findDB(worktree))
+	got, gotErr := filepath.EvalSymlinks(project.FindDB(worktree))
 	want, wantErr := filepath.EvalSymlinks(dbPath)
 	if gotErr != nil || wantErr != nil || got != want {
-		t.Fatalf("findDB(worktree) = %q (%v), want %q (%v)", got, gotErr, want, wantErr)
+		t.Fatalf("project.FindDB(worktree) = %q (%v), want %q (%v)", got, gotErr, want, wantErr)
 	}
 }
 
@@ -1090,7 +1092,7 @@ func TestPipelinePendingRetiresStaleGenerations(t *testing.T) {
 		t.Fatalf("pending recovery replayed stale generations: %#v", pending)
 	}
 	var staleAdvanced string
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1489,10 +1491,10 @@ func TestTransientWorkerDeathsDoNotExhaustUnchangedPackRetryLimit(t *testing.T) 
 
 func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1522,10 +1524,10 @@ func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 	// The degraded schema simulates a database from an older binary, which also
 	// predates schema_migrations version records; clearing them makes the next
 	// open re-run the migrations exactly as an upgrade would.
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1538,7 +1540,7 @@ func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 		t.Fatalf("temporary pipeline migration name remains in %d schema objects", staleObjects)
 	}
 	for _, name := range []string{"idx_pipeline_runs_task", "idx_pipeline_runs_active_stage", "pipeline_run_ids", "pipeline_run_reference"} {
-		if ok, err := rowExists(db, `SELECT 1 FROM sqlite_master WHERE name=?`, name); err != nil || !ok {
+		if ok, err := store.RowExists(db, `SELECT 1 FROM sqlite_master WHERE name=?`, name); err != nil || !ok {
 			t.Fatalf("schema object %s missing after migration: %v", name, err)
 		}
 	}
@@ -1546,10 +1548,10 @@ func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 
 func TestInitDBRepairsStalePipelineForeignKey(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1576,10 +1578,10 @@ func TestInitDBRepairsStalePipelineForeignKey(t *testing.T) {
 
 	// Older-binary database simulation: clear version records so the next open
 	// re-runs the migrations and repairs the stale foreign key.
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1811,7 +1813,7 @@ func TestRriTScenarioArtifact(t *testing.T) {
 
 	// Fresh SQLite schema and the artifact-save stage registry accept rri_t_scenarios.
 	saved1 := asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosA))
-	if saved1["stage"] != "rri_t_scenarios" || saved1["revision"] != float64(1) || saved1["content_hash"] != hashJSON(scenariosA) {
+	if saved1["stage"] != "rri_t_scenarios" || saved1["revision"] != float64(1) || saved1["content_hash"] != store.HashJSON(scenariosA) {
 		t.Fatalf("scenario artifact = %#v", saved1)
 	}
 	// The scenario save is supplementary: a childless epic reports the lean
@@ -1827,7 +1829,7 @@ func TestRriTScenarioArtifact(t *testing.T) {
 		row := raw.(map[string]any)
 		if row["stage"] == "rri_t_scenarios" {
 			scenarioRows++
-			if row["content"] != scenariosA || row["content_hash"] != hashJSON(scenariosA) {
+			if row["content"] != scenariosA || row["content_hash"] != store.HashJSON(scenariosA) {
 				t.Fatalf("show scenario row = %#v", row)
 			}
 		}
@@ -1848,7 +1850,7 @@ func TestRriTScenarioArtifact(t *testing.T) {
 	// A third save creates another immutable revision; prior revisions are
 	// retained verbatim (no checkpoint invalidation exists in the lean model).
 	_ = asObject(t, runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenariosB))
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1917,7 +1919,7 @@ DELETE FROM schema_migrations;`, id, id, id, id))
 	// the lookup indexes and immutable triggers were recreated on the fresh
 	// tables rather than left behind on the renamed legacy ones.
 	var artifactsSQL, checkpointsSQL string
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2117,10 +2119,10 @@ func TestInstructionPackRendersContractInterfaces(t *testing.T) {
 
 func TestSchemaMigrationsVersioned(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2159,7 +2161,7 @@ func TestSchemaMigrationsVersioned(t *testing.T) {
 	if !canonicalBaseline {
 		t.Fatalf("fresh database missing canonical_baseline migration: %v", fresh)
 	}
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
 	if again := versions(); strings.Join(again, ",") != strings.Join(fresh, ",") {
@@ -2168,7 +2170,7 @@ func TestSchemaMigrationsVersioned(t *testing.T) {
 	db.Close()
 
 	legacyPath := filepath.Join(t.TempDir(), "legacy.db")
-	legacy, err := openSQLite(legacyPath)
+	legacy, err := project.OpenSQLite(legacyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2183,10 +2185,10 @@ func TestSchemaMigrationsVersioned(t *testing.T) {
 		}
 	}
 	legacy.Close()
-	if err := initDB(legacyPath); err != nil {
+	if err := project.InitDB(legacyPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err = openSQLite(legacyPath)
+	db, err = project.OpenSQLite(legacyPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2206,7 +2208,7 @@ func TestSchemaMigrationsVersioned(t *testing.T) {
 
 func TestPartialLegacyStateMigrates(t *testing.T) {
 	tasksOnly := filepath.Join(t.TempDir(), "tasks.db")
-	db, err := openSQLite(tasksOnly)
+	db, err := project.OpenSQLite(tasksOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2215,10 +2217,10 @@ func TestPartialLegacyStateMigrates(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	if err := initDB(tasksOnly); err != nil {
+	if err := project.InitDB(tasksOnly); err != nil {
 		t.Fatalf("tasks-only database failed to migrate: %v", err)
 	}
-	db, err = openSQLite(tasksOnly)
+	db, err = project.OpenSQLite(tasksOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2236,7 +2238,7 @@ func TestPartialLegacyStateMigrates(t *testing.T) {
 	db.Close()
 
 	epicsOnly := filepath.Join(t.TempDir(), "epics.db")
-	db, err = openSQLite(epicsOnly)
+	db, err = project.OpenSQLite(epicsOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2245,10 +2247,10 @@ func TestPartialLegacyStateMigrates(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	if err := initDB(epicsOnly); err != nil {
+	if err := project.InitDB(epicsOnly); err != nil {
 		t.Fatalf("epics-only database failed to migrate: %v", err)
 	}
-	db, err = openSQLite(epicsOnly)
+	db, err = project.OpenSQLite(epicsOnly)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2261,7 +2263,7 @@ func TestPartialLegacyStateMigrates(t *testing.T) {
 
 func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2276,7 +2278,7 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 	// A transactional step that performs REAL migration operations (the
 	// pre-reconcile rebuild and legacy import) and then fails: the version must
 	// stay unrecorded and every operation must roll back, including DDL.
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2308,7 +2310,7 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 	db.Close()
 
 	// A DDL-producing step that fails midway: the created table must roll back.
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2328,10 +2330,10 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 	db.Close()
 
 	// Retry after the failures: the real migration completes and migrates rows.
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2355,7 +2357,7 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 // inside the step's transaction.
 func TestSchemaMigrationPragmasRunOnThePinnedConnection(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2389,7 +2391,7 @@ const v2BlueprintArtifact = `{"decomposition_policy_version":2,"project_info":{"
 
 func TestDecompositionProjectionMigration(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2404,10 +2406,10 @@ func TestDecompositionProjectionMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	db.Close()
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatalf("pre-v8 database failed to migrate: %v", err)
 	}
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2429,7 +2431,7 @@ func TestDecompositionProjectionMigration(t *testing.T) {
 	}
 	db.Close()
 	// Once-semantics: a second open must not re-apply the additive columns.
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatalf("second open re-applied migration 8: %v", err)
 	}
 }
@@ -2451,10 +2453,10 @@ func TestDependencyRelationsConvergentBackfill(t *testing.T) {
 	// the per-open backfill, dep-blocked leaves compute ready=true and the
 	// scheduler launches them out of dependency order.
 	dbPath := filepath.Join(t.TempDir(), "tasks.db")
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatal(err)
 	}
-	db, err := openSQLite(dbPath)
+	db, err := project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2478,10 +2480,10 @@ func TestDependencyRelationsConvergentBackfill(t *testing.T) {
 	db.Close()
 
 	// Re-open: the convergent backfill must surface both edges as relations.
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatalf("second initDB: %v", err)
 	}
-	db, err = openSQLite(dbPath)
+	db, err = project.OpenSQLite(dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2502,7 +2504,7 @@ func TestDependencyRelationsConvergentBackfill(t *testing.T) {
 	}
 	// Re-running initDB again must stay idempotent (INSERT OR IGNORE).
 	db.Close()
-	if err := initDB(dbPath); err != nil {
+	if err := project.InitDB(dbPath); err != nil {
 		t.Fatalf("third initDB: %v", err)
 	}
 }

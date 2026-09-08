@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"os"
 	"path/filepath"
 	"strings"
@@ -671,7 +672,7 @@ func TestApmImportLabels(t *testing.T) {
 	epic := asObject(t, runPic(t, bin, root, home, "work-item", "show", result["epic_id"].(string)))
 	labels := epic["labels"].([]any)
 	if len(labels) != 2 || labels[0] != "import:" && labels[1] != "milestone:v1.0" && labels[0] != "milestone:v1.0" && labels[1] != "import:" {
-		if !(len(labels) == 2 && contains([]string{labels[0].(string), labels[1].(string)}, "milestone:v1.0") && strings.HasPrefix(altLabel(labels), "import:")) {
+		if !(len(labels) == 2 && store.Contains([]string{labels[0].(string), labels[1].(string)}, "milestone:v1.0") && strings.HasPrefix(altLabel(labels), "import:")) {
 			t.Fatalf("epic labels = %#v", labels)
 		}
 	}

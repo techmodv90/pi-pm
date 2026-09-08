@@ -2,6 +2,8 @@ package main
 
 import (
 	"database/sql"
+	"github.com/earendil-works/task-system/go-pic/internal/project"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"path/filepath"
 	"testing"
 )
@@ -22,7 +24,7 @@ func setupCorrectiveAggregate(t *testing.T) (bin, root, home, epicID, childID st
 
 func openCorrectiveDB(t *testing.T, root string) *sql.DB {
 	t.Helper()
-	db, err := openSQLite(filepath.Join(root, ".pi", "tasks.db"))
+	db, err := project.OpenSQLite(filepath.Join(root, ".pi", "tasks.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +148,7 @@ func TestCorrectiveExactlyOnce(t *testing.T) {
 	if links != 1 || requirements != 1 || bugs != 1 {
 		t.Fatalf("report did not link exactly one Bug: links=%d requirements=%d bugs=%d", links, requirements, bugs)
 	}
-	if _, err := db.Exec(`INSERT INTO work_item_corrective_bugs(verification_report_id,bug_work_item_id) VALUES(?,?)`, report["id"], "wi-"+shortID()); err == nil {
+	if _, err := db.Exec(`INSERT INTO work_item_corrective_bugs(verification_report_id,bug_work_item_id) VALUES(?,?)`, report["id"], "wi-"+store.ShortID()); err == nil {
 		t.Fatal("duplicate corrective-Bug link for the same report was accepted")
 	}
 	report2 := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", epicID, "blocked", "second release blocked", "--actor-role", "contractor"))

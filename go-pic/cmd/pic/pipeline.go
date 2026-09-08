@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
@@ -86,7 +87,7 @@ func prepareInstructionPackForFirstClaim(tx *sql.Tx, taskID string) error {
 	if err = tx.QueryRow(`SELECT COALESCE(MAX(version),0)+1 FROM work_item_instruction_packs WHERE work_item_id=?`, taskID).Scan(&version); err != nil {
 		return err
 	}
-	packID := "wip-" + shortID()
+	packID := "wip-" + store.ShortID()
 	if _, err = tx.Exec(`INSERT INTO work_item_instruction_packs(id,work_item_id,checkpoint_id,version,status,content_json,content_hash) VALUES(?,?,?,?,'inactive',?,?)`, packID, taskID, checkpointID, version, string(packContent), contentHash); err != nil {
 		return err
 	}
@@ -101,10 +102,10 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	if _, err := workitem.ByID(db, taskID); err != nil {
 		return err
 	}
-	if !contains(pipelineStages, stage) {
+	if !store.Contains(pipelineStages, stage) {
 		return fmt.Errorf("invalid pipeline stage: %s", stage)
 	}
-	opts, err := parseOptions(args[2:])
+	opts, err := store.ParseOptions(args[2:])
 	if err != nil {
 		return err
 	}
@@ -296,7 +297,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 				if changed, _ := res.RowsAffected(); changed != 1 {
 					return errors.New("lean claim rejected: Work Item is already claimed or closed")
 				}
-				if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,actor_model,summary) VALUES(?,?,'claimed','contractor',?,?)`, "wie-"+shortID(), taskID, claimant, "lean claim: worker input is the stored description verbatim"); err != nil {
+				if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,actor_model,summary) VALUES(?,?,'claimed','contractor',?,?)`, "wie-"+store.ShortID(), taskID, claimant, "lean claim: worker input is the stored description verbatim"); err != nil {
 					return err
 				}
 			}
@@ -417,14 +418,14 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 			return fmt.Errorf("autofix cycle limit reached (%d attempts for the unchanged active instruction pack); owner action is required", maxAutomaticAutofixAttempts)
 		}
 	}
-	id, token := "pr-"+shortID(), "lease-"+shortID()
+	id, token := "pr-"+store.ShortID(), "lease-"+store.ShortID()
 	if _, err = tx.Exec(`INSERT INTO pipeline_runs(id,task_id,stage,attempt,status,lease_token,lease_expires_at,instruction_pack_id,instruction_pack_version,instruction_pack_hash,agent_model,environment_fingerprint,base_commit,candidate_run_id,candidate_patch_hash,review_fix_cycle,profile_version,profile_hash) VALUES(?,?,?,?, 'claimed', ?, datetime('now', ?),?,?,?,?,?,?,?,?,?,?,?)`, id, taskID, stage, attempt, token, fmt.Sprintf("+%d seconds", leaseSeconds), packID, packVersion, packHash, opts["agent-model"], opts["environment-fingerprint"], opts["base-commit"], candidateRunID, candidatePatchHash, reviewFixCycle, profileVersion, profileHash); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, id)
+	return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, id)
 }
 
 func workflowPipelineCircuitReset(db *sql.DB, args []string) error {
@@ -432,7 +433,7 @@ func workflowPipelineCircuitReset(db *sql.DB, args []string) error {
 		return errors.New("pipeline-circuit-reset requires task id")
 	}
 	taskID := args[0]
-	opts, err := parseOptions(args[1:])
+	opts, err := store.ParseOptions(args[1:])
 	if err != nil {
 		return err
 	}
@@ -442,7 +443,7 @@ func workflowPipelineCircuitReset(db *sql.DB, args []string) error {
 	if opts["reason"] == "" {
 		return errors.New("pipeline-circuit-reset requires --reason")
 	}
-	if !contains([]string{"contract", "environment", "runner", "artifact"}, opts["change-type"]) {
+	if !store.Contains([]string{"contract", "environment", "runner", "artifact"}, opts["change-type"]) {
 		return errors.New("pipeline-circuit-reset requires --change-type contract|environment|runner|artifact")
 	}
 	var evidence map[string]any
@@ -459,14 +460,14 @@ func workflowPipelineCircuitReset(db *sql.DB, args []string) error {
 	// one. A failed claim rolls back its freshly generated TIP, so a deadlock can
 	// persist with zero active packs (limiter blocks the claim that would create
 	// one); fall back to the latest inactive pack to keep reset reachable.
-	pack, err := queryOne(tx, `SELECT * FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, taskID)
+	pack, err := store.QueryOne(tx, `SELECT * FROM work_item_instruction_packs WHERE work_item_id=? AND status='active'`, taskID)
 	if err != nil {
-		pack, err = queryOne(tx, `SELECT * FROM work_item_instruction_packs WHERE work_item_id=? ORDER BY version DESC LIMIT 1`, taskID)
+		pack, err = store.QueryOne(tx, `SELECT * FROM work_item_instruction_packs WHERE work_item_id=? ORDER BY version DESC LIMIT 1`, taskID)
 		if err != nil {
 			return errors.New("pipeline circuit reset requires an existing instruction pack")
 		}
 	}
-	snapshotHash := persistedText(pack["content_hash"])
+	snapshotHash := store.PersistedText(pack["content_hash"])
 	if snapshotHash == "" {
 		return errors.New("pipeline circuit reset requires an instruction pack hash")
 	}
@@ -487,7 +488,7 @@ func workflowPipelineCircuitReset(db *sql.DB, args []string) error {
 	if err = tx.QueryRow(`SELECT attempt FROM pipeline_runs WHERE task_id=? AND stage='worker' AND status IN ('failed','blocked','cancelled','expired') ORDER BY attempt DESC LIMIT 1`, taskID).Scan(&attempt); err != nil {
 		return errors.New("pipeline circuit reset requires a terminal worker attempt")
 	}
-	id := "wie-" + shortID()
+	id := "wie-" + store.ShortID()
 	decisionMetadata := map[string]any{"after_attempt": attempt, "change_type": opts["change-type"], "changed_fingerprint": changedFingerprint, "evidence": evidence, "reason": opts["reason"]}
 	metadataJSON, _ := json.Marshal(decisionMetadata)
 	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,'pipeline_circuit_reset','owner',?,?)`, id, taskID, opts["reason"], string(metadataJSON)); err != nil {
@@ -499,14 +500,14 @@ func workflowPipelineCircuitReset(db *sql.DB, args []string) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return outputOne(db, `SELECT * FROM work_item_events WHERE id=?`, id)
+	return store.OutputOne(db, `SELECT * FROM work_item_events WHERE id=?`, id)
 }
 
 func workflowPipelineBind(db *sql.DB, args []string) error {
 	if len(args) < 3 {
 		return errors.New("pipeline-bind requires run id, lease token, and subagent run id")
 	}
-	opts, err := parseOptions(args[3:])
+	opts, err := store.ParseOptions(args[3:])
 	if err != nil {
 		return err
 	}
@@ -529,7 +530,7 @@ func workflowPipelineBind(db *sql.DB, args []string) error {
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return errors.New("pipeline bind rejected: stale or invalid lease")
 	}
-	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+	return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
 }
 
 func workflowPipelineRenew(db *sql.DB, args []string) error {
@@ -543,7 +544,7 @@ func workflowPipelineRenew(db *sql.DB, args []string) error {
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return errors.New("pipeline renewal rejected: stale or invalid lease")
 	}
-	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+	return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
 }
 
 func workflowPipelineModel(db *sql.DB, args []string) error {
@@ -557,7 +558,7 @@ func workflowPipelineModel(db *sql.DB, args []string) error {
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return errors.New("pipeline model update rejected: stale or invalid lease")
 	}
-	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+	return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
 }
 
 // Escalation persistence (GAP-138): the scheduler saves one structured escalation
@@ -569,7 +570,7 @@ func workflowEscalationSave(db *sql.DB, args []string) error {
 		return errors.New("usage: pic workflow escalation-save <task-id> --pipeline-run-id <id> --report-json <json>")
 	}
 	taskID := args[0]
-	opts, err := parseOptions(args[1:])
+	opts, err := store.ParseOptions(args[1:])
 	if err != nil || opts["pipeline-run-id"] == "" || opts["report-json"] == "" {
 		return errors.New("escalation-save requires --pipeline-run-id and --report-json")
 	}
@@ -597,8 +598,8 @@ func workflowEscalationSave(db *sql.DB, args []string) error {
 	if err = tx.QueryRow(query, taskID, opts["pipeline-run-id"]).Scan(&packID, &packVersion, &packHash); err != nil {
 		return errors.New("escalation requires an active worker run bound to the Work Item TIP")
 	}
-	id := "wies-" + shortID()
-	if _, err = tx.Exec(`INSERT INTO work_item_escalations(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,level,status,report_json) VALUES(?,?,?,?,?,?,?,'open',?)`, id, taskID, opts["pipeline-run-id"], packID, packVersion, packHash, level, normalizeJSONText(opts["report-json"])); err != nil {
+	id := "wies-" + store.ShortID()
+	if _, err = tx.Exec(`INSERT INTO work_item_escalations(id,work_item_id,pipeline_run_id,instruction_pack_id,instruction_pack_version,instruction_pack_hash,level,status,report_json) VALUES(?,?,?,?,?,?,?,'open',?)`, id, taskID, opts["pipeline-run-id"], packID, packVersion, packHash, level, store.NormalizeJSONText(opts["report-json"])); err != nil {
 		return err
 	}
 	result, err := tx.Exec(`UPDATE pipeline_runs SET status='blocked',error=?,updated_at=datetime('now'),completed_at=datetime('now') WHERE id=? AND status IN ('claimed','running')`, "escalation: "+level, opts["pipeline-run-id"])
@@ -611,13 +612,13 @@ func workflowEscalationSave(db *sql.DB, args []string) error {
 	if _, err = tx.Exec(`UPDATE work_items SET status='open',claimed_at='',claimed_by='' WHERE id=? AND status='in_progress'`, taskID); err != nil {
 		return err
 	}
-	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,'worker_escalated','worker',?,?)`, "wie-"+shortID(), taskID, "worker escalated "+level+" on TIP "+packID, normalizeJSONText(opts["report-json"])); err != nil {
+	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,'worker_escalated','worker',?,?)`, "wie-"+store.ShortID(), taskID, "worker escalated "+level+" on TIP "+packID, store.NormalizeJSONText(opts["report-json"])); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return outputOne(db, `SELECT * FROM work_item_escalations WHERE id=?`, id)
+	return store.OutputOne(db, `SELECT * FROM work_item_escalations WHERE id=?`, id)
 }
 
 func workflowEscalationResolve(db *sql.DB, args []string) error {
@@ -625,7 +626,7 @@ func workflowEscalationResolve(db *sql.DB, args []string) error {
 		return errors.New("usage: pic workflow escalation-resolve <task-id> <escalation-id> <resolution-json> --actor-role contractor")
 	}
 	taskID, escalationID := args[0], args[1]
-	opts, err := parseOptions(args[3:])
+	opts, err := store.ParseOptions(args[3:])
 	if err != nil || workitem.ValidateWorkflowActor(opts["actor-role"], "contractor") != nil {
 		return errors.New("escalation resolution requires actor_role=contractor")
 	}
@@ -642,30 +643,30 @@ func workflowEscalationResolve(db *sql.DB, args []string) error {
 	if err = tx.QueryRow(`SELECT instruction_pack_id FROM work_item_escalations WHERE id=? AND work_item_id=? AND status='open'`, escalationID, taskID).Scan(&packID); err != nil {
 		return errors.New("escalation resolution requires an open escalation for this Work Item")
 	}
-	result, err := tx.Exec(`UPDATE work_item_escalations SET status='resolved',resolution_json=?,resolved_by=?,resolved_at=datetime('now') WHERE id=? AND status='open'`, normalizeJSONText(args[2]), opts["actor-role"], escalationID)
+	result, err := tx.Exec(`UPDATE work_item_escalations SET status='resolved',resolution_json=?,resolved_by=?,resolved_at=datetime('now') WHERE id=? AND status='open'`, store.NormalizeJSONText(args[2]), opts["actor-role"], escalationID)
 	if err != nil {
 		return err
 	}
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return errors.New("escalation resolution rejected: already resolved")
 	}
-	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,'escalation_resolved','contractor',?,?)`, "wie-"+shortID(), taskID, "escalation "+escalationID+" resolved on TIP "+packID, normalizeJSONText(args[2])); err != nil {
+	if _, err = tx.Exec(`INSERT INTO work_item_events(id,work_item_id,event_type,actor_role,summary,payload_json) VALUES(?,?,'escalation_resolved','contractor',?,?)`, "wie-"+store.ShortID(), taskID, "escalation "+escalationID+" resolved on TIP "+packID, store.NormalizeJSONText(args[2])); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return outputOne(db, `SELECT * FROM work_item_escalations WHERE id=?`, escalationID)
+	return store.OutputOne(db, `SELECT * FROM work_item_escalations WHERE id=?`, escalationID)
 }
 
 func workflowPipelineComplete(db *sql.DB, args []string) error {
 	if len(args) < 3 {
 		return errors.New("pipeline-complete requires run id, lease token, and status")
 	}
-	if !contains(pipelineTerminalStatuses, args[2]) {
+	if !store.Contains(pipelineTerminalStatuses, args[2]) {
 		return fmt.Errorf("invalid pipeline terminal status: %s", args[2])
 	}
-	opts, err := parseOptions(args[3:])
+	opts, err := store.ParseOptions(args[3:])
 	if err != nil {
 		return err
 	}
@@ -679,14 +680,14 @@ func workflowPipelineComplete(db *sql.DB, args []string) error {
 		return err
 	}
 	defer tx.Rollback()
-	result, err := tx.Exec(`UPDATE pipeline_runs SET status=?,result_json=?,error=?,updated_at=datetime('now'),completed_at=datetime('now') WHERE id=? AND lease_token=? AND status IN (`+currentStatuses+`) AND NOT (status='completed' AND stage='review') AND datetime(lease_expires_at)>datetime('now')`, args[2], normalizeJSONText(opts["result-json"]), opts["error"], args[0], args[1])
+	result, err := tx.Exec(`UPDATE pipeline_runs SET status=?,result_json=?,error=?,updated_at=datetime('now'),completed_at=datetime('now') WHERE id=? AND lease_token=? AND status IN (`+currentStatuses+`) AND NOT (status='completed' AND stage='review') AND datetime(lease_expires_at)>datetime('now')`, args[2], store.NormalizeJSONText(opts["result-json"]), opts["error"], args[0], args[1])
 	if err != nil {
 		return err
 	}
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return errors.New("pipeline completion rejected: stale or invalid lease")
 	}
-	if contains([]string{"failed", "blocked", "cancelled"}, args[2]) {
+	if store.Contains([]string{"failed", "blocked", "cancelled"}, args[2]) {
 		if _, err = tx.Exec(`UPDATE work_items SET status='open',claimed_at='',claimed_by='' WHERE id=(SELECT task_id FROM pipeline_runs WHERE id=?) AND status='in_progress' AND NOT EXISTS (SELECT 1 FROM pipeline_runs active WHERE active.task_id=work_items.id AND active.status IN ('claimed','running'))`, args[0]); err != nil {
 			return err
 		}
@@ -694,7 +695,7 @@ func workflowPipelineComplete(db *sql.DB, args []string) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+	return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
 }
 
 // Round-cap blocking constraint: when a bounded review-fix loop exhausts its
@@ -708,7 +709,7 @@ func workflowReviewFixBlock(db *sql.DB, args []string) error {
 	if len(args) < 1 {
 		return errors.New("usage: pic workflow review-fix-block <task-id> [--summary <text>]")
 	}
-	opts, err := parseOptions(args[1:])
+	opts, err := store.ParseOptions(args[1:])
 	if err != nil {
 		return err
 	}
@@ -734,13 +735,13 @@ func workflowReviewFixBlock(db *sql.DB, args []string) error {
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return errors.New("review-fix block rejected: completed failed review not mutable")
 	}
-	if err = addEvent(tx, taskID, "review_fix_round_cap", "orchestrator", summary, map[string]any{"pipeline_run_id": reviewID, "owner_action_required": true, "summary": summary}); err != nil {
+	if err = store.AddEvent(tx, taskID, "review_fix_round_cap", "orchestrator", summary, map[string]any{"pipeline_run_id": reviewID, "owner_action_required": true, "summary": summary}); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, reviewID)
+	return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, reviewID)
 }
 
 // Owner review-decision constraint: a failed review carrying
@@ -756,7 +757,7 @@ func workflowReviewDecision(db *sql.DB, args []string) error {
 		return errors.New("usage: pic workflow review-decision <task-id> <review-run-id> fix --notes <text> --actor-role owner")
 	}
 	taskID, reviewID, decision := args[0], args[1], args[2]
-	opts, err := parseOptions(args[3:])
+	opts, err := store.ParseOptions(args[3:])
 	if err != nil {
 		return err
 	}
@@ -793,13 +794,13 @@ func workflowReviewDecision(db *sql.DB, args []string) error {
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return errors.New("review-decision rejected: completed failed review not mutable")
 	}
-	if err = addEvent(tx, taskID, "owner_review_decision", "owner", opts["notes"], map[string]any{"pipeline_run_id": reviewID, "decision": decision, "candidate_run_id": candidateRunID, "after_attempt": candidateAttempt}); err != nil {
+	if err = store.AddEvent(tx, taskID, "owner_review_decision", "owner", opts["notes"], map[string]any{"pipeline_run_id": reviewID, "decision": decision, "candidate_run_id": candidateRunID, "after_attempt": candidateAttempt}); err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, reviewID)
+	return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, reviewID)
 }
 
 func workflowPipelineCheckpoint(db *sql.DB, args []string) error {
@@ -810,7 +811,7 @@ func workflowPipelineCheckpoint(db *sql.DB, args []string) error {
 	if column == "" {
 		return fmt.Errorf("invalid pipeline checkpoint: %s", args[2])
 	}
-	opts, err := parseOptions(args[3:])
+	opts, err := store.ParseOptions(args[3:])
 	if err != nil {
 		return err
 	}
@@ -822,14 +823,14 @@ func workflowPipelineCheckpoint(db *sql.DB, args []string) error {
 			return updateErr
 		}
 		if changed, _ := result.RowsAffected(); changed == 1 {
-			return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+			return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
 		}
 		var terminal int
 		if err := db.QueryRow(`SELECT EXISTS(SELECT 1 FROM pipeline_runs WHERE id=? AND status IN ('completed','failed','blocked','cancelled','expired') AND advanced_at<>'')`, args[0]).Scan(&terminal); err != nil {
 			return err
 		}
 		if terminal != 0 {
-			return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+			return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
 		}
 	}
 	statePredicate := map[string]string{
@@ -837,7 +838,7 @@ func workflowPipelineCheckpoint(db *sql.DB, args []string) error {
 		"advanced":       `status IN ('completed','failed','blocked','cancelled','expired')`,
 		"integrated":     `stage IN ('worker','autofix') AND status='completed' AND EXISTS(SELECT 1 FROM pipeline_runs review WHERE review.task_id=pipeline_runs.task_id AND review.stage='review' AND review.status='completed' AND json_valid(review.result_json) AND json_extract(review.result_json,'$.review_status')='passed' AND json_extract(review.result_json,'$.candidate_run_id')=pipeline_runs.id AND json_extract(review.result_json,'$.candidate_patch_hash')=pipeline_runs.integrated_patch_hash)`,
 	}[args[2]]
-	if ok, checkErr := rowExists(db, `SELECT 1 FROM pipeline_runs WHERE id=? AND lease_token=? AND `+statePredicate, args[0], args[1]); checkErr != nil {
+	if ok, checkErr := store.RowExists(db, `SELECT 1 FROM pipeline_runs WHERE id=? AND lease_token=? AND `+statePredicate, args[0], args[1]); checkErr != nil {
 		return checkErr
 	} else if !ok {
 		return errors.New("pipeline checkpoint rejected: invalid stage, status, lease, or review authority")
@@ -937,7 +938,7 @@ func workflowPipelineCheckpoint(db *sql.DB, args []string) error {
 	if changed, _ := result.RowsAffected(); changed != 1 {
 		return errors.New("pipeline checkpoint rejected: stale, invalid, or already recorded")
 	}
-	return outputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
+	return store.OutputOne(db, `SELECT * FROM pipeline_runs WHERE id=?`, args[0])
 }
 
 func workflowPipelinePending(db *sql.DB, _ []string) error {
@@ -957,14 +958,14 @@ func workflowPipelinePending(db *sql.DB, _ []string) error {
 	)`); err != nil {
 		return err
 	}
-	rows, err := queryMaps(tx, `SELECT * FROM pipeline_runs WHERE status IN ('completed','failed','blocked','expired') AND advanced_at='' ORDER BY rowid`)
+	rows, err := store.QueryMaps(tx, `SELECT * FROM pipeline_runs WHERE status IN ('completed','failed','blocked','expired') AND advanced_at='' ORDER BY rowid`)
 	if err != nil {
 		return err
 	}
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, rows)
+	store.WriteJSON(os.Stdout, rows)
 	return nil
 }
 
@@ -987,11 +988,11 @@ func workflowPipelineActive(db *sql.DB, _ []string) error {
 	if err = tx.Commit(); err != nil {
 		return err
 	}
-	rows, err := queryMaps(db, `SELECT * FROM pipeline_runs WHERE status IN ('claimed','running') ORDER BY rowid`)
+	rows, err := store.QueryMaps(db, `SELECT * FROM pipeline_runs WHERE status IN ('claimed','running') ORDER BY rowid`)
 	if err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, rows)
+	store.WriteJSON(os.Stdout, rows)
 	return nil
 }
 
@@ -1047,10 +1048,10 @@ func workflowPipelineGroup(db *sql.DB, args []string) error {
 	if len(args) < 1 {
 		return errors.New("pipeline-group requires subagent run id")
 	}
-	rows, err := queryMaps(db, `SELECT * FROM pipeline_runs WHERE subagent_run_id=? ORDER BY child_index`, args[0])
+	rows, err := store.QueryMaps(db, `SELECT * FROM pipeline_runs WHERE subagent_run_id=? ORDER BY child_index`, args[0])
 	if err != nil {
 		return err
 	}
-	writeJSON(os.Stdout, rows)
+	store.WriteJSON(os.Stdout, rows)
 	return nil
 }

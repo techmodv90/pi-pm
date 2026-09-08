@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 	"os"
 	"regexp"
@@ -160,7 +161,7 @@ func parsePromotionEvidence(payload []byte) (*promotionEvidence, error) {
 }
 
 func promotionRunCurrent(ev *promotionRunEvidence, now time.Time, maxAge time.Duration) bool {
-	if ev == nil || ev.ID == "" || ev.ArtifactID == "" || !contains(promotionOutcomes, ev.Outcome) {
+	if ev == nil || ev.ID == "" || ev.ArtifactID == "" || !store.Contains(promotionOutcomes, ev.Outcome) {
 		return false
 	}
 	if ev.SupersededAt != "" {
@@ -356,13 +357,13 @@ func workflowProfilePromotionEvaluate(db *sql.DB, args []string) error {
 		return errors.New("profile-promotion-evaluate requires work item id and profile name")
 	}
 	workItemID, profileName := args[0], args[1]
-	if !contains(lifecycleProfileNames, profileName) {
+	if !store.Contains(lifecycleProfileNames, profileName) {
 		return fmt.Errorf("invalid reusable profile name %q", profileName)
 	}
 	if _, err := workitem.ByID(db, workItemID); err != nil {
 		return err
 	}
-	opts, err := parseOptions(args[2:])
+	opts, err := store.ParseOptions(args[2:])
 	if err != nil {
 		return err
 	}
@@ -396,7 +397,7 @@ func workflowProfilePromotionEvaluate(db *sql.DB, args []string) error {
 	if !dec.Eligible {
 		return promotionRejectError(workItemID, profileName, dec)
 	}
-	writeJSON(os.Stdout, map[string]any{"eligible": true, "profile_id": profileID, "profile_name": profileName, "work_item_id": workItemID, "reconciled_lifecycle": ev.Lifecycle})
+	store.WriteJSON(os.Stdout, map[string]any{"eligible": true, "profile_id": profileID, "profile_name": profileName, "work_item_id": workItemID, "reconciled_lifecycle": ev.Lifecycle})
 	return nil
 }
 
