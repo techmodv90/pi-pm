@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"github.com/earendil-works/task-system/go-pic/internal/acceptance"
+	"github.com/earendil-works/task-system/go-pic/internal/apm"
 	"github.com/earendil-works/task-system/go-pic/internal/profile"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
@@ -77,7 +78,7 @@ func cmdWorkflow(args []string) error {
 	case "profile-promotion-evaluate":
 		return acceptance.ProfilePromotionEvaluate(db, rest)
 	case "import-apm":
-		return cmdWorkflowImportApm(db, rest)
+		return apm.Import(db, rest)
 	default:
 		return fmt.Errorf("unknown workflow subcommand: %s", args[0])
 	}

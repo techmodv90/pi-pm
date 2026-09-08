@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/earendil-works/task-system/go-pic/internal/apm"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"os"
 	"path/filepath"
@@ -247,7 +248,7 @@ func writeApmProjectWithTasks(t *testing.T, tasksMD string) (bin string, root st
 }
 
 func TestApmImportFixture(t *testing.T) {
-	doc, err := parseApmTasksMD(validTasksMD)
+	doc, err := apm.ParseTasksMD(validTasksMD)
 	if err != nil {
 		t.Fatalf("parse valid fixture: %v", err)
 	}
@@ -266,7 +267,7 @@ func TestApmImportFixture(t *testing.T) {
 	if len(doc.ScenarioUS) != 4 {
 		t.Fatalf("scenario map US count = %d, want 4", len(doc.ScenarioUS))
 	}
-	byID := map[string]apmTask{}
+	byID := map[string]apm.Task{}
 	for _, task := range doc.Tasks {
 		byID[task.TID] = task
 	}
@@ -323,11 +324,11 @@ func TestApmImportFixture(t *testing.T) {
 }
 
 func TestApmImportRuleD(t *testing.T) {
-	base, err := parseApmTasksMD(validTasksMD)
+	base, err := apm.ParseTasksMD(validTasksMD)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if diffs := validateApmTasks(base); len(diffs) != 0 {
+	if diffs := apm.ValidateTasks(base); len(diffs) != 0 {
 		t.Fatalf("valid fixture discrepancies = %v", diffs)
 	}
 
@@ -373,11 +374,11 @@ func TestApmImportRuleD(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			doc, err := parseApmTasksMD(tc.mutate(validTasksMD))
+			doc, err := apm.ParseTasksMD(tc.mutate(validTasksMD))
 			if err != nil {
 				t.Fatalf("parse corrupted fixture: %v", err)
 			}
-			diffs := validateApmTasks(doc)
+			diffs := apm.ValidateTasks(doc)
 			if len(diffs) == 0 {
 				t.Fatalf("expected discrepancies, got none")
 			}
