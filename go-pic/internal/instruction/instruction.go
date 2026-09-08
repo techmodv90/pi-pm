@@ -1,22 +1,22 @@
-package main
+package instruction
 
 import (
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+
 	"github.com/earendil-works/task-system/go-pic/internal/acceptance"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
-	"github.com/earendil-works/task-system/go-pic/internal/work-item"
-	"os"
-
 	"github.com/earendil-works/task-system/go-pic/internal/tip"
+	"github.com/earendil-works/task-system/go-pic/internal/work-item"
 )
 
 // workflowInstructionPackSave parses the CLI request and delegates persistence
 // to the tip package; the CLI remains the only lifecycle mutation surface.
-func workflowInstructionPackSave(db *sql.DB, args []string) error {
+func Save(db *sql.DB, args []string) error {
 	if len(args) < 1 {
 		return errors.New("instruction-pack-save requires Work Item id")
 	}
@@ -45,7 +45,7 @@ func workflowInstructionPackSave(db *sql.DB, args []string) error {
 	return nil
 }
 
-func workflowInstructionPackRender(db *sql.DB, args []string) error {
+func Render(db *sql.DB, args []string) error {
 	if len(args) < 1 {
 		return errors.New("instruction-pack-render requires Work Item id")
 	}
@@ -60,9 +60,14 @@ func workflowInstructionPackRender(db *sql.DB, args []string) error {
 	return err
 }
 
-func workflowInstructionPacks(db *sql.DB, args []string) error {
+func List(db *sql.DB, args []string) error {
 	if len(args) < 1 {
 		return errors.New("instruction-packs requires Work Item id")
 	}
-	return workflowList(db, args, `SELECT * FROM work_item_instruction_packs WHERE work_item_id=? ORDER BY version DESC`)
+	rows, err := store.QueryMaps(db, `SELECT * FROM work_item_instruction_packs WHERE work_item_id=? ORDER BY version DESC`, args[0])
+	if err != nil {
+		return err
+	}
+	store.WriteJSON(os.Stdout, rows)
+	return nil
 }

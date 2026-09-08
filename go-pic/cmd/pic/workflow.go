@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"github.com/earendil-works/task-system/go-pic/internal/acceptance"
 	"github.com/earendil-works/task-system/go-pic/internal/apm"
+	"github.com/earendil-works/task-system/go-pic/internal/instruction"
 	"github.com/earendil-works/task-system/go-pic/internal/pipeline"
 	"github.com/earendil-works/task-system/go-pic/internal/profile"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
@@ -29,11 +30,11 @@ func cmdWorkflow(args []string) error {
 	rest := args[1:]
 	switch args[0] {
 	case "instruction-pack-save":
-		return workflowInstructionPackSave(db, rest)
+		return instruction.Save(db, rest)
 	case "instruction-pack-render":
-		return workflowInstructionPackRender(db, rest)
+		return instruction.Render(db, rest)
 	case "instruction-packs":
-		return workflowInstructionPacks(db, rest)
+		return instruction.List(db, rest)
 	case "completion-save":
 		return workitem.CompletionSave(db, rest)
 	case "verifications":
