@@ -3479,7 +3479,17 @@ func validateRriTVerification(db *sql.DB, workItemID, aggregateStatus, content s
 	}
 	seen := map[string]bool{}
 	for _, scenario := range report.Scenarios {
-		if scenario.ID == "" || scenario.Persona == "" || !validDimensions[scenario.Dimension] || !validStressAxes[scenario.StressAxis] || !approved[scenario.RequirementID] || scenario.Procedure == "" || scenario.Evidence == "" || !validResults[scenario.Result] {
+		if scenario.ID == "" || scenario.Persona == "" || !validDimensions[scenario.Dimension] || !validStressAxes[scenario.StressAxis] || scenario.Procedure == "" || scenario.Evidence == "" || !validResults[scenario.Result] {
+			return fmt.Errorf("invalid RRI-T scenario for requirement %s", scenario.RequirementID)
+		}
+		// Lean imported aggregates carry no requirements rows — their requirement
+		// truth lives in the companion spec files (.feature scenarios / the
+		// .tasks.md Nyquist mapping), re-read by the contractor at review time.
+		// The DB gate applies only to planning-era aggregates that have rows.
+		if scenario.RequirementID == "" {
+			return fmt.Errorf("RRI-T scenario %s requires a requirement_id", scenario.ID)
+		}
+		if len(approved) > 0 && !approved[scenario.RequirementID] {
 			return fmt.Errorf("invalid RRI-T scenario for requirement %s", scenario.RequirementID)
 		}
 		key := scenario.Dimension + "|" + scenario.StressAxis + "|" + scenario.RequirementID + "|" + scenario.ID
@@ -3499,7 +3509,13 @@ func validateRriTVerification(db *sql.DB, workItemID, aggregateStatus, content s
 			}
 			continue
 		}
-		if deferred.Persona == "" || !validDimensions[deferred.Dimension] || !validStressAxes[deferred.StressAxis] || !approved[deferred.RequirementID] || strings.TrimSpace(deferred.Reason) == "" {
+		if deferred.Persona == "" || !validDimensions[deferred.Dimension] || !validStressAxes[deferred.StressAxis] || strings.TrimSpace(deferred.Reason) == "" {
+			return fmt.Errorf("invalid RRI-T not_applicable disposition for requirement %s", deferred.RequirementID)
+		}
+		if deferred.RequirementID == "" {
+			return fmt.Errorf("RRI-T not_applicable disposition %s requires a requirement_id", deferred.ID)
+		}
+		if len(approved) > 0 && !approved[deferred.RequirementID] {
 			return fmt.Errorf("invalid RRI-T not_applicable disposition for requirement %s", deferred.RequirementID)
 		}
 		key := deferred.Dimension + "|" + deferred.StressAxis + "|" + deferred.RequirementID + "|" + deferred.ID

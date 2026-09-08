@@ -587,6 +587,17 @@ func applyCanonicalBackfills(db schemaDB) error {
 // converge on every open, not just at migration time. INSERT OR IGNORE keeps it
 // idempotent under the wir-migrated- id scheme.
 func applyConvergentDependencyBackfill(db schemaDB) error {
+	// Minimal schemas (hand-crafted fixtures recording migration versions
+	// without the tables those versions created) have nothing to project;
+	// skip instead of failing initDB on tables every migrated real database
+	// already has.
+	var tableCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('work_item_dependencies','work_item_gates','work_item_relations')`).Scan(&tableCount); err != nil {
+		return err
+	}
+	if tableCount < 3 {
+		return nil
+	}
 	if _, err := db.Exec(`INSERT OR IGNORE INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id,created_at)
 		SELECT 'wir-migrated-'||id,work_item_id,'blocks',depends_on_work_item_id,created_at FROM work_item_dependencies
 		UNION ALL

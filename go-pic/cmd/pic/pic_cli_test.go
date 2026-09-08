@@ -3873,6 +3873,43 @@ func TestRriTScenarioIdentityContract(t *testing.T) {
 	}
 }
 
+// TestRriTLeanAggregateSpecBoundScenario is the regression guard for the lean
+// import model: imported aggregates carry no requirements rows (their
+// requirement truth lives in the companion .feature/.tasks.md spec files, re-read
+// by the contractor at review time), so aggregate verification must accept
+// scenario requirement_ids bound to spec keys and must never consult an empty
+// requirements set. The DB gate still applies to planning-era aggregates that
+// have requirement rows.
+func TestRriTLeanAggregateSpecBoundScenario(t *testing.T) {
+	bin := buildPic(t)
+	root, home := initProject(t, bin)
+	epica := asObject(t, runPic(t, bin, root, home, "work-item", "create", "epic", "Lean Epic"))
+	id := epica["id"].(string)
+	child := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Done lean child", "--parent", id))
+	runPic(t, bin, root, home, "work-item", "status", child["id"].(string), "done")
+
+	// No requirements rows exist for this aggregate; the scenario binds to the
+	// spec-file requirement key from the Nyquist mapping table instead.
+	scenarios := `{"methodology":"rri-t","personas":["End User"],"scenarios":[
+		{"id":"SC-1","persona":"End User","dimension":"D1","stress_axis":"TIME","requirement_id":"R01","procedure":"Save an artifact and read the projected file","remediation_hint":"assert bytes"}]}`
+	runPic(t, bin, root, home, "work-item", "artifact-save", id, "rri_t_scenarios", scenarios)
+
+	graded := `{"scenarios":[
+		{"id":"SC-1","persona":"End User","dimension":"D1","stress_axis":"TIME","requirement_id":"R01","procedure":"Save an artifact and read the projected file","evidence":"TestArtifactSaveProjectsAllPlanningStages passed","result":"PASS"}]}`
+	report := asObject(t, runPic(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "spec-bound lean outcome verified", "--actor-role", "contractor", "--rri-t-json", graded))
+	if report["status"] != "passed" {
+		t.Fatalf("lean spec-bound scenario rejected: %#v", report)
+	}
+
+	// An empty requirement_id is still invalid even on a lean aggregate: the
+	// scenario must name the spec requirement it grades.
+	emptyReq := `{"scenarios":[
+		{"id":"SC-2","persona":"End User","dimension":"D2","stress_axis":"DATA","requirement_id":"","procedure":"x","evidence":"ran","result":"PASS"}]}`
+	if out := runPicError(t, bin, root, home, "work-item", "aggregate-verify", id, "passed", "empty requirement", "--actor-role", "contractor", "--rri-t-json", emptyReq); !strings.Contains(out, "requires a requirement_id") {
+		t.Fatalf("empty requirement_id err = %s", out)
+	}
+}
+
 func TestWorkflowStatusNextActionsAndCheckpointDecide(t *testing.T) {
 	bin := buildPic(t)
 	root, home := initProject(t, bin)
@@ -4079,7 +4116,6 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 		{"descendant_labels", "label", "area:core"},
 		{"descendant_dependencies", "id", "wid-child"},
 		{"descendant_gates", "id", "wig-child"},
-		{"descendant_relations", "id", "wir-child"},
 		{"descendant_authorizations", "id", "wimpl-child"},
 		{"descendant_escalations", "id", "wiem-child"},
 		{"descendant_owner_decisions", "id", "wiod-child"},
@@ -4091,12 +4127,27 @@ func TestPlanningResetDryRunDoesNotMutate(t *testing.T) {
 	for _, expected := range descendantCascadeExpectations {
 		entries, ok := dry[expected.key].([]any)
 		if !ok || len(entries) != 1 {
-			t.Fatalf("dry-run %s = %#v", expected.key, dry[expected.key])
+			t.Fatalf("dry-run %s = %#v", expected.key, entries)
 		}
 		entry := asObject(t, entries[0])
 		if fmt.Sprint(entry[expected.field]) != expected.value || fmt.Sprint(entry["work_item_id"]) != childID {
 			t.Fatalf("dry-run %s entry = %#v, want %s=%s owned by %s", expected.key, entry, expected.field, expected.value, childID)
 		}
+	}
+	// The convergent dependency backfill (applyConvergentDependencyBackfill) projects
+	// seeded gates rows into work_item_relations on every open, so the relations
+	// preview legitimately carries both the seeded relation and the migrated gates
+	// projection — that projection is by-design behavior, not reset leakage.
+	descendantRelations := dry["descendant_relations"].([]any)
+	if len(descendantRelations) != 2 {
+		t.Fatalf("dry-run descendant_relations = %#v, want seeded + migrated gates projection", descendantRelations)
+	}
+	relationIDs := map[string]bool{}
+	for _, raw := range descendantRelations {
+		relationIDs[fmt.Sprint(asObject(t, raw)["id"])] = true
+	}
+	if !relationIDs["wir-child"] || !relationIDs["wir-migrated-wig-child"] {
+		t.Fatalf("dry-run descendant_relations = %#v, want wir-child and wir-migrated-wig-child", descendantRelations)
 	}
 	// Materialization rows: the preview must enumerate exactly the set the reset
 	// retires — the target-rooted rows its own cleanup deletes (including the
