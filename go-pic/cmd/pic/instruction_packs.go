@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/acceptance"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
@@ -35,7 +36,7 @@ func workflowInstructionPackSave(db *sql.DB, args []string) error {
 		ContentJSON:        opts["content-json"],
 		RequirementIDs:     requirementIDs,
 		Activate:           opts["activate"] == "1" || opts["activate"] == "true",
-		ValidateAcceptance: validateGherkinSteps,
+		ValidateAcceptance: acceptance.ValidateGherkinSteps,
 	})
 	if err != nil {
 		return err

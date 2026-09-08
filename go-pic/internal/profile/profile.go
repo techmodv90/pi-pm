@@ -1,4 +1,9 @@
-package main
+package profile
+
+// Profile depth and lifecycle constants. The Plan profile selects the durable
+// planning stages for a Work Item, the Implement and QA profiles select the
+// execution stages. All profiles are persisted as version-bound rows resolved
+// exactly once at planning start and reused for every later claim.
 
 import (
 	"crypto/sha256"
@@ -6,20 +11,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+
+	"github.com/earendil-works/task-system/go-pic/internal/pipeline"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
-	"os"
 )
 
-// Profile depth and lifecycle constants. The Plan profile selects the durable
-// planning stages for a Work Item, the Implement and QA profiles select the
-// execution stages. All profiles are persisted as version-bound rows resolved
-// exactly once at planning start and reused for every later claim.
+var LifecycleNames = []string{"plan", "implement", "qa"}
 
-var lifecycleProfileNames = []string{"plan", "implement", "qa"}
-var validPlanningDepths = workitem.ValidPlanningDepths
+var ValidDepths = workitem.ValidPlanningDepths
 
-type workItemProfile struct {
+type ItemProfile struct {
 	Name          string
 	Version       int
 	PlanningDepth string
@@ -27,12 +30,12 @@ type workItemProfile struct {
 	ContentHash   string
 }
 
-func validPlanningDepth(depth string) bool {
+func ValidDepth(depth string) bool {
 	return workitem.ValidPlanningDepth(depth)
 }
 
 // lifecycleForStage maps a pipeline stage onto its lifecycle profile name.
-func lifecycleForStage(stage string) string {
+func LifecycleForStage(stage string) string {
 	switch stage {
 	case "scan", "rri", "vision", "blueprint", "contracts", "task_graph":
 		return "plan"
@@ -48,7 +51,7 @@ func lifecycleForStage(stage string) string {
 // and its persisted planning depth. RRI and Task Graph are always present;
 // Vision, Blueprint, and Contracts are only present for the depths that
 // require them.
-func planStagesForProfile(kind, parentID, depth string) []string {
+func PlanStagesForProfile(kind, parentID, depth string) []string {
 	if store.Contains([]string{"task", "bug", "chore"}, kind) && parentID == "" {
 		return []string{"scan", "rri", "task_graph"}
 	}
@@ -62,7 +65,7 @@ func planStagesForProfile(kind, parentID, depth string) []string {
 	}
 }
 
-func lifecycleStagesByName(name string, depth string, planStages []string) []string {
+func LifecycleStagesByName(name string, depth string, planStages []string) []string {
 	switch name {
 	case "implement":
 		return []string{"worker"}
@@ -73,18 +76,18 @@ func lifecycleStagesByName(name string, depth string, planStages []string) []str
 	}
 }
 
-func profileContentHash(name string, version int, depth string, stages []string) string {
+func ContentHash(name string, version int, depth string, stages []string) string {
 	data, _ := json.Marshal(map[string]any{"name": name, "version": version, "planning_depth": depth, "stages": stages})
 	return fmt.Sprintf("%x", sha256.Sum256(data))
 }
 
 // workItemDepthInfo returns the persisted kind, parent, and planning depth for
 // a Work Item, validating the depth value against the known set.
-func workItemDepthInfo(db store.Queryer, id string) (kind, parentID, depth string, err error) {
+func DepthInfo(db store.Queryer, id string) (kind, parentID, depth string, err error) {
 	if err = db.QueryRow(`SELECT type,COALESCE(parent_id,''),COALESCE(planning_depth,'full') FROM work_items WHERE id=?`, id).Scan(&kind, &parentID, &depth); err != nil {
 		return "", "", "", err
 	}
-	if !validPlanningDepth(depth) {
+	if !ValidDepth(depth) {
 		return "", "", "", fmt.Errorf("invalid persisted planning depth %q for Work Item %s", depth, id)
 	}
 	return kind, parentID, depth, nil
@@ -93,12 +96,12 @@ func workItemDepthInfo(db store.Queryer, id string) (kind, parentID, depth strin
 // computePlanStagesForWorkItem resolves the Plan profile stages for a Work Item
 // without mutating the database. It prefers a persisted profile and falls back
 // to deterministic type/depth resolution when no profile has been persisted yet.
-func computePlanStagesForWorkItem(db store.Queryer, id string) ([]string, string, int, string, error) {
-	kind, parentID, depth, err := workItemDepthInfo(db, id)
+func ComputePlanStages(db store.Queryer, id string) ([]string, string, int, string, error) {
+	kind, parentID, depth, err := DepthInfo(db, id)
 	if err != nil {
 		return nil, "", 0, "", err
 	}
-	stages := planStagesForProfile(kind, parentID, depth)
+	stages := PlanStagesForProfile(kind, parentID, depth)
 	var version int
 	var hash string
 	err = db.QueryRow(`SELECT profile_version,content_hash FROM work_item_profiles WHERE work_item_id=? AND profile_name='plan' AND profile_version=(SELECT COALESCE(MAX(profile_version),0) FROM work_item_profiles WHERE work_item_id=? AND profile_name='plan')`, id, id).Scan(&version, &hash)
@@ -117,14 +120,14 @@ func computePlanStagesForWorkItem(db store.Queryer, id string) ([]string, string
 // ensureWorkItemProfiles resolves the Plan, Implement, and QA profiles exactly
 // once for a Work Item and returns them by name. Existing profile rows are
 // reused so historical profile identity and lineage remain immutable.
-func ensureWorkItemProfiles(tx *sql.Tx, id string) (map[string]workItemProfile, error) {
-	kind, parentID, depth, err := workItemDepthInfo(tx, id)
+func Ensure(tx *sql.Tx, id string) (map[string]ItemProfile, error) {
+	kind, parentID, depth, err := DepthInfo(tx, id)
 	if err != nil {
 		return nil, err
 	}
-	planStages := planStagesForProfile(kind, parentID, depth)
-	profiles := map[string]workItemProfile{}
-	for _, name := range lifecycleProfileNames {
+	planStages := PlanStagesForProfile(kind, parentID, depth)
+	profiles := map[string]ItemProfile{}
+	for _, name := range LifecycleNames {
 		var version int
 		if err = tx.QueryRow(`SELECT COALESCE(MAX(profile_version),0) FROM work_item_profiles WHERE work_item_id=? AND profile_name=?`, id, name).Scan(&version); err != nil {
 			return nil, err
@@ -139,30 +142,30 @@ func ensureWorkItemProfiles(tx *sql.Tx, id string) (map[string]workItemProfile, 
 				return nil, fmt.Errorf("corrupt persisted %s profile for Work Item %s", name, id)
 			}
 			for _, stage := range stages {
-				if !store.Contains(pipelineStages, stage) {
+				if !store.Contains(pipeline.Stages, stage) {
 					return nil, fmt.Errorf("invalid stage %q in persisted %s profile for Work Item %s", stage, name, id)
 				}
 			}
-			profiles[name] = workItemProfile{Name: name, Version: version, PlanningDepth: storedDepth, Stages: stages, ContentHash: hash}
+			profiles[name] = ItemProfile{Name: name, Version: version, PlanningDepth: storedDepth, Stages: stages, ContentHash: hash}
 			continue
 		}
-		stages := lifecycleStagesByName(name, depth, planStages)
+		stages := LifecycleStagesByName(name, depth, planStages)
 		for _, stage := range stages {
-			if !store.Contains(pipelineStages, stage) {
+			if !store.Contains(pipeline.Stages, stage) {
 				return nil, fmt.Errorf("unknown pipeline stage %q in %s profile", stage, name)
 			}
 		}
-		profileHash := profileContentHash(name, version+1, depth, stages)
+		profileHash := ContentHash(name, version+1, depth, stages)
 		stagesJSON, _ := json.Marshal(stages)
 		if _, err = tx.Exec(`INSERT INTO work_item_profiles(id,work_item_id,profile_name,profile_version,planning_depth,stages_json,content_hash) VALUES(?,?,?,?,?,?,?)`, "wiprof-"+store.ShortID(), id, name, version+1, depth, string(stagesJSON), profileHash); err != nil {
 			return nil, err
 		}
-		profiles[name] = workItemProfile{Name: name, Version: version + 1, PlanningDepth: depth, Stages: stages, ContentHash: profileHash}
+		profiles[name] = ItemProfile{Name: name, Version: version + 1, PlanningDepth: depth, Stages: stages, ContentHash: profileHash}
 	}
 	return profiles, nil
 }
 
-func workflowProfileList(db *sql.DB, args []string) error {
+func ProfileList(db *sql.DB, args []string) error {
 	if len(args) < 1 {
 		return errors.New("workflow profile-list requires Work Item id")
 	}

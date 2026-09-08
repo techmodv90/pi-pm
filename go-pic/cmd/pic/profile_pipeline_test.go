@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/earendil-works/task-system/go-pic/internal/profile"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/schema"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
@@ -45,7 +46,7 @@ func TestProfileResolutionPersistsExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profiles, err := ensureWorkItemProfiles(tx, id)
+	profiles, err := profile.Ensure(tx, id)
 	if err != nil {
 		tx.Rollback()
 		t.Fatal(err)
@@ -53,7 +54,7 @@ func TestProfileResolutionPersistsExactlyOnce(t *testing.T) {
 	if err := tx.Commit(); err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range lifecycleProfileNames {
+	for _, name := range profile.LifecycleNames {
 		p, ok := profiles[name]
 		if !ok {
 			t.Fatalf("missing %s profile", name)
@@ -81,7 +82,7 @@ func TestProfileResolutionPersistsExactlyOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	again, err := ensureWorkItemProfiles(tx2, id)
+	again, err := profile.Ensure(tx2, id)
 	if err != nil {
 		tx2.Rollback()
 		t.Fatal(err)
@@ -125,7 +126,7 @@ func TestProfileResolutionRejectsUnknownDepth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, err = ensureWorkItemProfiles(tx, "wi-bad")
+	_, err = profile.Ensure(tx, "wi-bad")
 	if err == nil || !strings.Contains(err.Error(), "invalid persisted planning depth") {
 		tx.Rollback()
 		t.Fatalf("expected depth validation error, got %v", err)
@@ -157,7 +158,7 @@ func TestPlanningDepthSelectsAggregateStages(t *testing.T) {
 		if _, err := db.Exec(`INSERT INTO work_items(id,type,title,planning_depth) VALUES(?,?,?,?)`, id, "epic", depth, depth); err != nil {
 			t.Fatal(err)
 		}
-		stages, foundDepth, _, _, err := computePlanStagesForWorkItem(db, id)
+		stages, foundDepth, _, _, err := profile.ComputePlanStages(db, id)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -186,12 +187,12 @@ func TestPlanningDepthStandaloneIsFixedLeanProfile(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	for _, depth := range validPlanningDepths {
+	for _, depth := range profile.ValidDepths {
 		id := "wi-lean-" + depth
 		if _, err := db.Exec(`INSERT INTO work_items(id,type,title,planning_depth) VALUES(?,?,?,?)`, id, "task", depth, depth); err != nil {
 			t.Fatal(err)
 		}
-		stages, _, _, _, err := computePlanStagesForWorkItem(db, id)
+		stages, _, _, _, err := profile.ComputePlanStages(db, id)
 		if err != nil {
 			t.Fatal(err)
 		}

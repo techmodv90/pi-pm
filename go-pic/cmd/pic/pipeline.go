@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/pipeline"
+	"github.com/earendil-works/task-system/go-pic/internal/profile"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
@@ -15,7 +17,6 @@ import (
 	"strings"
 )
 
-var pipelineStages = []string{"scan", "rri", "vision", "blueprint", "contracts", "task_graph", "worker", "review", "autofix"}
 var pipelineTerminalStatuses = []string{"completed", "failed", "blocked", "cancelled"}
 
 const maxAutomaticWorkerAttempts = 3
@@ -102,7 +103,7 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	if _, err := workitem.ByID(db, taskID); err != nil {
 		return err
 	}
-	if !store.Contains(pipelineStages, stage) {
+	if !store.Contains(pipeline.Stages, stage) {
 		return fmt.Errorf("invalid pipeline stage: %s", stage)
 	}
 	opts, err := store.ParseOptions(args[2:])
@@ -146,11 +147,11 @@ func workflowPipelineClaim(db *sql.DB, args []string) error {
 	}
 	// Resolve the versioned Plan/Implement/QA profile exactly once at the first
 	// claim and bind this claim to the persisted profile version and hash.
-	lifecycle := lifecycleForStage(stage)
+	lifecycle := profile.LifecycleForStage(stage)
 	if lifecycle == "" {
 		return fmt.Errorf("invalid pipeline stage: %s", stage)
 	}
-	profiles, err := ensureWorkItemProfiles(tx, taskID)
+	profiles, err := profile.Ensure(tx, taskID)
 	if err != nil {
 		return fmt.Errorf("pipeline claim rejected: resolve lifecycle profiles: %w", err)
 	}

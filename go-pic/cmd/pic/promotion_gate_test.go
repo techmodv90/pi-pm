@@ -3,13 +3,15 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/earendil-works/task-system/go-pic/internal/acceptance"
+	"github.com/earendil-works/task-system/go-pic/internal/profile"
 	"strings"
 	"testing"
 	"time"
 )
 
-func promotionRun(id, artifact, outcome string, age time.Duration, superseded bool) *promotionRunEvidence {
-	ev := &promotionRunEvidence{
+func promotionRun(id, artifact, outcome string, age time.Duration, superseded bool) *acceptance.RunEvidence {
+	ev := &acceptance.RunEvidence{
 		ID:         id,
 		ArtifactID: artifact,
 		Outcome:    outcome,
@@ -21,27 +23,27 @@ func promotionRun(id, artifact, outcome string, age time.Duration, superseded bo
 	return ev
 }
 
-func promotionStage(stage string, success, failure *promotionRunEvidence) promotionStageEvidence {
-	return promotionStageEvidence{Stage: stage, Success: success, Failure: failure}
+func promotionStage(stage string, success, failure *acceptance.RunEvidence) acceptance.StageEvidence {
+	return acceptance.StageEvidence{Stage: stage, Success: success, Failure: failure}
 }
 
-func promotionCorrective(bugID string, duplicates []string, passed, partial, blocked, failed *promotionRunEvidence) promotionCorrectiveEvidence {
-	return promotionCorrectiveEvidence{
+func promotionCorrective(bugID string, duplicates []string, passed, partial, blocked, failed *acceptance.RunEvidence) acceptance.CorrectiveEvidence {
+	return acceptance.CorrectiveEvidence{
 		BugRunID: bugID, DuplicateBugIDs: duplicates,
 		Passed: passed, Partial: partial, Blocked: blocked, Failed: failed,
 	}
 }
 
-func promotionInvariant(key, red, green, review string) promotionInvariantEvidence {
-	return promotionInvariantEvidence{Key: key, RedID: red, GreenID: green, ReviewID: review}
+func promotionInvariant(key, red, green, review string) acceptance.InvariantEvidence {
+	return acceptance.InvariantEvidence{Key: key, RedID: red, GreenID: green, ReviewID: review}
 }
 
-func promotionLifecycle(passed, superseded bool) *promotionLifecycleEvidence {
+func promotionLifecycle(passed, superseded bool) *acceptance.LifecycleEvidence {
 	outcome := "blocked"
 	if passed {
 		outcome = "passed"
 	}
-	return &promotionLifecycleEvidence{
+	return &acceptance.LifecycleEvidence{
 		RunID: "pr-life-001", AggregateID: "wi-agg-001", CheckpointID: "chk-001",
 		ReportID: "wivr-001", MergeID: "merge-001", Outcome: outcome, Superseded: superseded,
 	}
@@ -49,17 +51,17 @@ func promotionLifecycle(passed, superseded bool) *promotionLifecycleEvidence {
 
 // completePromotionEvidence returns an evidence document that satisfies every
 // promotion category for the given candidate profile under the given latency.
-func completePromotionEvidence(profileID, hash string, stages, invariants []string) promotionEvidence {
-	stagesEv := make([]promotionStageEvidence, 0, len(stages))
+func completePromotionEvidence(profileID, hash string, stages, invariants []string) acceptance.Evidence {
+	stagesEv := make([]acceptance.StageEvidence, 0, len(stages))
 	for _, s := range stages {
 		stagesEv = append(stagesEv,
 			promotionStage(s, promotionRun("pr-"+s+"-pass", "art-"+s+"-pass", "passed", time.Hour, false), promotionRun("pr-"+s+"-fail", "art-"+s+"-fail", "failed", time.Hour, false)))
 	}
-	invEv := make([]promotionInvariantEvidence, 0, len(invariants))
+	invEv := make([]acceptance.InvariantEvidence, 0, len(invariants))
 	for _, k := range invariants {
 		invEv = append(invEv, promotionInvariant(k, "red-"+k, "green-"+k, "review-"+k))
 	}
-	return promotionEvidence{
+	return acceptance.Evidence{
 		ProfileID: profileID, ProfileContentHash: hash,
 		Stages: stagesEv,
 		Corrective: promotionCorrective("pr-bug-001", nil,
@@ -81,14 +83,14 @@ func TestPromotionGate(t *testing.T) {
 	invariants := []string{"REQ-PROMOTION-GATE", "REQ-PIPELINE-PROFILES"}
 
 	t.Run("parse failure is a hard rejection", func(t *testing.T) {
-		if _, err := parsePromotionEvidence([]byte("{not json")); err == nil {
+		if _, err := acceptance.ParseEvidence([]byte("{not json")); err == nil {
 			t.Fatal("expected parse failure for malformed payload")
 		}
 	})
 
 	t.Run("complete current evidence is eligible", func(t *testing.T) {
 		ev := completePromotionEvidence(profileID, hash, stages, invariants)
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if !dec.Eligible {
 			t.Fatalf("expected eligible, missing=%v rejected=%v", dec.Missing, dec.Rejected)
 		}
@@ -102,7 +104,7 @@ func TestPromotionGate(t *testing.T) {
 		for i := range ev.Invariants {
 			ev.Invariants[i].GreenID = ""
 		}
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected not eligible")
 		}
@@ -125,7 +127,7 @@ func TestPromotionGate(t *testing.T) {
 	t.Run("aggregate-only evidence is rejected", func(t *testing.T) {
 		ev := completePromotionEvidence(profileID, hash, stages, invariants)
 		ev.Stages = nil
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected aggregate-only evidence rejected")
 		}
@@ -142,7 +144,7 @@ func TestPromotionGate(t *testing.T) {
 
 	t.Run("mismatched-profile evidence is rejected", func(t *testing.T) {
 		ev := completePromotionEvidence(profileID, "wronghash", stages, invariants)
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected mismatched profile rejected")
 		}
@@ -164,7 +166,7 @@ func TestPromotionGate(t *testing.T) {
 			ev.Stages[i].Failure.SupersededAt = now.UTC().Format(time.RFC3339)
 		}
 		ev.Corrective.Passed.RecordedAt = now.Add(-10 * 24 * time.Hour).UTC().Format(time.RFC3339) // older than maxAge
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected stale evidence rejected")
 		}
@@ -184,7 +186,7 @@ func TestPromotionGate(t *testing.T) {
 		// A current-but-not-passed success run must not count as success-path
 		// evidence: set one included stage's success outcome to 'failed'.
 		ev.Stages[0].Success.Outcome = "failed"
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected a non-passed success run to block eligibility")
 		}
@@ -203,7 +205,7 @@ func TestPromotionGate(t *testing.T) {
 	t.Run("superseded report is rejected", func(t *testing.T) {
 		ev := completePromotionEvidence(profileID, hash, stages, invariants)
 		ev.Lifecycle = promotionLifecycle(true, true)
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected superseded report rejected")
 		}
@@ -221,7 +223,7 @@ func TestPromotionGate(t *testing.T) {
 	t.Run("corrective duplicates violate exactly-once", func(t *testing.T) {
 		ev := completePromotionEvidence(profileID, hash, stages, invariants)
 		ev.Corrective.DuplicateBugIDs = []string{"pr-bug-dup"}
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected exactly-once violation rejected")
 		}
@@ -238,8 +240,8 @@ func TestPromotionGate(t *testing.T) {
 
 	t.Run("incomplete gap-ledger reports missing per invariant", func(t *testing.T) {
 		ev := completePromotionEvidence(profileID, hash, stages, invariants)
-		ev.Invariants = []promotionInvariantEvidence{promotionInvariant("REQ-PRIVATE", "", "", "")} // unregistered key
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		ev.Invariants = []acceptance.InvariantEvidence{promotionInvariant("REQ-PRIVATE", "", "", "")} // unregistered key
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected not eligible")
 		}
@@ -257,7 +259,7 @@ func TestPromotionGate(t *testing.T) {
 	t.Run("lifecycle not passed blocks eligibility", func(t *testing.T) {
 		ev := completePromotionEvidence(profileID, hash, stages, invariants)
 		ev.Lifecycle = promotionLifecycle(false, false)
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected not eligible for unpassed lifecycle")
 		}
@@ -267,7 +269,7 @@ func TestPromotionGate(t *testing.T) {
 		ev := completePromotionEvidence(profileID, hash, stages, invariants)
 		ev.Lifecycle.RunID = "pr-life-001"
 		ev.Corrective.Blocked.RecordedAt = now.Add(2 * time.Hour).UTC().Format(time.RFC3339) // in the future
-		dec := evaluatePromotionEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
+		dec := acceptance.EvaluateEligibility(&ev, profileID, hash, stages, invariants, now, maxAge)
 		if dec.Eligible {
 			t.Fatal("expected future-dated evidence rejected")
 		}
@@ -284,7 +286,7 @@ func productionPromotionTestDB(t *testing.T) (*sql.DB, string, string, string, [
 	if err != nil {
 		t.Fatal(err)
 	}
-	profiles, err := ensureWorkItemProfiles(tx, id)
+	profiles, err := profile.Ensure(tx, id)
 	if err != nil {
 		tx.Rollback()
 		t.Fatal(err)
@@ -300,7 +302,7 @@ func productionPromotionTestDB(t *testing.T) (*sql.DB, string, string, string, [
 	return db, id, profileID, contentHash, plan.Stages
 }
 
-func productionPromotionEvidence(profileID, contentHash string, stages, invariants []string) promotionEvidence {
+func productionPromotionEvidence(profileID, contentHash string, stages, invariants []string) acceptance.Evidence {
 	return completePromotionEvidence(profileID, contentHash, stages, invariants)
 }
 
@@ -318,10 +320,10 @@ func TestPromotionGateProductionEntrypoint(t *testing.T) {
 		}
 	}
 	invariants := []string{"REQ-PROMOTION-GATE", "REQ-PIPELINE-PROFILES"}
-	registerInvariants := func(ev *promotionEvidence) {
-		ev.Invariants = []promotionInvariantEvidence{promotionInvariant("REQ-PROMOTION-GATE", "red-1", "green-1", "review-1"), promotionInvariant("REQ-PIPELINE-PROFILES", "red-2", "green-2", "review-2")}
+	registerInvariants := func(ev *acceptance.Evidence) {
+		ev.Invariants = []acceptance.InvariantEvidence{promotionInvariant("REQ-PROMOTION-GATE", "red-1", "green-1", "review-1"), promotionInvariant("REQ-PIPELINE-PROFILES", "red-2", "green-2", "review-2")}
 	}
-	markComplete := func() promotionEvidence {
+	markComplete := func() acceptance.Evidence {
 		ev := productionPromotionEvidence(profileID, contentHash, stages, invariants)
 		registerInvariants(&ev)
 		return ev
@@ -334,7 +336,7 @@ func TestPromotionGateProductionEntrypoint(t *testing.T) {
 		ev := markComplete()
 		ev.Lifecycle = promotionLifecycle(true, false) // synthetic — must be ignored
 		payload, _ := json.Marshal(ev)
-		err := workflowProfilePromotionEvaluate(db, []string{workItemID, "plan", "--evidence", string(payload)})
+		err := acceptance.ProfilePromotionEvaluate(db, []string{workItemID, "plan", "--evidence", string(payload)})
 		if err == nil || !strings.Contains(err.Error(), "lifecycle") {
 			t.Fatalf("expected lifecycle rejection without real aggregate verification, got %v", err)
 		}
@@ -342,7 +344,7 @@ func TestPromotionGateProductionEntrypoint(t *testing.T) {
 
 	// Parse failure is a hard rejection in the production flow.
 	t.Run("rejects malformed evidence payload", func(t *testing.T) {
-		err := workflowProfilePromotionEvaluate(db, []string{workItemID, "plan", "--evidence", "{not json"})
+		err := acceptance.ProfilePromotionEvaluate(db, []string{workItemID, "plan", "--evidence", "{not json"})
 		if err == nil || !strings.Contains(err.Error(), "parse failure") {
 			t.Fatalf("expected parse-failure rejection, got %v", err)
 		}
@@ -354,7 +356,7 @@ func TestPromotionGateProductionEntrypoint(t *testing.T) {
 		ev := markComplete()
 		ev.ProfileID = "wiprof-other"
 		payload, _ := json.Marshal(ev)
-		err := workflowProfilePromotionEvaluate(db, []string{workItemID, "plan", "--evidence", string(payload)})
+		err := acceptance.ProfilePromotionEvaluate(db, []string{workItemID, "plan", "--evidence", string(payload)})
 		if err == nil || !strings.Contains(err.Error(), "mismatched-profile") {
 			t.Fatalf("expected mismatched-profile rejection, got %v", err)
 		}
@@ -375,7 +377,7 @@ func TestPromotionGateProductionEntrypoint(t *testing.T) {
 		ev := markComplete()
 		ev.Lifecycle = nil // no caller-supplied lifecycle; reconciliation supplies it
 		payload, _ := json.Marshal(ev)
-		if err := workflowProfilePromotionEvaluate(db, []string{workItemID, "plan", "--evidence", string(payload)}); err != nil {
+		if err := acceptance.ProfilePromotionEvaluate(db, []string{workItemID, "plan", "--evidence", string(payload)}); err != nil {
 			t.Fatalf("expected eligible after real passed lifecycle, got %v", err)
 		}
 	})

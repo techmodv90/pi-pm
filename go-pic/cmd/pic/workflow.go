@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/acceptance"
+	"github.com/earendil-works/task-system/go-pic/internal/profile"
 	"github.com/earendil-works/task-system/go-pic/internal/project"
 	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"github.com/earendil-works/task-system/go-pic/internal/work-item"
@@ -71,9 +73,9 @@ func cmdWorkflow(args []string) error {
 	case "pipeline-pending":
 		return workflowPipelinePending(db, rest)
 	case "profile-list":
-		return workflowProfileList(db, rest)
+		return profile.ProfileList(db, rest)
 	case "profile-promotion-evaluate":
-		return workflowProfilePromotionEvaluate(db, rest)
+		return acceptance.ProfilePromotionEvaluate(db, rest)
 	case "import-apm":
 		return cmdWorkflowImportApm(db, rest)
 	default:
