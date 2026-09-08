@@ -633,6 +633,76 @@ func TestArtifactFileConflictBlocksSave(t *testing.T) {
 	}
 }
 
+// TestArtifactFileIntegrityCheck is the RED test for the on-demand integrity
+// check (Feature US5; Plan API Contract `pic work-item artifact-check`, NC-7
+// on-demand hash comparison): for every bound artifact_files row of the work
+// item, the check reports status ok when the file bytes hash to
+// content_sha256, drift (with its file_path) when they no longer do, and
+// missing when the bound file is absent. The artifact-check command is not
+// routed yet, so the first failure is the missing command.
+func TestArtifactFileIntegrityCheck(t *testing.T) {
+	bin := buildPic(t)
+	root, home, id := initArtifactFileProject(t, bin)
+
+	// Given: three bound artifact_files rows for the work item whose file
+	// bytes will be ok, drifted, and missing respectively; approvals follow
+	// the scan→rri→vision chain order so the stage gates stay satisfied.
+	okArtifact := saveArtifact(t, bin, root, home, id, "scan", "scan content")
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "scan", okArtifact["id"].(string), "accepted")
+	driftArtifact := saveArtifact(t, bin, root, home, id, "rri", "# RRI Report\n\nRequirement matrix follows.")
+	runPic(t, bin, root, home, "work-item", "artifact-approve", id, "rri", driftArtifact["id"].(string), "approved")
+	missingArtifact := saveArtifact(t, bin, root, home, id, "vision", validVisionArtifact)
+	okPath := okArtifact["file_path"].(string)
+	driftPath := driftArtifact["file_path"].(string)
+	missingPath := missingArtifact["file_path"].(string)
+	if okPath == "" || driftPath == "" || missingPath == "" {
+		t.Fatalf("save responses missing file_path: %v %v %v", okArtifact["file_path"], driftArtifact["file_path"], missingArtifact["file_path"])
+	}
+
+	// When: the rri file bytes drift from content_sha256 and the vision file
+	// is removed entirely; the scan file keeps its canonical bytes.
+	if err := os.WriteFile(driftPath, []byte("tampered bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(missingPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Then: artifact-check reports one entry per bound artifact with status
+	// ok | drift | missing per NC-7, and the untouched artifact passes.
+	report := asArray(t, runPic(t, bin, root, home, "work-item", "artifact-check", id))
+	if len(report) != 3 {
+		t.Fatalf("artifact-check returned %d entries, want 3: %#v", len(report), report)
+	}
+	entries := map[string]map[string]any{}
+	for _, item := range report {
+		row := asObject(t, item)
+		// NC-7 response shape: every entry must carry string artifact_id,
+		// file_path, and status fields; missing or non-string values fail.
+		artifactID, okID := row["artifact_id"].(string)
+		if !okID || artifactID == "" {
+			t.Fatalf("artifact-check entry missing string artifact_id: %#v", row)
+		}
+		entryPath, okPathField := row["file_path"].(string)
+		if !okPathField || entryPath == "" {
+			t.Fatalf("artifact-check entry %s missing string file_path: %#v", artifactID, row)
+		}
+		if _, okStatus := row["status"].(string); !okStatus {
+			t.Fatalf("artifact-check entry %s missing string status: %#v", artifactID, row)
+		}
+		entries[artifactID] = row
+	}
+	if row := entries[okArtifact["id"].(string)]; row == nil || row["status"] != "ok" || row["file_path"] != okPath {
+		t.Fatalf("scan artifact check = %#v, want status ok with file_path %s", row, okPath)
+	}
+	if row := entries[driftArtifact["id"].(string)]; row == nil || row["status"] != "drift" || row["file_path"] != driftPath {
+		t.Fatalf("rri artifact check = %#v, want status drift with file_path %s", row, driftPath)
+	}
+	if row := entries[missingArtifact["id"].(string)]; row == nil || row["status"] != "missing" || row["file_path"] != missingPath {
+		t.Fatalf("vision artifact check = %#v, want status missing with file_path %s", row, missingPath)
+	}
+}
+
 func TestArtifactFileProjectFixture(t *testing.T) {
 	bin := buildPic(t)
 	root, home, id := initArtifactFileProject(t, bin)
