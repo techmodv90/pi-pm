@@ -24,7 +24,7 @@ func cmdWorkflow(args []string) error {
 	if len(args) == 0 {
 		return errors.New("workflow subcommand required")
 	}
-	if agent := os.Getenv("PI_TASK_AGENT_NAME"); agent != "" && !contains([]string{"instruction-pack-render", "instruction-packs", "verifications", "events", "pipeline-runs", "pipeline-group", "profile-list", "profile-promotion-evaluate"}, args[0]) {
+	if agent := os.Getenv("PI_TASK_AGENT_NAME"); agent != "" && !contains([]string{"instruction-pack-render", "instruction-packs", "verifications", "events", "pipeline-runs", "pipeline-show", "pipeline-group", "profile-list", "profile-promotion-evaluate"}, args[0]) {
 		return fmt.Errorf("%s cannot mutate workflow lifecycle through pic", agent)
 	}
 	db, err := openDB()
@@ -70,6 +70,8 @@ func cmdWorkflow(args []string) error {
 		return workflowReviewDecision(db, rest)
 	case "pipeline-runs":
 		return workflowPipelineRuns(db, rest)
+	case "pipeline-show":
+		return workflowPipelineShow(db, rest)
 	case "pipeline-active":
 		return workflowPipelineActive(db, rest)
 	case "pipeline-group":

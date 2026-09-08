@@ -951,7 +951,7 @@ test("dispatch completion fails fast on an empty worker patch without justificat
 
 test("scheduler worktree provisioning uses the asynchronous launch boundary", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /await prepareSubagentWorktree\(spec\.cwd, spec\.initialPatchPath, claim\.id, spec\.durableWorktreeKey \|\| claim\.id\)/);
+  assert.match(source, /await prepareSubagentWorktree\(spec\.cwd, spec\.initialPatchPath, claim\.id, spec\.durableWorktreeKey \|\| claim\.id, claim\.base_commit \|\| undefined\)/);
   assert.match(source, /spec\.preparedWorktree = prepared\.cwd/);
 });
 
@@ -1391,6 +1391,19 @@ test("hybrid scheduler records use canonical Work Item lifecycle mutations", () 
   assert.equal(source.match(/execPic\(\["work-item", "review"/g)?.length, 2);
   assert.equal(source.match(/execPic\(\["work-item", "status"/g)?.length, 2);
   assert.match(source, /withInheritedParentWorkflowArtifacts/);
+  // Integration-before-advance constraint (RLB-GAP-007): in both the finish()
+  // review path and resumePending, the candidate integrates before `work-item
+  // review` records the verdict — otherwise a failed integration wedges the
+  // work item at contractor_verification with no delivered commit.
+  for (const block of source.split(/(?=const reviewData)|(?=reviewCompleted = true)/)) {
+    if (!block.includes('work-item", "review"')) continue;
+    const integrateAt = block.indexOf("integrateReviewedCandidate");
+    const reviewAt = block.indexOf('work-item", "review"');
+    assert.ok(integrateAt !== -1 && integrateAt < reviewAt, "candidate must integrate before the review verdict is recorded (RLB-GAP-007)");
+  }
+  // Zero-sqlite contractor surface (RLB-GAP-002): dispatch listings carry the
+  // run's live lifecycle state alongside the launch-time dispatch record.
+  assert.match(source, /run: run \?\? null/);
 });
 
 test("worker claims launch implementation directly", () => {

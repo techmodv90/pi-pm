@@ -1,6 +1,7 @@
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { appendFileSync, closeSync, existsSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { isMutationStage } from "../pipeline/report-parsing.ts";
+import { alignRetainedWorktreeBase } from "./worktree-align.ts";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -102,7 +103,7 @@ export function assertManagedAcceptance(spec: SubagentSpec): void {
   if (spec.acceptance !== required) throw new Error(`${spec.stage} subagent requires acceptance ${required}`);
 }
 
-export async function prepareSubagentWorktree(cwd: string, initialPatchPath?: string, runId: string = randomUUID(), worktreeKey: string = runId): Promise<{ runId: string; cwd: string; reused: boolean }> {
+export async function prepareSubagentWorktree(cwd: string, initialPatchPath?: string, runId: string = randomUUID(), worktreeKey: string = runId, baseCommit?: string): Promise<{ runId: string; cwd: string; reused: boolean }> {
   const worktreeRoot = join(cwd, ".pi", "worktrees");
   mkdirSync(worktreeRoot, { recursive: true, mode: 0o700 });
   const worktree = join(worktreeRoot, worktreeKey);
@@ -117,11 +118,14 @@ export async function prepareSubagentWorktree(cwd: string, initialPatchPath?: st
         return registeredPath && (existsSync(registeredPath) ? realpathSync(registeredPath) : registeredPath) === realpathSync(worktree);
       });
     const registeredBranch = registration?.match(/^branch refs\/heads\/(.+)$/m)?.[1];
-    if (registration && registeredBranch === branch) return { runId, cwd: worktree, reused: true };
+    if (registration && registeredBranch === branch) {
+      await alignRetainedWorktreeBase(worktree, baseCommit);
+      return { runId, cwd: worktree, reused: true };
+    }
     throw new Error(`refusing to reuse unregistered or foreign-branch worktree: ${worktree}`);
   }
   if (existsSync(worktree)) throw new Error(`refusing to overwrite non-worktree path: ${worktree}`);
-  await execFileAsync("git", ["worktree", "add", "-b", `pi-agent-${worktreeKey}`, worktree, "HEAD"], { cwd });
+  await execFileAsync("git", ["worktree", "add", "-b", `pi-agent-${worktreeKey}`, worktree, baseCommit || "HEAD"], { cwd });
   try {
     if (initialPatchPath && statSync(initialPatchPath).size > 0) {
       try {

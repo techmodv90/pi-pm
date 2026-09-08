@@ -162,9 +162,19 @@ export class PipelineScheduler {
     setImmediate(() => { void this.reconcileSafely(); });
   }
 
-  /** Pending Agent-tool dispatches awaiting a contractor spawn + bind. */
-  listDispatches(): PipelineDispatch[] {
-    return listPipelineDispatches(this.cwd);
+  /** Pending Agent-tool dispatches awaiting a contractor spawn + bind, enriched
+   *  with the run's live lifecycle state (status, error, integration fields) —
+   *  the zero-sqlite contractor surface (RLB-GAP-002). */
+  listDispatches(): any[] {
+    return listPipelineDispatches(this.cwd).map((dispatch) => {
+      let run: PipelineRun | undefined;
+      try {
+        run = this.pipelineRuns(dispatch.taskId).find((entry) => entry.id === dispatch.runId);
+      } catch {
+        // Work item no longer readable: launch-time dispatch facts remain.
+      }
+      return { ...dispatch, run: run ?? null };
+    });
   }
 
   /** Bind an Agent tool id to a dispatched run — the hard gate: empty ids are rejected. */
@@ -616,7 +626,10 @@ export class PipelineScheduler {
         if (spec.isolation === "worktree") {
           let prepared;
           try {
-            prepared = await prepareSubagentWorktree(spec.cwd, spec.initialPatchPath, claim.id, spec.durableWorktreeKey || claim.id);
+            // RLB-GAP-003: pass the claim's stamped base_commit so retained
+            // worktrees align to the exact commit the candidate patch must
+            // later apply against.
+            prepared = await prepareSubagentWorktree(spec.cwd, spec.initialPatchPath, claim.id, spec.durableWorktreeKey || claim.id, claim.base_commit || undefined);
           } catch (error) {
             if (stage === "review") {
               const candidate = this.pipelineRuns(taskId).find((entry) => entry.id === claim.candidate_run_id);
@@ -779,12 +792,17 @@ export class PipelineScheduler {
         const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state, review_status: review.status, notes: review.notes, findings: review.findings, owner_approval_required: review.ownerApprovalRequired, candidate_run_id: run.candidate_run_id, candidate_patch_hash: run.candidate_patch_hash })], this.cwd);
         if (result.error) throw new Error(result.error);
         reviewCompleted = true;
-        const update = execPic(["work-item", "review", run.task_id, review.status, "--notes", reviewNotes, "--pipeline-run-id", run.id], this.cwd);
-        if (update.error) throw new Error(update.error);
+        // Integration-before-advance constraint (RLB-GAP-007): `work-item review`
+        // advances next_stage to contractor_verification, so the candidate must
+        // integrate FIRST — a failed integration then leaves the run completed
+        // but not advanced, which pipeline-pending → resumePending converges on,
+        // instead of a wedged verification stage with no delivered commit.
         if (review.status === "passed") {
           const workerRun = this.integrateReviewedCandidate(run.task_id, run);
           this.promoteReviewedCandidate(workerRun);
         }
+        const update = execPic(["work-item", "review", run.task_id, review.status, "--notes", reviewNotes, "--pipeline-run-id", run.id], this.cwd);
+        if (update.error) throw new Error(update.error);
         checkpoint(run, "advanced", this.cwd);
         await this.advance(run.task_id);
         return;
@@ -981,14 +999,16 @@ export class PipelineScheduler {
         throw new Error("completed review references invalid candidate lineage");
       }
       const reviewData = this.showItem(run.task_id);
+      // Same integration-before-advance ordering as finish()'s review path (RLB-GAP-007):
+      // integrate the passed candidate before recording the review verdict.
+      if (outcome.status === "passed") {
+        const workerRun = this.integrateReviewedCandidate(run.task_id, run);
+        this.promoteReviewedCandidate(workerRun);
+      }
       if (reviewData.work_item?.review_status !== outcome.status) {
         const notes = outcome.findings.length ? `${outcome.notes}\n\n${outcome.findings.map((finding) => `- ${finding}`).join("\n")}` : outcome.notes;
         const update = execPic(["work-item", "review", run.task_id, outcome.status, "--notes", notes, "--pipeline-run-id", run.id], this.cwd);
         if (update.error) throw new Error(update.error);
-      }
-      if (outcome.status === "passed") {
-        const workerRun = this.integrateReviewedCandidate(run.task_id, run);
-        this.promoteReviewedCandidate(workerRun);
       }
     }
     if (isPlanningStage(run.stage)) {

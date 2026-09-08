@@ -130,6 +130,33 @@ test("pack-keyed worktrees are reused without reset and refuse foreign registrat
   execFileSync("git", ["branch", "-D", "someone-elses-branch"], { cwd: repo });
 });
 
+test("retained worktrees align to the run's declared base_commit on reuse (RLB-GAP-003)", async () => {
+  const repo = mkdtempSync(join(tmpdir(), "task-subagent-alignwt-"));
+  execFileSync("git", ["init", "-q"], { cwd: repo });
+  execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
+  execFileSync("git", ["config", "user.name", "Test"], { cwd: repo });
+  writeFileSync(join(repo, "work.go"), "package work\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "base"], { cwd: repo });
+  const firstBase = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  const first = await prepareSubagentWorktree(repo, undefined, "run-align", "wip-pack-align");
+  assert.equal(first.reused, false);
+  // Main repo advances (a sibling task integrated); the retained worktree must follow.
+  writeFileSync(join(repo, "work.go"), "package work\n// sibling integration\n");
+  execFileSync("git", ["add", "."], { cwd: repo });
+  execFileSync("git", ["commit", "-qm", "sibling"], { cwd: repo });
+  const newBase = execFileSync("git", ["rev-parse", "HEAD"], { cwd: repo, encoding: "utf8" }).trim();
+  const second = await prepareSubagentWorktree(repo, undefined, "run-align-2", "wip-pack-align", newBase);
+  assert.equal(second.reused, true);
+  const alignedHead = execFileSync("git", ["rev-parse", "HEAD"], { cwd: second.cwd, encoding: "utf8" }).trim();
+  assert.equal(alignedHead, newBase);
+  // Dirty worktree at a stale base refuses loudly instead of silently mis-basing.
+  writeFileSync(join(second.cwd, "work.go"), "package work\n// partial candidate\n");
+  await assert.rejects(() => prepareSubagentWorktree(repo, undefined, "run-align-3", "wip-pack-align", newBase + "f".repeat(28)), /dirty/);
+  removeSubagentWorktree(repo, second.cwd, "wip-pack-align");
+  execFileSync("git", ["reset", "--hard", "-q", firstBase], { cwd: repo });
+});
+
 test("orphan sweep keeps fresh retained worktrees and prunes only aged ones", async () => {
   const runner = await import("./runner.ts") as any;
   const repo = mkdtempSync(join(tmpdir(), "task-subagent-ttl-"));
