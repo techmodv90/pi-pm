@@ -125,7 +125,7 @@ func ShortHash(content []byte) string {
 
 // createWorkItems writes the whole graph in one transaction; any failure
 // rolls back to an empty store.
-func createWorkItems(db *sql.DB, doc *Doc, graph *apmGraph, importLabel string) (string, error) {
+func createWorkItems(db *sql.DB, doc *Doc, graph *Graph, importLabel string) (string, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return "", err

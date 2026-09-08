@@ -12,7 +12,7 @@ type FeatureGraph struct {
 	TaskTIDs []string `json:"task_ids"`
 }
 
-type apmGraph struct {
+type Graph struct {
 	EpicName             string         `json:"epic_name"`
 	MilestoneLabel       string         `json:"milestone_label"`
 	VerificationCommands []string       `json:"verification_commands"`
@@ -39,8 +39,8 @@ type EdgeGraph struct {
 // P2→F2, P3+polish→F3) and derives edges: Rule A chains the features, Rule B
 // sequences tasks inside a feature by the Execution Order block, Rule C gives
 // parallel tasks the same predecessor set. Task edges never cross features.
-func BuildGraph(doc *Doc, milestone string) *apmGraph {
-	graph := &apmGraph{
+func BuildGraph(doc *Doc, milestone string) *Graph {
+	graph := &Graph{
 		EpicName:       doc.Name,
 		MilestoneLabel: "milestone:" + milestone,
 	}
@@ -127,7 +127,7 @@ func BuildGraph(doc *Doc, milestone string) *apmGraph {
 	return graph
 }
 
-func writeGraphJSON(graph *apmGraph, imported bool, epicID string) {
+func writeGraphJSON(graph *Graph, imported bool, epicID string) {
 	payload := map[string]any{
 		"epic": map[string]any{
 			"name":                  graph.EpicName,

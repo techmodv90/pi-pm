@@ -40,7 +40,7 @@ type Task struct {
 	Acceptance string
 }
 
-type apmOrderLine struct {
+type OrderLine struct {
 	Phase    int
 	Tier     string
 	Seq      []string
@@ -54,7 +54,7 @@ type Doc struct {
 	ScenarioUS  []string
 	TierHeaders map[string]string // "P1" -> "P1: Critical Path" (verbatim header text)
 	Tasks       []Task
-	Order       []apmOrderLine
+	Order       []OrderLine
 	// Scenarios maps US id -> verbatim Gherkin scenario block (tagged @US<n>)
 	// parsed from the companion .feature; embedded into task descriptions as
 	// the behavioral context pillar.
@@ -142,7 +142,7 @@ func ParseTasksMD(content string) (*Doc, error) {
 		}
 		if inOrder {
 			if m := OrderLineRe.FindStringSubmatch(trimmed); m != nil {
-				ol := apmOrderLine{Tier: strings.TrimSuffix(m[2], "+")}
+				ol := OrderLine{Tier: strings.TrimSuffix(m[2], "+")}
 				fmt.Sscanf(m[1], "%d", &ol.Phase)
 				for _, part := range regexp.MustCompile(`\s*(→|║)\s*`).Split(m[3], -1) {
 					if id := strings.TrimSpace(part); id != "" {
