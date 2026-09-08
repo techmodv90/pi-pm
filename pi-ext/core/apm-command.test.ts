@@ -46,6 +46,11 @@ test("hides the full implement prompt while retaining it for the LLM", () => {
   assert.match(source, /sendHiddenPrompt\(pi, "apm-implement", prompt\)/);
 });
 
+test("hides the full drift prompt while retaining it for the LLM", () => {
+  const source = readSource("./apm-drift.ts");
+  assert.match(source, /sendHiddenPrompt\(pi, "apm-drift", prompt\)/);
+});
+
 test("router dispatches every subcommand to a dedicated handler", () => {
   const source = readSource("./apm-command.ts");
   assert.match(source, /handleInit\(ctx\)/);
@@ -56,6 +61,7 @@ test("router dispatches every subcommand to a dedicated handler", () => {
   assert.match(source, /handleBreakdown\(pi, args, ctx\)/);
   assert.match(source, /handleDistill\(pi, args, ctx\)/);
   assert.match(source, /handleImplement\(pi, args, ctx\)/);
+  assert.match(source, /handleDrift\(pi, args, ctx\)/);
   assert.match(source, /apm-init|apm-prd|apm-spec|apm-clarify|apm-tech-plan|apm-breakdown|apm-implement|apm-distill/);
 });
 

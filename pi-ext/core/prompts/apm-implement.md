@@ -16,6 +16,9 @@ implement code yourself.
 - **Import is the only bridge** — Work Items are created exclusively through
   `pic workflow import-apm`; never write Work Item rows directly
 - **Authorization belongs to the owner** — relay it, never self-grant it
+- **Drift stops the flow** — spec divergence is ticketed as a Bug Work Item
+  via the `/apm drift` procedure and the orchestration discontinues; it is
+  never worked around
 
 ## Input
 
@@ -35,6 +38,9 @@ never generate one here (that is `/apm breakdown`'s job).
 1. GATE          — .tasks.md must exist with **Status:** Approved, the
                    companion .plan.md must exist, and the .feature must be
                    @ready; else stop
+1b. DRIFT        — run the /apm drift procedure (core/prompts/apm-drift.md)
+                   on this feature's spec; any CRÍTICO/WARNING finding →
+                   Bug Work Item and stop — no import, no authorization
 2. IMPORT        — dry-run `pic workflow import-apm <tasks.md> --milestone
                    <version> --dry-run`, show the owner the parsed graph
                    (epic, features, tasks, edges), then run the real import
@@ -66,6 +72,23 @@ never generate one here (that is `/apm breakdown`'s job).
   claims them on the lean path (status flip plus activity log; the task
   description verbatim is the worker input). Readiness is a state question
   (`pic show` → ready/status), never a pack question.
+
+### Step 1b — Drift gate
+
+Run the `/apm drift` procedure (the canonical conformance check in
+`core/prompts/apm-drift.md` — DISCOVER → MAP → ANALYZE → REPORT) scoped to
+this feature's `.feature` spec, against the target branch (usually
+`develop`).
+
+- **No CRÍTICO/WARNING findings** — proceed; note the commit the check ran
+  against in the handoff summary (INFO gaps are reported as known gaps).
+- **CRÍTICO/WARNING findings** — the procedure routes each to a Bug Work
+  Item. Then **stop**: report the bug IDs and discontinue — no import, no
+  authorization. Fixing drift is normal scheduled work; `/apm implement` is
+  rerun once the bugs close.
+
+Do not repair drift yourself, do not edit the spec to match the code, and do
+not import a graph whose spec is already stale.
 
 ### Step 3 — Authorization relay
 
@@ -116,7 +139,7 @@ RESUME mode:
 === HANDED OFF ===
 ```
 
-If the flow stopped early (gate failure, declined authorization, importer
-discrepancies), the verdict must state the exact step and the reason. This
+If the flow stopped early (gate failure, drift finding, declined
+authorization, importer discrepancies), the verdict must state the exact step and the reason. This
 command never runs tests, writes code, or mutates Work Item state beyond the
 import and the owner-authorized start.

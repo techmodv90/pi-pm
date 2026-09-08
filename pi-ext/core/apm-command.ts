@@ -18,6 +18,9 @@
  *            commands, and human checkpoints (no Docker).
  * distill: reverse-engineer compact specs/contracts (.distilled.md) from
  *          existing code.
+ * drift: run the canonical spec-drift conformance check (.apm/specs vs
+ *          real test coverage) — CRÍTICO/WARNING gaps become Bug Work Items.
+ *          /apm implement and /apm review (epic tier) inject it by reference.
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
@@ -25,6 +28,7 @@ import { handleBreakdown } from "./apm-breakdown.ts";
 import { handleClarify } from "./apm-clarify.ts";
 import { handleDesign } from "./apm-design.ts";
 import { handleDistill } from "./apm-distill.ts";
+import { handleDrift } from "./apm-drift.ts";
 import { handleInit } from "./apm-init.ts";
 import { handleImplement } from "./apm-implement.ts";
 import { handlePrd } from "./apm-prd.ts";
@@ -32,11 +36,11 @@ import { handlePropose } from "./apm-propose.ts";
 import { handleSpec } from "./apm-spec.ts";
 import { handleTechPlan } from "./apm-tech-plan.ts";
 
-const USAGE = "APM (Agent Project Management):\n  /apm init            Create .apm/prd, .apm/specs (tracked) and ignored .apm/state\n  /apm prd             Generate a PRD (interactive) at .apm/prd/prd-v<major.minor>.md\n  /apm prd <sources>   Generate a PRD from a description, brief, or Figma link\n                       flags: --figma <link>  --brief <file>  --template <name>  --version <n>\n                       (--version pins the project version: writes prd-v<n>.md)\n  /apm spec <fields>   Generate a Gherkin spec (.feature) at .apm/specs/<domain>/<Name>.feature\n                       fields: Type: <COMMAND|QUERY|EVENT>  Feature: <domain/Name>\n                               Domain: <domain>  Requirement: <text>  Context: @<file>\n  /apm propose <change> Write a change proposal (RFC) at .apm/proposals/<slug>-proposal.md\n                       before any spec — Intent (WHY), Scope (WHAT, included AND\n                       excluded), Approach (HOW), Risks, preliminary estimate.\n                       Gated: /apm spec only after owner approval.\n  /apm clarify <spec>  Review a spec for ambiguity, run Auto-QA, and upgrade\n                       @draft → @ready on a passing verdict\n                       spec: a .feature path or Feature: <domain/Name>\n  /apm tech-plan <spec> Generate a technical blueprint (.plan.md) beside a\n                       @ready spec, ratify its DBML, and gate on the APM constitution\n                       spec: a .feature path or Feature: <domain/Name>\n  /apm design <plan>   Write a technical design doc at .apm/design/<feature>-design.md\n                       with ADRs (context, evaluated options, consequences),\n                       flow diagrams, and a complexity table — the WHY next to\n                       tech-plan's WHAT. Owner-reviewed before /apm breakdown.\n  /apm breakdown <plan> Generate an executable task list (.tasks.md) beside an\n                       approved blueprint with TDD and parallelism markers\n                       plan: a .plan.md path or Blueprint: <domain/Name>\n  /apm implement <tasks> Execute an approved .tasks.md phase by phase with\n                       TDD (RED→GREEN→REFACTOR), native test/lint/build\n                       commands, and human checkpoints — no Docker\n                       tasks: a .tasks.md path or Tasks: <domain/Name>\n                       flags: --phase <n>  --dry\n  /apm distill [module] Reverse-engineer compact specs, contracts, and\n                       business rules from existing code into a\n                       .distilled.md under .apm/specs/ (default: whole project)\n                       flags: --format gherkin | contracts | summary";
+const USAGE = "APM (Agent Project Management):\n  /apm init            Create .apm/prd, .apm/specs (tracked) and ignored .apm/state\n  /apm prd             Generate a PRD (interactive) at .apm/prd/prd-v<major.minor>.md\n  /apm prd <sources>   Generate a PRD from a description, brief, or Figma link\n                       flags: --figma <link>  --brief <file>  --template <name>  --version <n>\n                       (--version pins the project version: writes prd-v<n>.md)\n  /apm spec <fields>   Generate a Gherkin spec (.feature) at .apm/specs/<domain>/<Name>.feature\n                       fields: Type: <COMMAND|QUERY|EVENT>  Feature: <domain/Name>\n                               Domain: <domain>  Requirement: <text>  Context: @<file>\n  /apm propose <change> Write a change proposal (RFC) at .apm/proposals/<slug>-proposal.md\n                       before any spec — Intent (WHY), Scope (WHAT, included AND\n                       excluded), Approach (HOW), Risks, preliminary estimate.\n                       Gated: /apm spec only after owner approval.\n  /apm clarify <spec>  Review a spec for ambiguity, run Auto-QA, and upgrade\n                       @draft → @ready on a passing verdict\n                       spec: a .feature path or Feature: <domain/Name>\n  /apm tech-plan <spec> Generate a technical blueprint (.plan.md) beside a\n                       @ready spec, ratify its DBML, and gate on the APM constitution\n                       spec: a .feature path or Feature: <domain/Name>\n  /apm design <plan>   Write a technical design doc at .apm/design/<feature>-design.md\n                       with ADRs (context, evaluated options, consequences),\n                       flow diagrams, and a complexity table — the WHY next to\n                       tech-plan's WHAT. Owner-reviewed before /apm breakdown.\n  /apm breakdown <plan> Generate an executable task list (.tasks.md) beside an\n                       approved blueprint with TDD and parallelism markers\n                       plan: a .plan.md path or Blueprint: <domain/Name>\n  /apm implement <tasks> Execute an approved .tasks.md phase by phase with\n                       TDD (RED→GREEN→REFACTOR), native test/lint/build\n                       commands, and human checkpoints — no Docker\n                       tasks: a .tasks.md path or Tasks: <domain/Name>\n                       flags: --phase <n>  --dry\n  /apm distill [module] Reverse-engineer compact specs, contracts, and\n                       business rules from existing code into a\n                       .distilled.md under .apm/specs/ (default: whole project)\n                       flags: --format gherkin | contracts | summary\n  /apm drift [scope]   Run the spec-drift conformance check: Gherkin specs\n                       (.apm/specs/**/*.feature) vs real test coverage.\n                       CRÍTICO/WARNING gaps become Bug Work Items.\n                       scope: a .feature path, a domain directory, or empty\n                       flags: --severity critica  --formato json";
 
 export function registerApmCommand(pi: ExtensionAPI) {
   pi.registerCommand("apm", {
-    description: "APM: init project workspace, generate a PRD, propose a change, generate a Gherkin spec, clarify a spec, generate a technical blueprint, design it with ADRs, break an approved blueprint into tasks, implement an approved task list with TDD, or distill specs from existing code",
+    description: "APM: init project workspace, generate a PRD, propose a change, generate a Gherkin spec, clarify a spec, generate a technical blueprint, design it with ADRs, break an approved blueprint into tasks, implement an approved task list with TDD, distill specs from existing code, or run the spec-drift conformance check",
     handler: async (args, ctx) => {
       const sub = args.trim().split(/\s+/)[0] || "help";
 
@@ -82,6 +86,10 @@ export function registerApmCommand(pi: ExtensionAPI) {
       }
       if (sub === "distill") {
         handleDistill(pi, args, ctx);
+        return;
+      }
+      if (sub === "drift") {
+        handleDrift(pi, args, ctx);
         return;
       }
 

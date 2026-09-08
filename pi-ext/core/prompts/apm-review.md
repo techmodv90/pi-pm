@@ -164,7 +164,12 @@ Items on `develop` — own branch, own worker, own reviewer, own verification.
 4. VERDICT       — passed (all PASS) / partial (deferred bugs ticketed) /
                    failed (blocking finding, corrective bug) via
                    verify_aggregate_work_item with the graded JSON
-5. ACCEPTANCE BRIEF — before the owner decides, present one summary using
+5. DRIFT (epic tier) — run the /apm drift procedure
+                   (core/prompts/apm-drift.md) across the epic's specs
+                   against the integrated branch; CRÍTICO/WARNING → Bug
+                   Work Items and stop — no verification, no acceptance,
+                   no merge
+6. ACCEPTANCE BRIEF — before the owner decides, present one summary using
                    this exact form, then ask the owner to approve; never call
                    accept_aggregate_work_item yourself
 
@@ -183,6 +188,17 @@ Items on `develop` — own branch, own worker, own reviewer, own verification.
    **Ask:** approve `accept_aggregate_work_item` for <aggregate id>?
 ```
 
+## Drift gate before merge (epic tier)
+
+Before epic acceptance and the merge into `develop`, run the `/apm drift`
+procedure (canonical conformance check in `core/prompts/apm-drift.md`)
+across the epic's feature specs against the integrated branch. The same
+routing applies: CRÍTICO/WARNING findings become Bug Work Items and the
+review stops — no verification, no acceptance brief, no merge. INFO gaps
+are listed in the acceptance brief as known gaps for the owner. Feature-tier
+reviews already cover per-feature conformance via dimension 1; this gate is
+the last spec-vs-branch check before `develop` inherits the epic.
+
 ## Guardrails
 
 - Never patch, commit, or re-integrate the reviewed aggregate — the review is
@@ -190,5 +206,7 @@ Items on `develop` — own branch, own worker, own reviewer, own verification.
 - Never grade a scenario without executed evidence from this session.
 - Never defer a blocking finding to a bug ticket.
 - Never approve with uncited verdicts.
+- Never bypass the epic-tier drift gate: merge to `develop` only after the
+  drift check reports no CRÍTICO/WARNING findings.
 - Owner acceptance stays with the owner; present the acceptance brief in the
   exact form above and stop.
