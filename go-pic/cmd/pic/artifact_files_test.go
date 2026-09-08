@@ -285,6 +285,93 @@ func TestArtifactProjectionP95Under50ms(t *testing.T) {
 	}
 }
 
+// TestArtifactRevisionCreatesNewFile is the RED test for revision projection
+// (Feature US3; Plan Flow invariant and immutable artifact model): saving
+// revision 2 of the same work item + stage must project the revised bytes
+// onto a NEW deterministic path (blueprint-r2.md) and never rewrite the
+// prior revision's file — revision 1's bytes must remain exactly unchanged.
+func TestArtifactRevisionCreatesNewFile(t *testing.T) {
+	bin := buildPic(t)
+	root, home, id := initArtifactFileProject(t, bin)
+	db := openArtifactProjectDB(t, root)
+
+	// Given: the work item has a blueprint revision 1 with its projected
+	// markdown at the deterministic revision-1 path.
+	first := saveArtifact(t, bin, root, home, id, "blueprint", validBlueprintArtifact)
+	if first["revision"] != float64(1) {
+		t.Fatalf("first blueprint artifact = %#v", first)
+	}
+	r1Path, err := artifactFilePath(root, id, "blueprint", 1)
+	if err != nil {
+		t.Fatalf("artifactFilePath revision 1: %v", err)
+	}
+	r1Bytes, err := os.ReadFile(r1Path)
+	if err != nil {
+		t.Fatalf("revision 1 markdown missing at %s: %v", r1Path, err)
+	}
+	if string(r1Bytes) != validBlueprintArtifact {
+		t.Fatalf("revision 1 bytes = %q, want exact content %q", r1Bytes, validBlueprintArtifact)
+	}
+
+	// When: revision 2 is saved with revised content for the same work item
+	// and stage.
+	revised := strings.Replace(validBlueprintArtifact, "Reliable workflow", "Revised workflow", 1)
+	if revised == validBlueprintArtifact {
+		t.Fatal("revised content identical to revision 1; fixture must differ")
+	}
+	second := saveArtifact(t, bin, root, home, id, "blueprint", revised)
+	if second["revision"] != float64(2) {
+		t.Fatalf("second blueprint artifact = %#v, want revision 2", second)
+	}
+
+	// Then: revision 2 lands on a new deterministic path, not revision 1's.
+	r2Path, err := artifactFilePath(root, id, "blueprint", 2)
+	if err != nil {
+		t.Fatalf("artifactFilePath revision 2: %v", err)
+	}
+	if r2Path == r1Path {
+		t.Fatal("revision 2 path collides with revision 1 path")
+	}
+	if second["file_path"] != r2Path {
+		t.Fatalf("revision 2 response file_path = %v, want %s", second["file_path"], r2Path)
+	}
+	r2Bytes, err := os.ReadFile(r2Path)
+	if err != nil {
+		t.Fatalf("revision 2 markdown missing at %s: %v", r2Path, err)
+	}
+	if string(r2Bytes) != revised {
+		t.Fatalf("revision 2 bytes = %q, want revised content %q", r2Bytes, revised)
+	}
+	// And: revision 1's bytes are unchanged after the revision 2 save.
+	r1After, err := os.ReadFile(r1Path)
+	if err != nil {
+		t.Fatalf("re-read revision 1 markdown: %v", err)
+	}
+	if string(r1After) != string(r1Bytes) {
+		t.Fatalf("revision 1 bytes changed after revision 2 save: %q, want %q", r1After, r1Bytes)
+	}
+	// Canonical rows mirror both revisions, and each revision keeps its own
+	// artifact_files binding at a distinct path.
+	revision, content, contentHash := artifactFileRow(t, db, id, "blueprint")
+	if revision != 2 || content != revised || contentHash != second["content_hash"] {
+		t.Fatalf("latest blueprint row = rev %d content %q hash %q, want revision 2 hash %v", revision, content, contentHash, second["content_hash"])
+	}
+	var bindCount int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM artifact_files WHERE work_item_id=? AND stage=?`, id, "blueprint").Scan(&bindCount); err != nil {
+		t.Fatalf("count blueprint bindings: %v", err)
+	}
+	if bindCount != 2 {
+		t.Fatalf("artifact_files blueprint bindings = %d, want one per revision (2)", bindCount)
+	}
+	var boundPath string
+	if err := db.QueryRow(`SELECT file_path FROM artifact_files WHERE work_item_id=? AND stage=? AND revision=1`, id, "blueprint").Scan(&boundPath); err != nil {
+		t.Fatalf("revision 1 binding row: %v", err)
+	}
+	if boundPath != r1Path {
+		t.Fatalf("revision 1 binding file_path = %q, want %q", boundPath, r1Path)
+	}
+}
+
 func TestArtifactFilePath(t *testing.T) {
 	// Ratified path scheme (ArtifactMarkdownFile.plan.md, NC-4):
 	// <project>/.apm/artifacts/<work_item>/<stage>-r<revision>.md
