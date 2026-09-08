@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/schema"
 	"github.com/earendil-works/task-system/go-pic/internal/tip"
 	"net/http"
 	"net/http/httptest"
@@ -207,7 +208,7 @@ func TestInitAndProjectCommands(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	if tableExists(db, "task_items") {
+	if schema.TableExists(db, "task_items") {
 		t.Fatal("fresh database created retired task_items table")
 	}
 
@@ -1503,7 +1504,7 @@ func TestPipelineSchemaMigrationPreservesDependentObjects(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	legacySQL := strings.Replace(pipelineRunsTableSQL, "REFERENCES work_items(id)", "REFERENCES tasks(id)", 1)
+	legacySQL := strings.Replace(schema.PipelineRunsTableSQL, "REFERENCES work_items(id)", "REFERENCES tasks(id)", 1)
 	legacySQL = strings.Replace(legacySQL, "'scan','worker','review','autofix'", "'scan','worker','review'", 1)
 	if _, err = db.Exec(legacySQL); err != nil {
 		db.Close()
@@ -1561,7 +1562,7 @@ func TestInitDBRepairsStalePipelineForeignKey(t *testing.T) {
 		db.Close()
 		t.Fatal(err)
 	}
-	if _, err = db.Exec(pipelineRunsTableSQL); err != nil {
+	if _, err = db.Exec(schema.PipelineRunsTableSQL); err != nil {
 		db.Close()
 		t.Fatal(err)
 	}
@@ -2283,13 +2284,13 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 	if _, err = db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')))`); err != nil {
 		t.Fatal(err)
 	}
-	poison := schemaMigration{version: 99, name: "poison_reconcile", apply: func(db schemaDB) error {
-		if err := reconcileLegacySchema(db); err != nil {
+	poison := schema.Migration{Version: 99, Name: "poison_reconcile", Apply: func(db schema.DB) error {
+		if err := schema.ReconcileLegacySchema(db); err != nil {
 			return err
 		}
 		return errors.New("injected failure after reconcile operations")
 	}}
-	if err := applySchemaMigration(context.Background(), db, poison); err == nil || !strings.Contains(err.Error(), "injected failure") {
+	if err := schema.ApplyMigration(context.Background(), db, poison); err == nil || !strings.Contains(err.Error(), "injected failure") {
 		t.Fatalf("poison step error = %v", err)
 	}
 	var recorded int
@@ -2311,13 +2312,13 @@ func TestSchemaMigrationFailureInjectionRollsBack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ddlPoison := schemaMigration{version: 98, name: "poison_ddl", apply: func(db schemaDB) error {
+	ddlPoison := schema.Migration{Version: 98, Name: "poison_ddl", Apply: func(db schema.DB) error {
 		if _, err := db.Exec(`CREATE TABLE zz_poison (id TEXT)`); err != nil {
 			return err
 		}
 		return errors.New("injected DDL failure")
 	}}
-	if err := applySchemaMigration(context.Background(), db, ddlPoison); err == nil || !strings.Contains(err.Error(), "injected DDL failure") {
+	if err := schema.ApplyMigration(context.Background(), db, ddlPoison); err == nil || !strings.Contains(err.Error(), "injected DDL failure") {
 		t.Fatalf("ddl poison error = %v", err)
 	}
 	var poisonTable int
@@ -2365,13 +2366,13 @@ func TestSchemaMigrationPragmasRunOnThePinnedConnection(t *testing.T) {
 	}
 	db.SetMaxIdleConns(0)
 	var foreignKeys, legacyAlterTable int
-	probe := schemaMigration{version: 97, name: "pragma_affinity_probe", apply: func(db schemaDB) error {
+	probe := schema.Migration{Version: 97, Name: "pragma_affinity_probe", Apply: func(db schema.DB) error {
 		if err := db.QueryRow(`PRAGMA foreign_keys`).Scan(&foreignKeys); err != nil {
 			return err
 		}
 		return db.QueryRow(`PRAGMA legacy_alter_table`).Scan(&legacyAlterTable)
 	}}
-	if err := applySchemaMigration(context.Background(), db, probe); err != nil {
+	if err := schema.ApplyMigration(context.Background(), db, probe); err != nil {
 		t.Fatal(err)
 	}
 	if foreignKeys != 0 {

@@ -14,17 +14,6 @@ import (
 // planning stages for a Work Item, the Implement and QA profiles select the
 // execution stages. All profiles are persisted as version-bound rows resolved
 // exactly once at planning start and reused for every later claim.
-const workItemProfilesTableSQL = `CREATE TABLE IF NOT EXISTS work_item_profiles (
-	id TEXT PRIMARY KEY,
-	work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE,
-	profile_name TEXT NOT NULL CHECK(profile_name IN ('plan','implement','qa')),
-	profile_version INTEGER NOT NULL CHECK(profile_version>0),
-	planning_depth TEXT NOT NULL CHECK(planning_depth IN ('quick','standard','designed','full')),
-	stages_json TEXT NOT NULL,
-	content_hash TEXT NOT NULL,
-	resolved_at TEXT DEFAULT (datetime('now')),
-	UNIQUE(work_item_id, profile_name, profile_version)
-)`
 
 var lifecycleProfileNames = []string{"plan", "implement", "qa"}
 var validPlanningDepths = workitem.ValidPlanningDepths

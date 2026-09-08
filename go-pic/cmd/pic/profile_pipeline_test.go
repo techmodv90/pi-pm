@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"github.com/earendil-works/task-system/go-pic/internal/schema"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -338,7 +339,7 @@ func TestLegacyPipelineRowsRemainReadableAfterMigration(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer read.Close()
-	if !hasColumn(read, "pipeline_runs", "profile_version") || !hasColumn(read, "pipeline_runs", "profile_hash") || !hasColumn(read, "work_items", "planning_depth") {
+	if !schema.HasColumn(read, "pipeline_runs", "profile_version") || !schema.HasColumn(read, "pipeline_runs", "profile_hash") || !schema.HasColumn(read, "work_items", "planning_depth") {
 		t.Fatalf("migration did not add additive profile columns")
 	}
 	var status, stage string

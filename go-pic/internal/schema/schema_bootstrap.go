@@ -1,4 +1,4 @@
-package main
+package schema
 
 import (
 	"context"
@@ -17,36 +17,36 @@ import (
 // one deliberate correction: trg_work_item_pack_immutable guards the canonical
 // work_item_instruction_packs table and is now created on fresh databases too.
 
-// workItemOwnerDecisionsTableSQL carries the RRI deferral surface (REQ-F1-3):
+// WorkItemOwnerDecisionsTableSQL carries the RRI deferral surface (REQ-F1-3):
 // decision='deferred' rows persist a deferred P0/P1 question with its
 // owner-recorded reason and RRI artifact linkage, so completion_report_id is
 // nullable — deferral rows precede any completion report.
-var workItemOwnerDecisionsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_owner_decisions (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, completion_report_id TEXT REFERENCES work_item_completion_reports(id), decision TEXT NOT NULL CHECK(decision IN ('accepted','rejected','deferred')), question_id TEXT NOT NULL DEFAULT '', rri_artifact_id TEXT NOT NULL DEFAULT '', notes TEXT DEFAULT '', decided_by_role TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`
+var WorkItemOwnerDecisionsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_owner_decisions (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, completion_report_id TEXT REFERENCES work_item_completion_reports(id), decision TEXT NOT NULL CHECK(decision IN ('accepted','rejected','deferred')), question_id TEXT NOT NULL DEFAULT '', rri_artifact_id TEXT NOT NULL DEFAULT '', notes TEXT DEFAULT '', decided_by_role TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`
 
-var canonicalSchemaStatements = []string{
-	workItemsTableSQL,
+var CanonicalSchemaStatements = []string{
+	WorkItemsTableSQL,
 	`CREATE TABLE IF NOT EXISTS work_item_labels (work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, label TEXT NOT NULL, PRIMARY KEY(work_item_id,label))`,
 	`CREATE TABLE IF NOT EXISTS work_item_dependencies (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, depends_on_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,depends_on_work_item_id), CHECK(work_item_id!=depends_on_work_item_id))`,
 	`CREATE TABLE IF NOT EXISTS work_item_gates (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, gate_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,gate_work_item_id), CHECK(work_item_id!=gate_work_item_id))`,
 	`CREATE TABLE IF NOT EXISTS work_item_relations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, relation_type TEXT NOT NULL CHECK(relation_type IN ('blocks','gates','related')), related_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,relation_type,related_work_item_id), CHECK(work_item_id!=related_work_item_id))`,
-	workItemArtifactsTableSQL,
-	workflowCheckpointsTableSQL,
+	WorkItemArtifactsTableSQL,
+	WorkflowCheckpointsTableSQL,
 	`CREATE TABLE IF NOT EXISTS implementation_authorizations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, task_graph_checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), authorized_by TEXT NOT NULL, revoked_at TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
 	`CREATE TABLE IF NOT EXISTS work_item_materializations (root_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), node_key TEXT NOT NULL, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(root_work_item_id,checkpoint_id,node_key))`,
 	`CREATE TABLE IF NOT EXISTS work_item_instruction_packs (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT NOT NULL REFERENCES workflow_checkpoints(id), version INTEGER NOT NULL CHECK(version>0), status TEXT NOT NULL DEFAULT 'inactive' CHECK(status IN ('inactive','active','stale')), content_json TEXT NOT NULL, content_hash TEXT NOT NULL, activated_at TEXT DEFAULT '', stale_at TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,version))`,
 	`CREATE TABLE IF NOT EXISTS work_item_verification_reports (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, checkpoint_id TEXT DEFAULT '', completion_report_id TEXT REFERENCES work_item_completion_reports(id), status TEXT NOT NULL CHECK(status IN ('passed','failed','partial','blocked')), summary TEXT DEFAULT '', verified_by_role TEXT NOT NULL DEFAULT '', pipeline_high_water_rowid INTEGER NOT NULL DEFAULT 0, rri_t_json TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
 	`CREATE TABLE IF NOT EXISTS work_item_corrective_bugs (verification_report_id TEXT PRIMARY KEY REFERENCES work_item_verification_reports(id) ON DELETE CASCADE, bug_work_item_id TEXT NOT NULL UNIQUE REFERENCES work_items(id) ON DELETE CASCADE, owner_approval_required INTEGER NOT NULL DEFAULT 0, created_at TEXT DEFAULT (datetime('now')))`,
-	workItemCompletionReportsTableSQL,
-	workItemEscalationsTableSQL,
-	workItemOwnerDecisionsTableSQL,
+	WorkItemCompletionReportsTableSQL,
+	WorkItemEscalationsTableSQL,
+	WorkItemOwnerDecisionsTableSQL,
 	`CREATE TABLE IF NOT EXISTS work_item_delivery_states (work_item_id TEXT PRIMARY KEY REFERENCES work_items(id) ON DELETE CASCADE, integration_mode TEXT NOT NULL CHECK(integration_mode IN ('branch','coordination')), branch_name TEXT DEFAULT '', base_branch TEXT DEFAULT 'develop', base_commit TEXT DEFAULT '', verified_head TEXT DEFAULT '', verification_report_id TEXT DEFAULT '', merge_status TEXT NOT NULL DEFAULT '' CHECK(merge_status IN ('','merge_pending','merged','blocked')), merged_commit TEXT DEFAULT '', merge_error TEXT DEFAULT '', updated_at TEXT DEFAULT (datetime('now')))`,
 	`CREATE TABLE IF NOT EXISTS work_item_aggregate_owner_decisions (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, verification_report_id TEXT NOT NULL REFERENCES work_item_verification_reports(id), decision TEXT NOT NULL CHECK(decision IN ('accepted','rejected')), notes TEXT DEFAULT '', decided_by_role TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
 	`CREATE TABLE IF NOT EXISTS work_item_events (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, event_type TEXT NOT NULL, actor_role TEXT DEFAULT '', actor_model TEXT DEFAULT '', summary TEXT DEFAULT '', payload_json TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
-	ownedWorkflowTableSQL["requirements"],
-	ownedWorkflowTableSQL["owner_decisions"],
+	OwnedWorkflowTableSQL["requirements"],
+	OwnedWorkflowTableSQL["owner_decisions"],
 	`CREATE TABLE IF NOT EXISTS session_activity (session_id TEXT PRIMARY KEY, task_id TEXT DEFAULT '', status TEXT DEFAULT 'idle' CHECK(status IN ('active','idle')), current_step_label TEXT DEFAULT '', last_skill TEXT DEFAULT '', updated_at TEXT DEFAULT (datetime('now')))`,
-	pipelineRunsTableSQL,
-	workItemProfilesTableSQL,
+	PipelineRunsTableSQL,
+	WorkItemProfilesTableSQL,
 	`UPDATE work_items SET review_status='passed' WHERE status='done' AND type IN ('task','bug','chore') AND EXISTS (
 			SELECT 1 FROM work_item_owner_decisions decision
 			JOIN work_item_completion_reports completion ON completion.id=decision.completion_report_id AND completion.work_item_id=decision.work_item_id AND completion.status='done'
@@ -88,7 +88,7 @@ var canonicalSchemaStatements = []string{
 	`CREATE TRIGGER IF NOT EXISTS trg_keyed_requirement_content_immutable BEFORE UPDATE OF requirement_key,contract_key,inherit_to_descendants,title,description,acceptance_criteria ON requirements WHEN OLD.contract_key!='' BEGIN SELECT RAISE(ABORT,'keyed requirement content is immutable; create a replacement requirement'); END`,
 }
 
-var legacySchemaStatements = []string{
+var LegacySchemaStatements = []string{
 	`CREATE TABLE IF NOT EXISTS epics (
 			id TEXT PRIMARY KEY,
 			title TEXT NOT NULL,
@@ -100,18 +100,18 @@ var legacySchemaStatements = []string{
 			created_at TEXT DEFAULT (datetime('now'))
 		)`,
 	`CREATE TABLE IF NOT EXISTS epic_events (id TEXT PRIMARY KEY, epic_id TEXT NOT NULL REFERENCES epics(id) ON DELETE CASCADE, event_type TEXT NOT NULL, actor_role TEXT DEFAULT '', actor_model TEXT DEFAULT '', summary TEXT DEFAULT '', payload_json TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
-	tasksTableSQL,
+	TasksTableSQL,
 	`CREATE TABLE IF NOT EXISTS task_events (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, event_type TEXT NOT NULL, actor_role TEXT DEFAULT '', actor_model TEXT DEFAULT '', summary TEXT DEFAULT '', payload_json TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
-	ownedWorkflowTableSQL["scan_reports"],
-	ownedWorkflowTableSQL["rri_sessions"],
-	ownedWorkflowTableSQL["designs"],
+	OwnedWorkflowTableSQL["scan_reports"],
+	OwnedWorkflowTableSQL["rri_sessions"],
+	OwnedWorkflowTableSQL["designs"],
 	`CREATE TABLE IF NOT EXISTS completion_reports (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, instruction_pack_id TEXT DEFAULT '', instruction_pack_version INTEGER DEFAULT 0, instruction_pack_hash TEXT DEFAULT '', effective_contract_snapshot_id TEXT DEFAULT '', effective_contract_snapshot_hash TEXT DEFAULT '', pipeline_run_id TEXT DEFAULT '', status TEXT NOT NULL CHECK(status IN ('done','partial','blocked','failed')), summary TEXT DEFAULT '', report_markdown TEXT DEFAULT '', files_changed_json TEXT DEFAULT '', tests_run_json TEXT DEFAULT '', acceptance_results_json TEXT DEFAULT '', issues_json TEXT DEFAULT '', deviations_json TEXT DEFAULT '', suggestions_json TEXT DEFAULT '', created_by_model TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')))`,
 	`CREATE TABLE IF NOT EXISTS task_materializations (task_id TEXT PRIMARY KEY REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT NOT NULL REFERENCES epics(id) ON DELETE CASCADE, plan_node_key TEXT NOT NULL, design_id TEXT NOT NULL REFERENCES designs(id), design_version INTEGER NOT NULL, execution_policy TEXT DEFAULT 'strict_sequential' CHECK(execution_policy IN ('strict_sequential','partially_parallel','parallel_allowed','deferred_optional')), ordinal INTEGER NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(epic_id,plan_node_key,design_id))`,
 	`CREATE TABLE IF NOT EXISTS task_instruction_packs (id TEXT PRIMARY KEY, display_key TEXT NOT NULL UNIQUE, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, version INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','active','stale','superseded')), source_type TEXT NOT NULL CHECK(source_type IN ('epic_task_plan','standalone_task','standalone_design')), source_task_revision INTEGER NOT NULL, source_design_id TEXT DEFAULT '', source_design_version INTEGER DEFAULT 0, revision_kind TEXT NOT NULL DEFAULT 'initial' CHECK(revision_kind IN ('initial','scope','verification','contract','execution')), goal TEXT NOT NULL, module TEXT DEFAULT '', estimated_effort_minutes INTEGER DEFAULT 0, files_json TEXT NOT NULL, patterns_json TEXT NOT NULL, business_rules_json TEXT NOT NULL, validation_rules_json TEXT NOT NULL, error_handling_json TEXT NOT NULL, state_transitions_json TEXT NOT NULL, contract_obligations_json TEXT NOT NULL, constraints_json TEXT NOT NULL, verification_json TEXT NOT NULL, requirement_snapshots_json TEXT NOT NULL, content_schema_version INTEGER NOT NULL DEFAULT 1, skill_families_json TEXT NOT NULL DEFAULT '[]', effective_contract_snapshot_id TEXT DEFAULT '', effective_contract_snapshot_hash TEXT DEFAULT '', content_hash TEXT NOT NULL, activated_at TEXT DEFAULT '', stale_at TEXT DEFAULT '', superseded_at TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), UNIQUE(task_id,version))`,
 	`CREATE TABLE IF NOT EXISTS instruction_pack_requirement_links (instruction_pack_id TEXT NOT NULL REFERENCES task_instruction_packs(id) ON DELETE CASCADE, requirement_id TEXT NOT NULL REFERENCES requirements(id), created_at TEXT DEFAULT (datetime('now')), PRIMARY KEY(instruction_pack_id,requirement_id))`,
-	ownedWorkflowTableSQL["verification_reports"],
+	OwnedWorkflowTableSQL["verification_reports"],
 	`CREATE TABLE IF NOT EXISTS verification_items (id TEXT PRIMARY KEY, verification_report_id TEXT NOT NULL REFERENCES verification_reports(id) ON DELETE CASCADE, requirement_id TEXT REFERENCES requirements(id) ON DELETE SET NULL, status TEXT NOT NULL CHECK(status IN ('pass','fail','partial','deferred','not_applicable')), evidence TEXT DEFAULT '', notes TEXT DEFAULT '', "commit" TEXT DEFAULT '')`,
-	ownedWorkflowTableSQL["escalations"],
+	OwnedWorkflowTableSQL["escalations"],
 	`CREATE TABLE IF NOT EXISTS contract_operations (id TEXT PRIMARY KEY, task_id TEXT REFERENCES tasks(id) ON DELETE CASCADE, epic_id TEXT REFERENCES epics(id) ON DELETE CASCADE, operation_type TEXT NOT NULL CHECK(operation_type IN ('replace','withdraw','defer')), status TEXT NOT NULL DEFAULT 'draft' CHECK(status IN ('draft','approved','rejected')), inherit_to_descendants INTEGER NOT NULL DEFAULT 0 CHECK(inherit_to_descendants IN (0,1)), replacement_requirement_id TEXT REFERENCES requirements(id), resume_condition TEXT DEFAULT '' CHECK(resume_condition IN ('','subject_completed','owner_reactivation')), completed_task_impact TEXT NOT NULL DEFAULT 'none' CHECK(completed_task_impact IN ('none','review')), owner_decision_id TEXT REFERENCES owner_decisions(id), created_at TEXT DEFAULT (datetime('now')), approved_at TEXT DEFAULT '', reactivated_at TEXT DEFAULT '', CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)), CHECK((operation_type='replace')=(replacement_requirement_id IS NOT NULL)))`,
 	`CREATE TABLE IF NOT EXISTS contract_operation_targets (operation_id TEXT NOT NULL REFERENCES contract_operations(id) ON DELETE CASCADE, requirement_id TEXT NOT NULL REFERENCES requirements(id), PRIMARY KEY(operation_id,requirement_id))`,
 	`CREATE TABLE IF NOT EXISTS effective_contract_snapshots (id TEXT PRIMARY KEY, task_id TEXT NOT NULL REFERENCES tasks(id) ON DELETE CASCADE, content_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')))`,
@@ -154,58 +154,58 @@ var legacySchemaStatements = []string{
 	`CREATE TRIGGER trg_requirement_content_stales_packs AFTER UPDATE OF requirement_key,title,description,acceptance_criteria ON requirements BEGIN UPDATE task_instruction_packs SET status='stale',stale_at=datetime('now') WHERE status='active' AND id IN (SELECT instruction_pack_id FROM instruction_pack_requirement_links WHERE requirement_id=NEW.id); UPDATE tasks SET review_status='pending',reviewed_instruction_pack_id='',owner_status='pending' WHERE id IN (SELECT task_id FROM task_instruction_packs WHERE status='stale' AND id IN (SELECT instruction_pack_id FROM instruction_pack_requirement_links WHERE requirement_id=NEW.id)); UPDATE verification_reports SET superseded_at=datetime('now') WHERE task_id IN (SELECT task_id FROM task_instruction_packs WHERE status='stale' AND id IN (SELECT instruction_pack_id FROM instruction_pack_requirement_links WHERE requirement_id=NEW.id)) AND superseded_at=''; UPDATE epics SET owner_status='pending' WHERE id IN (SELECT epic_id FROM tasks WHERE id IN (SELECT task_id FROM task_instruction_packs WHERE status='stale' AND id IN (SELECT instruction_pack_id FROM instruction_pack_requirement_links WHERE requirement_id=NEW.id))); END`,
 }
 
-// schemaDB is the handle a migration step runs against. Every step now runs on
+// DB is the handle a migration step runs against. Every step now runs on
 // one transaction, so both *sql.DB (ad-hoc use outside the runner) and *sql.Tx
 // satisfy it.
-type schemaDB interface {
+type DB interface {
 	Exec(query string, args ...any) (sql.Result, error)
 	Query(query string, args ...any) (*sql.Rows, error)
 	QueryRow(query string, args ...any) *sql.Row
 }
 
-// schemaMigration is one ordered schema step. Every step is one-shot and
+// Migration is one ordered schema step. Every step is one-shot and
 // transactional: it is skipped once its version is recorded, so an
 // already-migrated database performs no DDL or data mutation on later opens,
 // and the step's operations plus its version record commit or roll back
 // together — a crash leaves the step fully applied or not at all.
-type schemaMigration struct {
-	version    int
-	name       string
-	legacyOnly bool
-	apply      func(db schemaDB) error
+type Migration struct {
+	Version    int
+	Name       string
+	LegacyOnly bool
+	Apply      func(db DB) error
 }
 
-func schemaMigrationSteps() []schemaMigration {
-	return []schemaMigration{
-		{version: 1, name: "pre_reconcile_schema", apply: reconcileLegacySchema},
-		{version: 2, name: "artifact_stage_widening", apply: migrateArtifactStageSchema},
-		{version: 3, name: "pipeline_columns_reconcile", apply: applyPipelineColumnMigrations},
-		{version: 4, name: "canonical_baseline", apply: func(db schemaDB) error {
-			return applySchemaStatements(db, canonicalSchemaStatements)
+func migrationSteps() []Migration {
+	return []Migration{
+		{Version: 1, Name: "pre_reconcile_schema", Apply: ReconcileLegacySchema},
+		{Version: 2, Name: "artifact_stage_widening", Apply: MigrateArtifactStageSchema},
+		{Version: 3, Name: "pipeline_columns_reconcile", Apply: ApplyPipelineColumnMigrations},
+		{Version: 4, Name: "canonical_baseline", Apply: func(db DB) error {
+			return applyStatements(db, CanonicalSchemaStatements)
 		}},
-		{version: 5, name: "legacy_schema_bootstrap", legacyOnly: true, apply: func(db schemaDB) error {
-			return applySchemaStatements(db, legacySchemaStatements)
+		{Version: 5, Name: "legacy_schema_bootstrap", LegacyOnly: true, Apply: func(db DB) error {
+			return applyStatements(db, LegacySchemaStatements)
 		}},
-		{version: 6, name: "canonical_backfills", apply: applyCanonicalBackfills},
-		{version: 7, name: "legacy_pack_backfills", legacyOnly: true, apply: func(db schemaDB) error {
-			if err := migrateLegacyWorkItemInstructionPacks(db); err != nil {
+		{Version: 6, Name: "canonical_backfills", Apply: ApplyCanonicalBackfills},
+		{Version: 7, Name: "legacy_pack_backfills", LegacyOnly: true, Apply: func(db DB) error {
+			if err := MigrateLegacyWorkItemInstructionPacks(db); err != nil {
 				return err
 			}
-			return applyLegacyPackBackfills(db)
+			return ApplyLegacyPackBackfills(db)
 		}},
-		{version: 8, name: "decomposition_policy_projection", apply: applyDecompositionProjectionColumns},
-		{version: 9, name: "blueprint_annotation_evidence", apply: applyBlueprintAnnotationEvidenceColumn},
+		{Version: 8, Name: "decomposition_policy_projection", Apply: ApplyDecompositionProjectionColumns},
+		{Version: 9, Name: "blueprint_annotation_evidence", Apply: ApplyBlueprintAnnotationEvidenceColumn},
 	}
 }
 
-// applyBlueprintAnnotationEvidenceColumn adds the blueprint disposition
+// ApplyBlueprintAnnotationEvidenceColumn adds the blueprint disposition
 // evidence column (OB-F3-3) to workflow_checkpoints on databases created
 // before the annotation review loop. The ALTER is guarded by columnExists so a
 // re-run against an already-widened table (the older-binary test path clears
-// schema_migrations records) stays idempotent, and by tableExists so partial
+// schema_migrations records) stays idempotent, and by TableExists so partial
 // baseline shapes without the table are left to the canonical statement pass.
-func applyBlueprintAnnotationEvidenceColumn(db schemaDB) error {
-	if !tableExists(db, "workflow_checkpoints") {
+func ApplyBlueprintAnnotationEvidenceColumn(db DB) error {
+	if !TableExists(db, "workflow_checkpoints") {
 		return nil
 	}
 	present, err := columnExists(db, "workflow_checkpoints", "dispositions_json")
@@ -221,7 +221,7 @@ func applyBlueprintAnnotationEvidenceColumn(db schemaDB) error {
 	return nil
 }
 
-// applyDecompositionProjectionColumns adds the decomposition policy v2
+// ApplyDecompositionProjectionColumns adds the decomposition policy v2
 // projection surface: edge rationales on the canonical blocking-edge table and
 // per-Work-Item decomposition/provenance columns recorded by materialization.
 // decomposition_mode defaults to 'vertical' — the policy's absent-mode default —
@@ -233,7 +233,7 @@ func applyBlueprintAnnotationEvidenceColumn(db schemaDB) error {
 // Note: the rationale lands on work_item_relations — the canonical blocking-edge
 // table materialization and `pic show` read — not on the legacy
 // work_item_dependencies table retired by the canonical backfills.
-func applyDecompositionProjectionColumns(db schemaDB) error {
+func ApplyDecompositionProjectionColumns(db DB) error {
 	projections := []struct{ table, column, ddl string }{
 		{"work_item_relations", "rationale", `ALTER TABLE work_item_relations ADD COLUMN rationale TEXT NOT NULL DEFAULT ''`},
 		{"work_items", "decomposition_mode", `ALTER TABLE work_items ADD COLUMN decomposition_mode TEXT NOT NULL DEFAULT 'vertical'`},
@@ -258,7 +258,7 @@ func applyDecompositionProjectionColumns(db schemaDB) error {
 	return nil
 }
 
-func columnExists(db schemaDB, table, column string) (bool, error) {
+func columnExists(db DB, table, column string) (bool, error) {
 	rows, err := db.Query(fmt.Sprintf(`PRAGMA table_info(%s)`, table))
 	if err != nil {
 		return false, err
@@ -280,14 +280,14 @@ func columnExists(db schemaDB, table, column string) (bool, error) {
 	return false, rows.Err()
 }
 
-func reconcileLegacySchema(db schemaDB) error {
-	if err := removeLegacyTIPSchema(db); err != nil {
+func ReconcileLegacySchema(db DB) error {
+	if err := RemoveLegacyTIPSchema(db); err != nil {
 		return fmt.Errorf("remove legacy TIP schema: %w", err)
 	}
-	if err := migrateEpicWorkflowSchema(db); err != nil {
+	if err := MigrateEpicWorkflowSchema(db); err != nil {
 		return fmt.Errorf("migrate legacy workflow schema: %w", err)
 	}
-	if tableExists(db, "work_item_materializations") {
+	if TableExists(db, "work_item_materializations") {
 		var tableSQL string
 		if err := db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='work_item_materializations'`).Scan(&tableSQL); err != nil {
 			return err
@@ -307,10 +307,10 @@ func reconcileLegacySchema(db schemaDB) error {
 	return nil
 }
 
-// applySchemaMigrations applies the ordered schema steps once per database.
+// ApplyMigrations applies the ordered schema steps once per database.
 // Legacy steps are skipped (and never recorded) on databases that never carried
 // the retired Epic/Task tables.
-func applySchemaMigrations(db *sql.DB) error {
+func ApplyMigrations(db *sql.DB) error {
 	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY, name TEXT NOT NULL, applied_at TEXT DEFAULT (datetime('now')))`); err != nil {
 		return err
 	}
@@ -332,35 +332,35 @@ func applySchemaMigrations(db *sql.DB) error {
 		return err
 	}
 	rows.Close()
-	legacySchema := tableExists(db, "tasks") || tableExists(db, "epics")
-	for _, migration := range schemaMigrationSteps() {
-		if migration.legacyOnly && !legacySchema {
+	legacySchema := TableExists(db, "tasks") || TableExists(db, "epics")
+	for _, migration := range migrationSteps() {
+		if migration.LegacyOnly && !legacySchema {
 			continue
 		}
-		if applied[migration.version] {
+		if applied[migration.Version] {
 			continue
 		}
-		if err := applySchemaMigration(context.Background(), db, migration); err != nil {
-			return fmt.Errorf("schema migration %03d_%s: %w", migration.version, migration.name, err)
+		if err := ApplyMigration(context.Background(), db, migration); err != nil {
+			return fmt.Errorf("schema migration %03d_%s: %w", migration.Version, migration.Name, err)
 		}
 	}
 	// Convergent per-open backfill: retired dependency/gate edge tables keep
 	// receiving rows after the version-gated migration applied (post-migration
 	// APM imports), and readiness reads only their work_item_relations projection.
-	if err := applyConvergentDependencyBackfill(db); err != nil {
+	if err := ApplyConvergentDependencyBackfill(db); err != nil {
 		return err
 	}
 	return nil
 }
 
-// applySchemaMigration runs one step and records its version inside a single
+// ApplyMigration runs one step and records its version inside a single
 // transaction on one pinned connection. foreign_keys and legacy_alter_table are
 // connection-scoped in SQLite and cannot change inside a transaction, and
 // database/sql gives no affinity between db.Exec and db.Begin — a pragma sent
 // through the pool is not guaranteed to land on the connection the transaction
 // ends up on. The pragma setup, the step, the version record, and the pragma
 // restore therefore all run on one explicitly pinned *sql.Conn.
-func applySchemaMigration(ctx context.Context, db *sql.DB, migration schemaMigration) error {
+func ApplyMigration(ctx context.Context, db *sql.DB, migration Migration) error {
 	conn, err := db.Conn(ctx)
 	if err != nil {
 		return err
@@ -399,10 +399,10 @@ func applySchemaMigration(ctx context.Context, db *sql.DB, migration schemaMigra
 			_ = restore()
 		}
 	}()
-	if err := migration.apply(tx); err != nil {
+	if err := migration.Apply(tx); err != nil {
 		return err
 	}
-	if _, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version, name) VALUES(?, ?)`, migration.version, migration.name); err != nil {
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO schema_migrations(version, name) VALUES(?, ?)`, migration.Version, migration.Name); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -412,8 +412,8 @@ func applySchemaMigration(ctx context.Context, db *sql.DB, migration schemaMigra
 	return restore()
 }
 
-// applySchemaStatements executes one classified statement batch in order.
-func applySchemaStatements(db schemaDB, statements []string) error {
+// applyStatements executes one classified statement batch in order.
+func applyStatements(db DB, statements []string) error {
 	for _, stmt := range statements {
 		if _, err := db.Exec(stmt); err != nil {
 			return fmt.Errorf("initialize schema statement %q: %w", stmt, err)
@@ -422,9 +422,9 @@ func applySchemaStatements(db schemaDB, statements []string) error {
 	return nil
 }
 
-// applyPipelineColumnMigrations adds columns that predate a table's current
+// ApplyPipelineColumnMigrations adds columns that predate a table's current
 // definition and rebuilds tables whose shape or foreign keys drifted.
-func applyPipelineColumnMigrations(db schemaDB) error {
+func ApplyPipelineColumnMigrations(db DB) error {
 	for _, migration := range []struct{ table, column, definition string }{
 		{"epics", "workflow_mode", "TEXT DEFAULT 'full'"},
 		{"epics", "design_status", "TEXT DEFAULT ''"},
@@ -483,14 +483,14 @@ func applyPipelineColumnMigrations(db schemaDB) error {
 		{"pipeline_runs", "profile_version", "INTEGER DEFAULT 0"},
 		{"pipeline_runs", "profile_hash", "TEXT DEFAULT ''"},
 	} {
-		if tableExists(db, migration.table) && !hasColumn(db, migration.table, migration.column) {
-			if _, err := db.Exec(`ALTER TABLE ` + migration.table + ` ADD COLUMN ` + migration.column + ` ` + migration.definition); err != nil && !hasColumn(db, migration.table, migration.column) {
+		if TableExists(db, migration.table) && !HasColumn(db, migration.table, migration.column) {
+			if _, err := db.Exec(`ALTER TABLE ` + migration.table + ` ADD COLUMN ` + migration.column + ` ` + migration.definition); err != nil && !HasColumn(db, migration.table, migration.column) {
 				return err
 			}
 		}
 	}
-	if hasColumn(db, "pipeline_runs", "integrated_patch") {
-		if _, err := db.Exec(`ALTER TABLE pipeline_runs DROP COLUMN integrated_patch`); err != nil && hasColumn(db, "pipeline_runs", "integrated_patch") {
+	if HasColumn(db, "pipeline_runs", "integrated_patch") {
+		if _, err := db.Exec(`ALTER TABLE pipeline_runs DROP COLUMN integrated_patch`); err != nil && HasColumn(db, "pipeline_runs", "integrated_patch") {
 			return err
 		}
 	}
@@ -503,7 +503,7 @@ func applyPipelineColumnMigrations(db schemaDB) error {
 		pipelineStageExprs := map[string]string{
 			"stage": `CASE stage WHEN 'qa' THEN 'autofix' WHEN 'verify' THEN 'review' ELSE stage END`,
 		}
-		if err := rebuildSchemaTable(db, "pipeline_runs", pipelineRunsTableSQL, pipelineStageExprs); err != nil {
+		if err := rebuildSchemaTable(db, "pipeline_runs", PipelineRunsTableSQL, pipelineStageExprs); err != nil {
 			return err
 		}
 	}
@@ -512,7 +512,7 @@ func applyPipelineColumnMigrations(db schemaDB) error {
 		return err
 	}
 	if completionRunTarget == "pipeline_runs__workflow_migration" {
-		if err := rebuildSchemaTable(db, "work_item_completion_reports", workItemCompletionReportsTableSQL); err != nil {
+		if err := rebuildSchemaTable(db, "work_item_completion_reports", WorkItemCompletionReportsTableSQL); err != nil {
 			return err
 		}
 	}
@@ -526,17 +526,17 @@ func applyPipelineColumnMigrations(db schemaDB) error {
 		// completion_report_id NOT NULL) cannot hold RRI deferral rows, so
 		// rebuild; the canonical statement batch re-runs after this step and
 		// recreates the item index on the rebuilt table.
-		if err := rebuildSchemaTable(db, "work_item_owner_decisions", workItemOwnerDecisionsTableSQL); err != nil {
+		if err := rebuildSchemaTable(db, "work_item_owner_decisions", WorkItemOwnerDecisionsTableSQL); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// applyCanonicalBackfills reconciles canonical evidence that may have completed
+// ApplyCanonicalBackfills reconciles canonical evidence that may have completed
 // after a Work Item row was last written. The UPDATEs are convergent (guarded
 // by WHERE clauses), so they re-run on every open exactly as before.
-func applyCanonicalBackfills(db schemaDB) error {
+func ApplyCanonicalBackfills(db DB) error {
 	if _, err := db.Exec(`UPDATE work_items SET review_status='passed' WHERE status='done' AND type IN ('task','bug','chore') AND EXISTS (
 		SELECT 1 FROM work_item_owner_decisions decision
 		JOIN work_item_completion_reports completion ON completion.id=decision.completion_report_id AND completion.work_item_id=decision.work_item_id AND completion.status='done'
@@ -559,20 +559,20 @@ func applyCanonicalBackfills(db schemaDB) error {
 	)`); err != nil {
 		return err
 	}
-	if err := applyConvergentDependencyBackfill(db); err != nil {
+	if err := ApplyConvergentDependencyBackfill(db); err != nil {
 		return err
 	}
 	return nil
 }
 
-// applyConvergentDependencyBackfill projects retired dependency and gate edge
+// ApplyConvergentDependencyBackfill projects retired dependency and gate edge
 // tables onto work_item_relations blocks/gates rows. The migration runner
 // applies version 6 exactly once, but edges keep arriving after that (the APM
 // import writes work_item_dependencies rows post-migration), and the readiness
 // SQL (workitem.ReadySQL) reads only work_item_relations — so this backfill must
 // converge on every open, not just at migration time. INSERT OR IGNORE keeps it
 // idempotent under the wir-migrated- id scheme.
-func applyConvergentDependencyBackfill(db schemaDB) error {
+func ApplyConvergentDependencyBackfill(db DB) error {
 	// Minimal schemas (hand-crafted fixtures recording migration versions
 	// without the tables those versions created) have nothing to project;
 	// skip instead of failing initDB on tables every migrated real database
@@ -593,9 +593,9 @@ func applyConvergentDependencyBackfill(db schemaDB) error {
 	return nil
 }
 
-// applyLegacyPackBackfills recomputes legacy pack revision kinds and supersedes
+// ApplyLegacyPackBackfills recomputes legacy pack revision kinds and supersedes
 // legacy verification reports after migration. Both are convergent.
-func applyLegacyPackBackfills(db schemaDB) error {
+func ApplyLegacyPackBackfills(db DB) error {
 	if _, err := db.Exec(`UPDATE task_instruction_packs AS current SET revision_kind=CASE
 	WHEN NOT EXISTS(SELECT 1 FROM task_instruction_packs previous WHERE previous.task_id=current.task_id AND previous.version<current.version) THEN 'initial'
 	WHEN COALESCE(current.effective_contract_snapshot_hash,'')!=COALESCE((SELECT previous.effective_contract_snapshot_hash FROM task_instruction_packs previous WHERE previous.task_id=current.task_id AND previous.version<current.version ORDER BY previous.version DESC LIMIT 1),'') THEN 'contract'

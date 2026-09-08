@@ -1,13 +1,13 @@
-package main
+package schema
 
 import (
 	"database/sql"
-
 	"fmt"
+	"github.com/earendil-works/task-system/go-pic/internal/store"
 	"strings"
 )
 
-const tasksTableSQL = `CREATE TABLE IF NOT EXISTS tasks (
+const TasksTableSQL = `CREATE TABLE IF NOT EXISTS tasks (
 	id TEXT PRIMARY KEY,
 	epic_id TEXT REFERENCES epics(id),
 	title TEXT NOT NULL,
@@ -30,7 +30,7 @@ const tasksTableSQL = `CREATE TABLE IF NOT EXISTS tasks (
 	created_at TEXT DEFAULT (datetime('now'))
 )`
 
-const workItemsTableSQL = `CREATE TABLE IF NOT EXISTS work_items (
+const WorkItemsTableSQL = `CREATE TABLE IF NOT EXISTS work_items (
 	id TEXT PRIMARY KEY,
 	type TEXT NOT NULL CHECK(type IN ('epic','feature','task','bug','chore','gate')),
 	parent_id TEXT REFERENCES work_items(id),
@@ -50,7 +50,7 @@ const workItemsTableSQL = `CREATE TABLE IF NOT EXISTS work_items (
 // Artifact stage taxonomy constraint: rri_t_scenarios is an additive retained
 // scenario-list stage in both SQLite CHECK constraints; the original planning
 // stage names and their gating behavior stay unchanged.
-const workItemArtifactsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_artifacts (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','rri_t_scenarios','vision','blueprint','contracts','task_graph')), revision INTEGER NOT NULL CHECK(revision>0), content TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,revision))`
+const WorkItemArtifactsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_artifacts (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','rri_t_scenarios','vision','blueprint','contracts','task_graph')), revision INTEGER NOT NULL CHECK(revision>0), content TEXT NOT NULL, content_hash TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,revision))`
 
 // Blueprint disposition evidence constraint (OB-F3-3): the approved Blueprint
 // checkpoint carries the terminal annotation dispositions as durable approval
@@ -58,12 +58,12 @@ const workItemArtifactsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_artifact
 // queryable from SQLite. dispositions_json defaults to ” for every other
 // stage; the column is widened on older databases by the guarded migration
 // step in schema_bootstrap.go.
-const workflowCheckpointsTableSQL = `CREATE TABLE IF NOT EXISTS workflow_checkpoints (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','rri_t_scenarios','vision','blueprint','contracts','task_graph')), artifact_id TEXT NOT NULL, artifact_revision INTEGER NOT NULL CHECK(artifact_revision>0), content_hash TEXT NOT NULL, decision_type TEXT NOT NULL, dispositions_json TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,artifact_revision))`
+const WorkflowCheckpointsTableSQL = `CREATE TABLE IF NOT EXISTS workflow_checkpoints (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, stage TEXT NOT NULL CHECK(stage IN ('scan','rri','rri_t_scenarios','vision','blueprint','contracts','task_graph')), artifact_id TEXT NOT NULL, artifact_revision INTEGER NOT NULL CHECK(artifact_revision>0), content_hash TEXT NOT NULL, decision_type TEXT NOT NULL, dispositions_json TEXT NOT NULL DEFAULT '', created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,stage,artifact_revision))`
 
-var ownedWorkflowTableSQL = map[string]string{
+var OwnedWorkflowTableSQL = map[string]string{
 	// Canonical Work Item flow stores wi-/wip- IDs in task_id/epic_id, so these
 	// tables must not carry legacy REFERENCES tasks(id)/epics(id) constraints;
-	// migrateEpicWorkflowSchema rebuilds databases that still have them.
+	// MigrateEpicWorkflowSchema rebuilds databases that still have them.
 	"scan_reports":         `CREATE TABLE IF NOT EXISTS scan_reports (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, status TEXT DEFAULT 'completed' CHECK(status IN ('completed','partial','failed')), summary TEXT DEFAULT '', tech_stack_json TEXT DEFAULT '', architecture_json TEXT DEFAULT '', commands_json TEXT DEFAULT '', patterns_json TEXT DEFAULT '', risks_json TEXT DEFAULT '', raw_report TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
 	"rri_sessions":         `CREATE TABLE IF NOT EXISTS rri_sessions (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, status TEXT DEFAULT 'preparing' CHECK(status IN ('preparing','interviewing','awaiting_confirmation','completed','abandoned')), interview_state_json TEXT DEFAULT '', report_markdown TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), updated_at TEXT DEFAULT (datetime('now')), completed_at TEXT DEFAULT '', CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
 	"requirements":         `CREATE TABLE IF NOT EXISTS requirements (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, rri_session_id TEXT, requirement_key TEXT NOT NULL, contract_key TEXT DEFAULT '', inherit_to_descendants INTEGER NOT NULL DEFAULT 0 CHECK(inherit_to_descendants IN (0,1)), persona TEXT DEFAULT '', priority TEXT DEFAULT 'tier2' CHECK(priority IN ('tier1','tier2','tier3')), title TEXT NOT NULL, description TEXT DEFAULT '', acceptance_criteria TEXT DEFAULT '', status TEXT DEFAULT 'pending' CHECK(status IN ('pending','satisfied','failed','deferred')), source TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
@@ -73,22 +73,22 @@ var ownedWorkflowTableSQL = map[string]string{
 	"owner_decisions":      `CREATE TABLE IF NOT EXISTS owner_decisions (id TEXT PRIMARY KEY, task_id TEXT, epic_id TEXT, related_type TEXT DEFAULT '', related_id TEXT DEFAULT '', decision_type TEXT NOT NULL, decision TEXT NOT NULL, notes TEXT DEFAULT '', created_at TEXT DEFAULT (datetime('now')), CHECK((task_id IS NOT NULL) != (epic_id IS NOT NULL)))`,
 }
 
-func hasColumn(db workflowStore, table, column string) bool {
-	ok, _ := rowExists(db, `SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
+func HasColumn(db DB, table, column string) bool {
+	ok, _ := store.RowExists(db, `SELECT 1 FROM pragma_table_info(?) WHERE name = ?`, table, column)
 	return ok
 }
 
-func migrateEpicWorkflowSchema(db schemaDB) error {
-	if !tableExists(db, "tasks") && !tableExists(db, "epics") {
+func MigrateEpicWorkflowSchema(db DB) error {
+	if !TableExists(db, "tasks") && !TableExists(db, "epics") {
 		return nil
 	}
 	// Partial legacy states are supported: a database may carry either table
 	// alone, so every tasks-specific probe is guarded by table existence.
-	if tableExists(db, "tasks") {
+	if TableExists(db, "tasks") {
 		var epicNotNull int
 		_ = db.QueryRow(`SELECT "notnull" FROM pragma_table_info('tasks') WHERE name='epic_id'`).Scan(&epicNotNull)
-		if epicNotNull != 0 || !hasColumn(db, "tasks", "origin") || !hasColumn(db, "tasks", "revision") || hasColumn(db, "tasks", "refined") {
-			if err := rebuildSchemaTable(db, "tasks", tasksTableSQL); err != nil {
+		if epicNotNull != 0 || !HasColumn(db, "tasks", "origin") || !HasColumn(db, "tasks", "revision") || HasColumn(db, "tasks", "refined") {
+			if err := rebuildSchemaTable(db, "tasks", TasksTableSQL); err != nil {
 				return err
 			}
 		}
@@ -97,7 +97,7 @@ func migrateEpicWorkflowSchema(db schemaDB) error {
 		// would fail pragma_foreign_key_check. Normalize it to the empty
 		// sentinel; the canonical Work Item import records the same row with a
 		// null parent, and the legacy table stays inert history.
-		if tableExists(db, "epics") {
+		if TableExists(db, "epics") {
 			if _, err := db.Exec(`UPDATE tasks SET epic_id=NULL WHERE epic_id IS NOT NULL AND NOT EXISTS(SELECT 1 FROM epics WHERE epics.id=tasks.epic_id)`); err != nil {
 				return err
 			}
@@ -105,8 +105,8 @@ func migrateEpicWorkflowSchema(db schemaDB) error {
 			return err
 		}
 	}
-	for table, createSQL := range ownedWorkflowTableSQL {
-		if tableExists(db, table) && (!hasColumn(db, table, "epic_id") || ownerColumnNotNull(db, table, "task_id") || hasLegacySubjectForeignKey(db, table)) {
+	for table, createSQL := range OwnedWorkflowTableSQL {
+		if TableExists(db, table) && (!HasColumn(db, table, "epic_id") || ownerColumnNotNull(db, table, "task_id") || hasLegacySubjectForeignKey(db, table)) {
 			if err := rebuildSchemaTable(db, table, createSQL); err != nil {
 				return err
 			}
@@ -115,7 +115,7 @@ func migrateEpicWorkflowSchema(db schemaDB) error {
 	return migrateLegacyWorkItems(db)
 }
 
-// migrateArtifactStageSchema extends the additive rri_t_scenarios CHECK
+// MigrateArtifactStageSchema extends the additive rri_t_scenarios CHECK
 // constraint on databases created before the stage existed. initDB runs on
 // every command but CREATE TABLE IF NOT EXISTS never touches existing tables,
 // so an existing project would keep rejecting rri_t_scenarios rows. The
@@ -126,12 +126,12 @@ func migrateEpicWorkflowSchema(db schemaDB) error {
 // dropped here first because the old objects would otherwise travel with the
 // renamed legacy table and be dropped with it, or shadow the IF NOT EXISTS
 // recreation).
-func migrateArtifactStageSchema(db schemaDB) error {
+func MigrateArtifactStageSchema(db DB) error {
 	for table, createSQL := range map[string]string{
-		"work_item_artifacts":  workItemArtifactsTableSQL,
-		"workflow_checkpoints": workflowCheckpointsTableSQL,
+		"work_item_artifacts":  WorkItemArtifactsTableSQL,
+		"workflow_checkpoints": WorkflowCheckpointsTableSQL,
 	} {
-		if !tableExists(db, table) {
+		if !TableExists(db, table) {
 			continue
 		}
 		var tableSQL string
@@ -157,26 +157,26 @@ func migrateArtifactStageSchema(db schemaDB) error {
 
 // hasLegacySubjectForeignKey reports whether table still carries a REFERENCES
 // tasks(id) or epics(id) constraint from the pre-Work-Item schema.
-func hasLegacySubjectForeignKey(db schemaDB, table string) bool {
+func hasLegacySubjectForeignKey(db DB, table string) bool {
 	var target string
 	err := db.QueryRow(`SELECT "table" FROM pragma_foreign_key_list(?) WHERE "table" IN ('tasks','epics') LIMIT 1`, table).Scan(&target)
 	return err == nil
 }
 
-func migrateLegacyWorkItems(db schemaDB) error {
-	if !tableExists(db, "tasks") && !tableExists(db, "epics") {
+func migrateLegacyWorkItems(db DB) error {
+	if !TableExists(db, "tasks") && !TableExists(db, "epics") {
 		return nil
 	}
-	if _, err := db.Exec(workItemsTableSQL); err != nil {
+	if _, err := db.Exec(WorkItemsTableSQL); err != nil {
 		return err
 	}
-	if tableExists(db, "epics") {
+	if TableExists(db, "epics") {
 		if _, err := db.Exec(`INSERT OR IGNORE INTO work_items(id,type,title,description,status,priority,created_at)
 			SELECT id,'epic',title,description,status,'medium',created_at FROM epics`); err != nil {
 			return err
 		}
 	}
-	if tableExists(db, "tasks") {
+	if TableExists(db, "tasks") {
 		// A task whose epic was not imported (partial state or dangling
 		// reference) migrates with a null parent instead of failing the FK.
 		if _, err := db.Exec(`INSERT OR IGNORE INTO work_items(id,type,parent_id,title,description,status,priority,created_at)
@@ -187,7 +187,7 @@ func migrateLegacyWorkItems(db schemaDB) error {
 	return nil
 }
 
-func ownerColumnNotNull(db schemaDB, table, column string) bool {
+func ownerColumnNotNull(db DB, table, column string) bool {
 	var notNull int
 	_ = db.QueryRow(`SELECT "notnull" FROM pragma_table_info(?) WHERE name=?`, table, column).Scan(&notNull)
 	return notNull != 0
@@ -201,9 +201,9 @@ func ownerColumnNotNull(db schemaDB, table, column string) bool {
 // columnExprs (variadic, at most one map) optionally overrides the copied
 // expression for specific columns, e.g. to translate retired legacy values
 // that would violate the rebuilt table's CHECK constraints.
-func rebuildSchemaTable(db schemaDB, table, createSQL string, columnExprs ...map[string]string) error {
+func rebuildSchemaTable(db DB, table, createSQL string, columnExprs ...map[string]string) error {
 	old := table + "__workflow_migration"
-	if tableExists(db, old) {
+	if TableExists(db, old) {
 		return fmt.Errorf("incomplete workflow migration: %s already exists", old)
 	}
 	oldColumns, err := tableColumns(db, table)
