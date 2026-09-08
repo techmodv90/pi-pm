@@ -55,21 +55,10 @@ function rriTScenarioIdentity(scenario: any): string {
   return `${scenario.dimension}|${scenario.stress_axis}|${scenario.requirement_id}|${scenario.id}`;
 }
 
-// RRI-T save-before-execution (OB-5): persist the validated persona authoring
-// result as the rri_t_scenarios artifact before any prompt asks the contractor
-// to execute or grade; a resumed verification reuses the saved artifact instead
-// of re-running persona subagents, and an authoring or save failure surfaces as
-// a blocked aggregate verification rather than an unpersisted execution list.
-// Subagent sessions only observe lifecycle state and never author scenarios.
-async function ensureRriTScenariosArtifact(scheduler: PipelineScheduler, data: any, cwd: string): Promise<void> {
-  if (process.env.PI_TASK_AGENT_NAME) return;
-  if (latestRriTScenarios(data)) return;
-  const workItemId = data?.work_item?.id;
-  if (!workItemId) throw new Error("RRI-T scenario authoring requires a Work Item");
-  const authored = await scheduler.runRriT(data);
-  const saved = execPic(["work-item", "artifact-save", workItemId, "rri_t_scenarios", authored], cwd);
-  if (saved.error) throw new Error(`RRI-T scenario artifact save failed: ${saved.error}`);
-}
+// RRI-T save-before-execution (OB-5) keeps its artifact persistence, but the
+// scenario authoring is in-session contractor methodology work (see
+// /apm review): no persona subagents are spawned for authoring, and grading
+// below fails closed when the persisted artifact is missing.
 
 // RRI-T contractor grading (OB-6/OB-7): compile the submission from the
 // persisted scenario artifact and the contractor's in-session evidence; each
@@ -746,18 +735,8 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
           const child = execPic(["show", params.id!], ctx.cwd);
           const parentID = child.work_item?.parent_id;
           if (parentID) {
-            const parent = execPic(["show", parentID], ctx.cwd);
             const parentStatus = execPic(["work-item", "workflow-status", parentID], ctx.cwd);
             if (parentStatus.next_stage === "aggregate_verification") {
-              try {
-                // RRI-T save-before-execution (OB-5): persist the authored
-                // scenario artifact before the contractor is asked to execute or
-                // grade anything; a saved artifact is reused on resumption.
-                await ensureRriTScenariosArtifact(pipelineScheduler, parent, ctx.cwd);
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                return { content: [{ type: "text", text: `Aggregate verification blocked: ${message}` }], details: { verification: result, next_stage: "aggregate_verification", error: message }, isError: true };
-              }
               const parentWithScenarios = execPic(["show", parentID], ctx.cwd);
               return { content: [{ type: "text", text: buildAggregateVerifyPrompt(parentWithScenarios) }], details: { verification: result, next_stage: "aggregate_verification", work_item: parentWithScenarios.work_item } };
             }
@@ -805,18 +784,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
         if (!result.error && params.action === "work_item_workflow_status" && ["aggregate_verification", "owner_acceptance", "merge_pending"].includes(result.next_stage)) {
           const data = execPic(["show", params.id!], ctx.cwd);
           if (data.error) text = `Error: ${data.error}`;
-          else if (result.next_stage === "aggregate_verification") {
-            try {
-              // RRI-T save-before-execution (OB-5): when verification resumes,
-              // reuse the persisted scenarios and only author when never saved;
-              // submission later blocks unless the artifact is present.
-              await ensureRriTScenariosArtifact(pipelineScheduler, data, ctx.cwd);
-              text = buildAggregateVerifyPrompt(execPic(["show", params.id!], ctx.cwd));
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Aggregate verification blocked: ${message}` }], details: { ...result, error: message }, isError: true };
-            }
-          }
+          else if (result.next_stage === "aggregate_verification") text = buildAggregateVerifyPrompt(data);
           else text = buildWorkItemContinuePrompt(result, data.work_item);
         }
   

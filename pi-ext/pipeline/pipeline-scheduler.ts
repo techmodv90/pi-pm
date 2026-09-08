@@ -13,13 +13,12 @@ import { loadLatestBlueprintDraft } from "../core/blueprint-drafts.ts";
 import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
 import { buildTaskVerifyPrompt, buildPlanningHandoffXml } from "../tasking/work-item-prompts.ts";
 import { discoverAgents } from "../subagent/agents.ts";
-import { cleanupOrphanedSubagentWorktrees, finalAssistantText, prepareSubagentWorktree, startSubagentResilient } from "../subagent/runner.ts";
+import { cleanupOrphanedSubagentWorktrees, prepareSubagentWorktree } from "../subagent/runner.ts";
 import { bindPipelineDispatch, findPipelineDispatch, listPipelineDispatches, writePipelineDispatch, writePipelineOutputLog, writePipelineStatus, type PipelineDispatch, type PipelineDispatchReport } from "./pipeline-dispatch.ts";
 
 import type { SubagentResult } from "../subagent/types.ts";
 import { parsePicShow, type PicShowDocument } from "./pic-show.ts";
 import { parsePipelineRuns, type PipelineRun, type PipelineStage } from "./pipeline-types.ts";
-import { mergeRriTAuthoringResults, parseRriTPersonaResult, RRI_T_PERSONAS } from "./rri-t.ts";
 import { activePackDoneReports, currentFailedReview, isMutationStage, latestVerificationAfter, parseReviewReport, parseTaskCompletionReport, persistedReviewOutcome, pipelineVerificationBlockReason } from "./report-parsing.ts";
 import { assertCleanGit, assertReviewBaseCurrent, finalizeReviewedIntegration, mergeAggregateBranch, rejectedCandidatePatch, repositoryHead, verificationEnvironmentFingerprint, type AggregateDeliveryState } from "./integration.ts";
 import { DEFAULT_GENERATED_FILES, filterGeneratedFiles, pipelineFailureResult, validateWorkerOutput, validateWorkerPatchArtifact, workerPatch } from "./worker-validation.ts";
@@ -158,50 +157,6 @@ export class PipelineScheduler {
   private retainedFailures = new Map<string, string>();
 
   constructor(pi: ExtensionAPI) { this.pi = pi; }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  async runRriT(data: any): Promise<string> {
-    const item = data?.work_item || {};
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    const scope = JSON.stringify({ work_item: item, requirements: data?.requirements || [], artifacts: (data?.artifacts || []).filter((artifact: any) => ["scan", "vision", "blueprint", "contracts", "task_graph"].includes(artifact.stage)), children: data?.children || [] });
-    const text = `${item.title || item.id || "Aggregate"} ${item.description || ""} ${scope}`;
-    const personas: string[] = ["QA / Tester"];
-    if ((data?.requirements || []).length || /rule|workflow|policy|report|requirement|business/i.test(text)) personas.push("Business Analyst");
-    if (/ui|ux|user|screen|page|form|mobile|accessib/i.test(text)) personas.push("End User");
-    if (/api|database|integration|code|module|dependency|performance|backend|existing/i.test(text) || !personas.includes("Developer")) personas.push("Developer");
-    if (/production|deploy|operation|observability|backup|recovery|scale|uptime|monitor/i.test(text)) personas.push("Operator");
-    const uniquePersonas = [...new Set(personas)].filter((persona): persona is (typeof RRI_T_PERSONAS)[number] => RRI_T_PERSONAS.includes(persona as (typeof RRI_T_PERSONAS)[number]));
-    const personaAgent = discoverAgents(this.cwd, "project").find((candidate) => candidate.name === "rri-t-persona");
-    if (!personaAgent) throw new Error("Task-system agent definition not found: rri-t-persona");
-    // RRI-T authoring-only fanout: personas run with only the repository reading
-    // tools declared by the rri-t-persona definition (read, grep, find, ls), no
-    // worktree isolation, and exactly two validation attempts that carry the named
-    // parser error into the retry; personas never execute procedures or self-grade,
-    // so a persona run ends only in validated scenarios or a bounded failure.
-    const results = await Promise.all(uniquePersonas.map(async (persona) => {
-      let lastError = "";
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const handle = startSubagentResilient({
-          agent: personaAgent,
-          task: `# RRI-T aggregate scenario authoring\nWork Item: ${item.id || "unknown"}\nAssigned perspective: ${persona}\n\nRepository context:\n${scope}\n\nSelect only risk-relevant scenarios for this perspective and author them; do not execute any procedure, collect evidence, or grade results. Return exactly one <rri_t_persona> XML document.${lastError ? ` Previous output was invalid: ${lastError}. Correct it on this retry.` : ""}`,
-          cwd: this.cwd,
-          stage: "aggregate_verification",
-          taskId: item.id,
-          acceptance: "checked",
-        });
-        const result = await handle.result;
-        try {
-          if (result.exitCode !== 0) throw new Error(result.errorMessage || result.stderr || "persona process failed");
-          return parseRriTPersonaResult(finalAssistantText(result.messages), persona);
-        } catch (error) {
-          lastError = error instanceof Error ? error.message : String(error);
-        }
-      }
-      throw new Error(`RRI-T persona ${persona} failed validation: ${lastError}`);
-    }));
-    return JSON.stringify(mergeRriTAuthoringResults(results, uniquePersonas));
-  }
-
 
   private queueReconcile(): void {
     setImmediate(() => { void this.reconcileSafely(); });

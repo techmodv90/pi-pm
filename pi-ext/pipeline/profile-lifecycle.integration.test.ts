@@ -214,8 +214,9 @@ test("REQ-AGGREGATE-RRI-T-LIFECYCLE: the two-phase RRI-T handoff preserves aggre
   assert.match(prompt, /REQ-1, SC-2\)/);
   assert.doesNotMatch(prompt, /PARENT-REV3/);
   // Phase 2 ownership: the contractor executes and grades in the main session;
-  // personas authored only scenarios and no result or evidence comes from them.
-  assert.match(prompt, /Do not run, amend, or re-author persona output, and do not re-run persona subagents/);
+  // authoring is also in-session methodology work — the persisted list binds grading.
+  assert.match(prompt, /Scenario authoring is in-session contractor methodology work/);
+  assert.match(prompt, /grading must bind to the saved artifact/);
   assert.match(prompt, /no subagent executes procedures or produces grades/);
   assert.match(prompt, /never grade a scenario you did not execute/);
   assert.match(prompt, /Each retained scenario receives exactly one outcome/);

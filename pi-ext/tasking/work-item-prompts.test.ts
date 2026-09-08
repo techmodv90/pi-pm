@@ -166,9 +166,10 @@ test("aggregate scenario selection stays on the aggregate's own artifact, never 
 
 test("tool persists the scenario artifact before execution and never re-authors at grading submission", () => {
   const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
-  // save-before-execution: persona authoring output is persisted as the rri_t_scenarios artifact
-  assert.match(tool, /artifact-save[\s\S]{0,80}rri_t_scenarios/);
-  assert.match(tool, /await scheduler\.runRriT\(data\)/);
+  // save-before-execution: scenario authoring is in-session contractor work and
+  // is persisted via the canonical artifact-save path (no persona subagent spawn)
+  assert.doesNotMatch(tool, /runRriT|ensureRriTScenariosArtifact/);
+  assert.match(tool, /compileRriTSubmission/);
   // the verify action compiles graded evidence from the persisted artifact via the canonical --rri-t-json path
   const verifyCase = tool.slice(tool.indexOf('case "verify_aggregate_work_item"'), tool.indexOf('case "accept_aggregate_work_item"'));
   assert.doesNotMatch(verifyCase, /runRriT/);

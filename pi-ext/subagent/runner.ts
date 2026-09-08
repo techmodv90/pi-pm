@@ -30,7 +30,7 @@ const defaultHerdrPanel = createHerdrPanel();
 const methodologiesDirectory = fileURLToPath(new URL("../methodologies", import.meta.url));
 
 const emptyUsage = (): SubagentUsage => ({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 });
-const READ_ONLY_AGENTS = new Set(["task-scout", "task-reviewer", "rri-persona", "rri-t-persona"]);
+const READ_ONLY_AGENTS = new Set(["task-scout", "task-reviewer", "rri-persona"]);
 
 export function buildPiInvocation(args: string[], script = process.argv[1]): { command: string; args: string[] } {
   const virtualScript = script?.startsWith("/$bunfs/root/");

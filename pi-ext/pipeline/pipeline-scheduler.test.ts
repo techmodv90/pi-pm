@@ -586,23 +586,21 @@ test("RRI-T authoring output is a scenario list without grading records or count
   assert.equal(serialized.includes("summary"), false);
 });
 
-test("RRI-T authoring fanout runs read-only personas on the bounded resilient runner without executing or grading", () => {
+test("RRI-T authoring is in-session methodology work; no persona subagents are spawned", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const rriTBody = source.slice(source.indexOf("async runRriT"), source.indexOf("private async persistAgentResult"));
-  assert.match(rriTBody, /const handle = startSubagentResilient\(\{/);
-  assert.doesNotMatch(rriTBody, /isolation: "worktree"/);
-  assert.match(rriTBody, /attempt < 2/);
-  assert.match(rriTBody, /Previous output was invalid: \$\{lastError\}[\s\S]+Correct it on this retry/);
-  assert.match(rriTBody, /do not execute any procedure, collect evidence, or grade results/);
-  assert.match(rriTBody, /mergeRriTAuthoringResults/);
-  assert.doesNotMatch(rriTBody, /summary: counts/);
-  // the launch itself must never bypass the persona read-only tool contract
-  const persona = readFileSync(new URL("../agents/rri-t-persona.md", import.meta.url), "utf8");
-  assert.match(persona, /^tools: read, grep, find, ls$/m);
-  assert.doesNotMatch(persona, /tools:[^\n]*bash/);
-  assert.match(persona, /no worktree isolation/);
-  const runner = readFileSync(new URL("../subagent/runner.ts", import.meta.url), "utf8");
-  assert.match(runner, /READ_ONLY_AGENTS = new Set\(\[[^\]]*"rri-t-persona"/);
+  // Scenario authoring is derivation from persisted requirements — the
+  // contractor session does it inline during /apm review; the scheduler never
+  // spawns rri-t-persona subagents for it.
+  assert.doesNotMatch(source, /runRriT/);
+  assert.doesNotMatch(source, /rri-t-persona/);
+  // save-before-grade survives: the methodology keeps persistence and grading,
+  // only the spawn cast is gone.
+  const prompt = readFileSync(new URL("../tasking/work-item-prompts.ts", import.meta.url), "utf8");
+  assert.match(prompt, /Author the scenarios in this session first/);
+  assert.match(prompt, /rri_t_scenarios/);
+  const review = readFileSync(new URL("../core/prompts/apm-review.md", import.meta.url), "utf8");
+  assert.match(review, /No persona subagents are spawned/);
+  assert.match(review, /save_work_item_artifact/);
 });
 
 test("RRI dispatch stays in contractor session and does not spawn persona agents", () => {

@@ -201,7 +201,7 @@ export function buildAggregateVerifyPrompt(data: any): string {
   const scenarioLines = scenarios
     // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
     ? scenarios.content.scenarios.map((scenario: any, index: number) => `- [${index + 1}] ${scenario.persona} · ${scenario.dimension}/${scenario.stress_axis} (${scenario.requirement_id}, ${scenario.id || "unnamed"}): ${scenario.procedure}${scenario.remediation_hint ? ` — remediation hint: ${scenario.remediation_hint}` : ""}`).join("\n")
-    : "_No persisted rri_t_scenarios artifact was found; aggregate verification is blocked until the authored scenarios are saved before execution._";
+    : "_No persisted rri_t_scenarios artifact was found. Author the scenarios in this session first (see /apm review): derive risk-relevant persona x dimension x stress-axis scenarios from the approved requirements, then save them with `save_work_item_artifact` stage `rri_t_scenarios` as a JSON object ({personas, scenarios: [{id, persona, dimension, stress_axis, requirement_id, procedure, remediation_hint}], not_applicable, open_blockers}). Aggregate verification stays blocked until the authored list is persisted; grading below fails closed on an unpersisted list._";
   return [
     `# AGGREGATE VERIFICATION: ${item.title || item.id || "Work Item"}`,
     `Work Item: ${item.id || "unknown"}`,
@@ -213,7 +213,7 @@ export function buildAggregateVerifyPrompt(data: any): string {
     artifactLine,
     scenarioLines,
     "",
-    "Execute only scenarios retained from this persisted list. Do not run, amend, or re-author persona output, and do not re-run persona subagents.",
+    "Execute only scenarios retained from this persisted list. Scenario authoring is in-session contractor methodology work (no persona subagents); once the list is persisted, do not amend or re-author it — grading must bind to the saved artifact.",
     "",
     "## Owner Scenario Gate (soft)",
     "Present this scenario list to the owner and ask whether any scenario should be trimmed or deferred before execution. Honor explicit owner trim or defer instructions; when no owner response is given, proceed with the retained scenarios without stalling.",
