@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a CONTEXT.md, or recording or editing an ADR. Part of the APM workspace — decisions and glossary live under .apm/. Activate when the user says: "what do we call", "add to the glossary", "define this term", "record an ADR", "that's a decision worth recording", "these two terms conflict", "is that term canonical".
+description: Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a CONTEXT.md, or recording or editing an ADR. Activate when the user says: "what do we call", "add to the glossary", "define this term", "record an ADR", "that's a decision worth recording", "these two terms conflict", "is that term canonical".
 ---
 
 # Domain Modeling
