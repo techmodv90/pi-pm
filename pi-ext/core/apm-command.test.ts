@@ -51,6 +51,36 @@ test("hides the full drift prompt while retaining it for the LLM", () => {
   assert.match(source, /sendHiddenPrompt\(pi, "apm-drift", prompt\)/);
 });
 
+test("hides the full spec-validate and spec-score prompts while retaining them for the LLM", () => {
+  assert.match(readSource("./apm-spec-validate.ts"), /sendHiddenPrompt\(pi, "apm-spec-validate", prompt\)/);
+  assert.match(readSource("./apm-spec-score.ts"), /sendHiddenPrompt\(pi, "apm-spec-score", prompt\)/);
+});
+
+test("spec-validate is a gate and spec-score is a measurement; both reuse the canonical quality procedure", () => {
+  const validate = readSource("./prompts/apm-spec-validate.md");
+  const score = readSource("./prompts/apm-spec-score.md");
+  const canonical = readSource("./prompts/apm-spec-quality.md");
+  // Both inject the canonical 11-dimension analysis by reference — no
+  // duplicated evaluation logic (same pattern as the drift procedure).
+  for (const prompt of [validate, score]) {
+    assert.match(prompt, /core\/prompts\/apm-spec-quality\.md/);
+    assert.doesNotMatch(prompt, /11 Dimensions/);
+  }
+  // Gate semantics: errors block, warnings pass unless strict, never edit.
+  assert.match(validate, /--strict/);
+  assert.match(validate, /RECHAZADA/);
+  assert.match(validate, /Never.*advance a spec by editing it here/);
+  // Score semantics: weighted 0-100, threshold, not a gate.
+  assert.match(score, /--umbral/);
+  assert.match(score, /IEEE 830 \/ ISO 29148/);
+  assert.match(score, /not a gate/);
+  // Canonical core owns the dimensions and their weights/severities.
+  assert.match(canonical, /Implementation Leakage/);
+  assert.match(canonical, /Constitution Adherence/);
+  assert.match(canonical, /Scope Alignment/);
+  assert.match(canonical, /Never.*edit the spec to improve a score/);
+});
+
 test("router dispatches every subcommand to a dedicated handler", () => {
   const source = readSource("./apm-command.ts");
   assert.match(source, /handleInit\(ctx\)/);
@@ -62,6 +92,8 @@ test("router dispatches every subcommand to a dedicated handler", () => {
   assert.match(source, /handleDistill\(pi, args, ctx\)/);
   assert.match(source, /handleImplement\(pi, args, ctx\)/);
   assert.match(source, /handleDrift\(pi, args, ctx\)/);
+  assert.match(source, /handleSpecValidate\(pi, args, ctx\)/);
+  assert.match(source, /handleSpecScore\(pi, args, ctx\)/);
   assert.match(source, /apm-init|apm-prd|apm-spec|apm-clarify|apm-tech-plan|apm-breakdown|apm-implement|apm-distill/);
 });
 
