@@ -53,34 +53,51 @@ For greenfield projects, unknown domains, or when the owner asks for it. Scan �
 
 **Rule:** only present assumptions with MEDIUM or HIGH confidence. LOW-confidence items are discarded or converted into open questions.
 
-## Output
+## Output — one evolving architecture doc
 
-Write the findings to `.apm/explore/<slug>-explore.md` where `<slug>` is a kebab-case name of the investigated area (e.g. `auth-middleware-explore.md`).
+All findings live in **one** artifact: `.apm/architecture.md`. Never create per-area files. The doc has two kinds of content:
+
+- **Repo-wide section** (written by the first whole-repo scan, kept by later scans): stack, structure, conventions, existing functionality. Absorbs any prior `/apm distill` output — the architecture doc replaces distilled docs as the descriptive layer.
+- **Area sections** (one per investigated area, e.g. `## pipeline/dispatch`): structure, conventions, reuse candidates, assumptions, hazards, open questions — only module-specific facts. A section never re-documents repo-wide facts; it inherits them.
+
+Top of the doc is a **coverage table** — the staleness surface:
 
 ```markdown
-# Exploration: <Area>
+## Coverage
+| Section | verified_at | Confidence |
+|---|---|---|
+| Repo-wide | <short-sha> | HIGH |
+| pipeline/dispatch | <short-sha> | HIGH |
+```
 
-## Stack Detected
-- <Framework / ORM / auth / test tooling, with versions>
+`verified_at` is the commit the section was checked against. Stale sections flip to ⚠️ on use — never silently.
 
-## Structure
-<Directory tree of the relevant area, with line counts>
+### Update semantics (in-place, never overwrite siblings)
 
-## Conventions Found
-- <Naming / structure / import / test-style conventions>
+1. **New area** → append a new section + coverage row.
+2. **Existing area, fresh** → spot-check 1-2 assumptions against the current tree; still valid → refresh `verified_at`, done.
+3. **Existing area, stale** → rewrite that section only, appending `## Update <date>: <what changed>` inside it; flip flipped assumptions ✅ → ⚠️ with evidence. Old reasoning stays auditable in git history.
+4. **Repo-wide facts changed** (new internal package, new convention) → update the repo-wide section and note it.
 
-## Relevant Existing Functionality
-- <What already exists that a change here should reuse or extend, with file references>
+```markdown
+# Architecture — <project>
 
-## Confirmed Assumptions (Assumptions Mode)
+## Coverage
+<table>
+
+## Repo-wide
+### Stack Detected
+### Structure
+### Conventions Found
+### Relevant Existing Functionality
+
+## <area>
+### Relevant Existing Functionality
+### Confirmed Assumptions (Assumptions Mode)
 - S1 ✅ <Assumption — confidence>
-- S2 ✅ <...>
-
-## Open Questions
-- <What could not be resolved from the code alone>
-
-## ⚠️ Notes
-- <Gaps, hazards, dead ends worth knowing before proposing>
+### Open Questions
+### ⚠️ Notes
+### ## Update <date>: <what changed>
 ```
 
 ## Quality Gate
@@ -90,10 +107,11 @@ The exploration is done when:
 - Every assumption carries a confidence level and evidence (no LOW-confidence assumptions survive)
 - Reuse candidates for the investigated area are listed (prevents `/apm propose` from proposing what already exists)
 - No silent assumptions remain — unknowns are open questions, not omissions
+- The coverage table row for the touched section(s) is refreshed
 
 ## Handoff into APM
 
-An exploration is an input, not a decision. Hand off with: the artifact path, the confirmed assumptions, and the suggestion to run `/apm propose <change>` citing the explore artifact — the proposal's Intent and Scope must be consistent with what was found, and its Exclusions should reflect the open questions.
+An exploration is an input, not a decision. Hand off with: the architecture doc path and updated section, the confirmed assumptions, and the suggestion to run `/apm propose <change>` citing the section — the proposal's Intent and Scope must be consistent with what was found, and its Exclusions should reflect the open questions.
 
 ## Delivery
 

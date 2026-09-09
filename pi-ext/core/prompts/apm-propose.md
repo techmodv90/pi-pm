@@ -17,7 +17,7 @@ The input may be a change description, a PRD reference, or a finding from `/apm 
 
 ## Process
 
-1. **Context** — read the repo area concerned, the active PRD (if any), and existing `.apm/specs/` for adjacent features. Never propose in a vacuum.
+1. **Context** — read the repo area concerned, the covering section of `.apm/architecture.md` (spot-check 1-2 of its assumptions against the current tree; stale → refresh the section before proposing), the active PRD (if any), and existing `.apm/specs/` for adjacent features. Never propose in a vacuum.
 2. **Intent** — one paragraph: the problem, who feels it, why now.
 3. **Scope** — bullet the included outcomes, then bullet the excluded ones. Exclusions are load-bearing; write them from stakeholder conversations, not from imagination.
 4. **Approach** — 3-6 bullets on HOW, at the level a reviewer can sanity-check (libraries, storage, flow). No ADRs, no contracts — `/apm design` and `/apm tech-plan` own those.

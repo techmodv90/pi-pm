@@ -1,8 +1,9 @@
 /**
  * /apm explore — codebase investigation before proposals, adopted from
- * don-cheli-sdd dc:explorar (Assumptions mode default; findings land under
- * .apm/explore/ as evidence-cited research that /apm propose must stay
- * consistent with).
+ * don-cheli-sdd dc:explorar (Assumptions mode default; findings update
+ * sections of the single .apm/architecture.md in place — coverage table
+ * carries per-section staleness — and /apm propose must stay consistent
+ * with the covering section).
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
