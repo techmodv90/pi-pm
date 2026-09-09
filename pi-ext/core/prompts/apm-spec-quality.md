@@ -10,7 +10,7 @@ evaluated: findings are reported, the owner decides.
 ## Input
 
 The input names the spec(s) under evaluation: a `.feature` path
-(`.apm/specs/<domain>/<Name>.feature`), a domain directory, or empty for all
+(`.apm/specs/features/<domain>/<Name>.feature`), a domain directory, or empty for all
 active specs (everything not archived). Optional flags belong to the calling
 command.
 
@@ -19,7 +19,7 @@ command.
 ```
 1. LOCATE    — resolve .feature paths; read each fully, including NC
                sections, success criteria, and companion artifacts
-               (.apm/proposals/, .apm/prd/, .apm/specs/<domain>/requirements.md)
+               (.apm/proposals/, .apm/prd/, .apm/specs/features/<domain>/requirements.md)
 2. EVALUATE  — apply all 11 dimensions to each spec
 3. EVIDENCE  — every non-green finding cites file:line and the exact text
 4. RETURN    — per-dimension results to the calling command for formatting

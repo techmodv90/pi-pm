@@ -4,7 +4,7 @@
  * apm-clarify.ts, and apm-tech-plan.ts.
  * init: create the per-project APM workspace (.apm/prd, .apm/specs git-tracked, .apm/state ignored).
  * prd: generate a PRD from multi-source input at .apm/prd/prd-v<major.minor>.md.
- * spec: generate a Gherkin spec (.feature) + DBML from a typed requirement at .apm/specs/.
+ * spec: generate a Gherkin spec (.feature) + DBML from a typed requirement at .apm/specs/features/.
  * propose: write a change proposal (RFC) at .apm/proposals/ before a spec is
  *          written — Intent/Scope/Approach/Risks, gated on owner approval.
  * clarify: review a spec for ambiguity and upgrade @draft → @ready on a passing Auto-QA.

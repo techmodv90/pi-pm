@@ -1,6 +1,6 @@
 /**
  * /apm spec — generate a Gherkin spec (.feature) + DBML from a typed
- * dc:especificar-style requirement, written under .apm/specs/.
+ * dc:especificar-style requirement, written under .apm/specs/features/<domain>/.
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";

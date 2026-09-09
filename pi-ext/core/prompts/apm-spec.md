@@ -71,7 +71,7 @@ Table <domain> @provisional {
 ### Gherkin Spec
 
 ```gherkin
-# .apm/specs/<domain>/<Name>.feature
+# .apm/specs/features/<domain>/<Name>.feature
 # Status: @draft
 # Created: <date>
 
@@ -128,8 +128,8 @@ Included at the end of the `.feature` as structured comments:
 | Artifact | Path | Condition |
 | --- | --- | --- |
 | Schema DBML | `.apm/specs/db_schema/<domain>.dbml` | Only if missing |
-| Gherkin spec | `.apm/specs/<domain>/<Name>.feature` | Always |
-| Requirements checklist | `.apm/specs/<domain>/requirements.md` | Always (empty) |
+| Gherkin spec | `.apm/specs/features/<domain>/<Name>.feature` | Always |
+| Requirements checklist | `.apm/specs/features/<domain>/requirements.md` | Always (empty) |
 
 Create the target directories as needed.
 

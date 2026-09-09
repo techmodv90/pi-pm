@@ -14,7 +14,7 @@ verdict; the analysis is the canonical spec-quality procedure.
 
 {INPUT}
 
-The input is a spec path (`.apm/specs/<domain>/<Name>.feature`), a domain
+The input is a spec path (`.apm/specs/features/<domain>/<Name>.feature`), a domain
 directory, or empty for all active specs. Flags: `--strict` (zero warnings
 allowed), `--formato json` (machine-readable verdict).
 
