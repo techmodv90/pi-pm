@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a CONTEXT.md, or recording or editing an ADR. Activate when the user says: "what do we call", "add to the glossary", "define this term", "record an ADR", "that's a decision worth recording", "these two terms conflict", "is that term canonical".
+description: Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a CONTEXT.md, or recording or editing an ADR. Activate when the user says things like "what do we call X", "is it A or B", "which term is canonical", "add to the glossary", "record an ADR", "these two terms conflict". Do not answer term-choice questions from memory — the project's canonical vocabulary lives here.
 ---
 
 # Domain Modeling
