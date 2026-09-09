@@ -1,6 +1,6 @@
 ---
 name: domain-modeling
-description: Build and sharpen a project's domain model. Use when discussing codebase terminology, writing or editing a CONTEXT.md, or recording or editing an ADR. Activate when the user says things like "what do we call X", "is it A or B", "which term is canonical", "add to the glossary", "record an ADR", "these two terms conflict". Do not answer term-choice questions from memory — the project's canonical vocabulary lives here.
+description: The project's canonical vocabulary and decision records live in this skill, so read the FULL SKILL.md body with the read tool before (a) writing or editing ANY ADR, glossary, or CONTEXT file — including when the content seems obvious, (b) resolving ANY terminology dispute or cross-reference — spec vs code wording, old ADR vs new, or one term meaning two things ("is this drift or intent", "these two terms conflict", "supersedes"), (c) answering ANY naming or term-choice question ("what do we call X", "is it A or B", "which term is canonical", "add to the glossary", "where does CONTEXT.md go", "why we chose"). Answering such questions from memory, or sampling SKILL.md with grep or cat instead of reading it, is wrong even when your answer is good. Do not load this skill for bug fixes, tests, specs, or README edits.
 ---
 
 # Domain Modeling

@@ -1,0 +1,267 @@
+version: 1
+config:
+  profiles:
+    trigger:
+      harness: pi
+      extra-args:
+        - "--model"
+        - "cliproxy/ox-alpha-free"
+        - "--thinking"
+        - "high"
+        - "--tools"
+        - "read,bash,edit,write"
+  profile: trigger
+  run:
+    timeout-ms: 600000
+    max-turns: 20
+
+tests:
+  # ---- Should trigger: the model must read the SKILL.md body ----
+  - name: trigger-what-do-we-call
+    desc: Fuzzy-term sharpening probe fires the skill read (description phrase "what do we call").
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+    input:
+      prompt: >
+        What do we call the thing that holds the reviewed patch — "candidate"
+        or "candidate patch"? Pick one for this project.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: trigger-record-adr
+    desc: Explicit ADR request fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+    input:
+      prompt: >
+        Record as an ADR that dispatches are hard-gated to background spawns.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: trigger-glossary
+    desc: Glossary edit request fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+    input:
+      prompt: >
+        Add "materialization" to the glossary. It means turning an approved
+        task graph into executable Work Item DAG rows.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  # ---- Borderline: should still trigger ----
+  - name: trigger-term-code-drift
+    desc: Spec-vs-code term cross-reference fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+    input:
+      prompt: >
+        The spec says "claim" but the code says "reserve" for picking up a
+        task — is that drift or intent?
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  # ---- Must NOT trigger: no over-firing on plain code work ----
+  - name: no-trigger-bugfix
+    desc: Pure bug-fix request must not read the domain-modeling skill.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+        - from: fixtures/hello.txt
+          to: app.go
+    input:
+      prompt: >
+        Fix the bug in app.go: the greet function returns an empty string
+        because the map lookup uses the wrong key. Make it return "hello".
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: false
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: trigger-canon-check
+    desc: Canon-check question (is term canonical) fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+    input:
+      prompt: >
+        Is "lean" a canonical term in this project?
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: trigger-supersede
+    desc: ADR supersession request fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+        - from: fixtures/ADR-FORMAT.md
+          to: .pi/skills/domain-modeling/ADR-FORMAT.md
+        - from: fixtures/CONTEXT-FORMAT.md
+          to: .pi/skills/domain-modeling/CONTEXT-FORMAT.md
+        - from: fixtures/adr-0002.md
+          to: .apm/adr/0002-work-item-id-prefix.md
+        - from: fixtures/adr-0004.md
+          to: .apm/adr/0004-work-item-id-prefix.md
+    input:
+      prompt: >
+        ADR 0004 supersedes ADR 0002 — update the files accordingly.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: trigger-context-placement
+    desc: Multi-context glossary placement question fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+    input:
+      prompt: >
+        We're adding a second bounded context for billing — where does
+        CONTEXT.md go now?
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: trigger-term-conflict
+    desc: Two-definitions conflict probe fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+    input:
+      prompt: >
+        "Cancellation" seems to mean two different things in what you've
+        told me. Which one is it?
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: trigger-adr-placement
+    desc: Borderline docs-vs-ADR placement decision fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+    input:
+      prompt: >
+        Write a short doc recording why we chose .apm/adr over docs/adr.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  # ---- Must NOT trigger: no over-firing on plain code work ----
+  - name: no-trigger-run-tests
+    desc: Plain test-run request must not read the domain-modeling skill.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+        - from: fixtures/hello.txt
+          to: hello_test.go
+    input:
+      prompt: >
+        Run the tests in hello_test.go and tell me if they pass.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: false
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: no-trigger-loc-rule
+    desc: Project-rules question must not read the domain-modeling skill.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+        - from: fixtures/hello.txt
+          to: AGENTS.md
+    input:
+      prompt: >
+        What's the LoC rule in this project? Check AGENTS.md.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: false
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: no-trigger-spec
+    desc: Spec-writing request (different command's territory) must not read the domain-modeling skill.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+    input:
+      prompt: >
+        Write a spec for the import flow.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: false
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
+
+  - name: no-trigger-readme
+    desc: Plain documentation edit must not read the domain-modeling skill.
+    workspace:
+      copy:
+        - from: fixtures/domain-modeling-skill.md
+          to: .pi/skills/domain-modeling/SKILL.md
+        - from: fixtures/hello.txt
+          to: README.md
+    input:
+      prompt: >
+        Update README.md with the install instructions from AGENTS.md.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: false
+        tool_name: read
+        tool_params: domain-modeling/SKILL\.md
