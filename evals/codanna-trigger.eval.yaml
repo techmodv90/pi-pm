@@ -1,0 +1,152 @@
+version: 1
+config:
+  profiles:
+    trigger:
+      harness: pi
+      extra-args:
+        - "--model"
+        - "cliproxy/ox-alpha-free"
+        - "--thinking"
+        - "high"
+        - "--tools"
+        - "read,bash,edit,write"
+  profile: trigger
+  run:
+    timeout-ms: 600000
+    max-turns: 20
+
+tests:
+  # ---- Should trigger: the model must read the SKILL.md body ----
+  - name: trigger-how-does-x-work
+    desc: How-does-X-work topic question fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/codanna-explore-skill.md
+          to: .pi/skills/codanna-explore/SKILL.md
+    input:
+      prompt: >
+        How does the lease renewal mechanism work in this codebase?
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: codanna-explore/SKILL\.md
+
+  - name: trigger-explore-topic
+    desc: Explicit "explore/map" topic request fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/codanna-explore-skill.md
+          to: .pi/skills/codanna-explore/SKILL.md
+    input:
+      prompt: >
+        Explore the dispatch pipeline. Give me entry points and how the
+        pieces connect.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: codanna-explore/SKILL\.md
+
+  - name: trigger-callers
+    desc: Callers / impact question fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/codanna-explore-skill.md
+          to: .pi/skills/codanna-explore/SKILL.md
+    input:
+      prompt: >
+        Who calls prepareSubagentWorktree? If I change its signature, what
+        breaks?
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: codanna-explore/SKILL\.md
+
+  - name: trigger-semantic-find
+    desc: Semantic find-code-that-does-Y (not a text pattern) fires the skill read.
+    workspace:
+      copy:
+        - from: fixtures/codanna-explore-skill.md
+          to: .pi/skills/codanna-explore/SKILL.md
+    input:
+      prompt: >
+        Find where we handle stale worktrees — the code that detects a
+        worktree sitting at an outdated base.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: true
+        tool_name: read
+        tool_params: codanna-explore/SKILL\.md
+
+  # ---- Should NOT trigger: the model must not read the skill ----
+  - name: no-trigger-regex-search
+    desc: Regex/text-pattern search must not read the codanna skill (rg territory).
+    workspace:
+      copy:
+        - from: fixtures/codanna-explore-skill.md
+          to: .pi/skills/codanna-explore/SKILL.md
+    input:
+      prompt: >
+        Find all occurrences of "lease_token" in the Go source.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: false
+        tool_name: read
+        tool_params: codanna-explore/SKILL\.md
+
+  - name: no-trigger-single-file
+    desc: Trivial single-file question must not read the codanna skill.
+    workspace:
+      copy:
+        - from: fixtures/codanna-explore-skill.md
+          to: .pi/skills/codanna-explore/SKILL.md
+    input:
+      prompt: >
+        What does the parseOptions function in workflow.go return?
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: false
+        tool_name: read
+        tool_params: codanna-explore/SKILL\.md
+
+  - name: no-trigger-doc-edit
+    desc: Plain documentation edit must not read the codanna skill.
+    workspace:
+      copy:
+        - from: fixtures/codanna-explore-skill.md
+          to: .pi/skills/codanna-explore/SKILL.md
+        - from: fixtures/hello.txt
+          to: README.md
+    input:
+      prompt: >
+        Update README.md with the new install command.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: false
+        tool_name: read
+        tool_params: codanna-explore/SKILL\.md
+
+  - name: no-trigger-write-feature
+    desc: Implementation request (not exploration) must not read the codanna skill.
+    workspace:
+      copy:
+        - from: fixtures/codanna-explore-skill.md
+          to: .pi/skills/codanna-explore/SKILL.md
+    input:
+      prompt: >
+        Add a --verbose flag to the pipeline-claim command output.
+    assertions:
+      - left: tool.called
+        op: "=="
+        right: false
+        tool_name: read
+        tool_params: codanna-explore/SKILL\.md
