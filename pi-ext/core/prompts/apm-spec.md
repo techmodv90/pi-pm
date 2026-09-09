@@ -150,7 +150,7 @@ Use `[NEEDS CLARIFICATION]` inline when:
 - Information needed to define exact behavior is missing
 - Multiple interpretations are plausible
 
-These markers must be resolved with the owner before the spec feeds planning; a spec with open markers stays tagged `@draft`.
+These markers must be resolved with the owner before the spec feeds tech-plan/breakdown; a spec with open markers stays tagged `@draft`.
 
 ## Quality Gate
 
@@ -161,12 +161,12 @@ A spec is `@ready` only when:
 
 ## Handoff into APM
 
-The spec is a **discovery input, not the requirements authority**. The canonical planning flow is: Work Item → Scan → RRI → Vision → Blueprint → Contracts → Task Graph.
+The spec is a **discovery input, not the requirements authority**. The canonical lean flow is: owner review → `/apm implement` import → authorization → handoff. There is no separate planning phase: `.plan.md` (tech-plan) and `.tasks.md` (breakdown) are authored beside the spec, and the Work Item is imported from them for implementation.
 
 1. Present the finished spec to the owner for review.
-2. On approval, propose creating a Work Item citing the `.feature` path.
-3. Priority mapping for RRI: P1 → tier1, P2 → tier2, P3+ → backlog candidate.
-4. Never author planning artifacts (RRI/Blueprint/etc.) directly from the spec, and never create placeholder Work Items for unresolved specs.
+2. On approval, run `/apm tech-plan` and `/apm breakdown` against the spec (as applicable).
+3. Import via `/apm implement` (`pic workflow import-apm --milestone <version>`), which creates the Work Item from the `.tasks.md` companions.
+4. Never create placeholder Work Items for unresolved (`@draft`) specs, and never author plan/tasks artifacts from a spec with open `[NEEDS CLARIFICATION]` markers.
 
 ## Delivery
 
