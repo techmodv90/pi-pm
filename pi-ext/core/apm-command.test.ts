@@ -36,6 +36,17 @@ test("hides the full breakdown prompt while retaining it for the LLM", () => {
   assert.match(source, /sendHiddenPrompt\(pi, "apm-breakdown", prompt\)/);
 });
 
+test("start prompt routes levels conservatively and never pre-executes gates", () => {
+  const source = readSource("./apm-start.ts");
+  assert.match(source, /sendHiddenPrompt\(pi, "apm-start", prompt\)/);
+  const prompt = readSource("./prompts/apm-start.md");
+  assert.match(prompt, /Level = max\(scores\)/);
+  assert.match(prompt, /PoC detection/);
+  assert.match(prompt, /never pre-execute gate steps/);
+  // Micro pipeline satisfies the real /apm implement gate (approved .tasks.md).
+  assert.match(prompt, /single-task \.tasks\.md/);
+});
+
 test("hides the full archive prompt while retaining it for the LLM", () => {
   const source = readSource("./apm-archive.ts");
   assert.match(source, /sendHiddenPrompt\(pi, "apm-archive", prompt\)/);
