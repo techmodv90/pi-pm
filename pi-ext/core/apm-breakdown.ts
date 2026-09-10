@@ -8,7 +8,16 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { hasApmWorkspace, loadPrompt, sendHiddenPrompt } from "./apm-shared.ts";
+import { existsSync } from "node:fs";
+import { basename, join, resolve } from "node:path";
+import {
+  assertApprovedState,
+  hasApmWorkspace,
+  loadPrompt,
+  resolveArtifactPath,
+  runGate,
+  sendHiddenPrompt,
+} from "./apm-shared.ts";
 
 export function handleBreakdown(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): void {
   if (!hasApmWorkspace(ctx)) {
@@ -22,6 +31,13 @@ export function handleBreakdown(pi: ExtensionAPI, args: string, ctx: ExtensionCo
       "error",
     );
     return;
+  }
+  // Gate: when a design doc exists for this feature, it must be APPROVED.
+  const planPath = resolveArtifactPath(ctx.cwd, rest, ".plan.md");
+  if (planPath) {
+    const design = join(resolve(ctx.cwd, ".apm", "design"),
+      basename(planPath).replace(/\.plan\.md$/, "-design.md"));
+    if (existsSync(design) && !runGate(ctx, design, assertApprovedState)) return;
   }
   // Loaded at call time so prompt edits apply without an extension reload.
   const prompt = loadPrompt("apm-breakdown.md").replace("{INPUT}", rest);

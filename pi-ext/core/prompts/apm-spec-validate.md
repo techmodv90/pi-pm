@@ -16,7 +16,7 @@ verdict; the analysis is the canonical spec-quality procedure.
 
 The input is a spec path (`.apm/specs/features/<domain>/<Name>.feature`), a domain
 directory, or empty for all active specs. Flags: `--strict` (zero warnings
-allowed), `--formato json` (machine-readable verdict).
+allowed), `--format json` (machine-readable verdict).
 
 ## Procedure
 
@@ -53,22 +53,22 @@ allowed), `--formato json` (machine-readable verdict).
 
 <for each non-green dimension, file:line + quoted text + the specific fix>
 
-## Result: ✅ PASA / ⚠️ PASA CON WARNINGS (<n> warnings) / ❌ RECHAZADA (<n> errores)
+## Result: ✅ PASS / ⚠️ PASS WITH WARNINGS (<n> warnings) / ❌ REJECTED (<n> errors)
 → <required action: which fixes to make before planning>
 ```
 
 ## Verdict Rule
 
-- Any ERROR → **RECHAZADA**. Fix the spec (via `/apm clarify` for ambiguity
+- Any ERROR → **REJECTED**. Fix the spec (via `/apm clarify` for ambiguity
   or direct owner edits) and re-run. Never weaken the spec to pass.
-- Warnings only → **PASA CON WARNINGS**; under `--strict` any warning fails.
-- All green → **PASA** — the spec is ready for `/apm tech-plan` /
+- Warnings only → **PASS WITH WARNINGS**; under `--strict` any warning fails.
+- All green → **PASS** — the spec is ready for `/apm tech-plan` /
   `/apm breakdown`.
 
 ## Guardrails
 
 - **Never** advance a spec by editing it here — validation reports, the
   owner (or `/apm clarify`) edits
-- **Never** mark RECHAZADA findings as warnings to soften the verdict
+- **Never** mark REJECTED findings as warnings to soften the verdict
 - **Always** re-run the full validation after any spec change; a partial
   re-check is worthless

@@ -7,7 +7,14 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { hasApmWorkspace, loadPrompt, sendHiddenPrompt } from "./apm-shared.ts";
+import {
+  assertApprovedState,
+  hasApmWorkspace,
+  loadPrompt,
+  resolveArtifactPath,
+  runGate,
+  sendHiddenPrompt,
+} from "./apm-shared.ts";
 
 export function handleImplement(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): void {
   if (!hasApmWorkspace(ctx)) {
@@ -22,6 +29,9 @@ export function handleImplement(pi: ExtensionAPI, args: string, ctx: ExtensionCo
     );
     return;
   }
+  // Gate: the task list must carry an APPROVED stamp (hash-bound).
+  const tasksPath = resolveArtifactPath(ctx.cwd, rest, ".tasks.md");
+  if (!runGate(ctx, tasksPath, assertApprovedState)) return;
   // Loaded at call time so prompt edits apply without an extension reload.
   const prompt = loadPrompt("apm-implement.md").replace("{INPUT}", rest);
   sendHiddenPrompt(pi, "apm-implement", prompt);

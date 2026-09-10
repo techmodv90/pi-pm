@@ -21,7 +21,7 @@ Typical input: a `.plan.md` blueprint path (`.apm/specs/**/<Feature>.plan.md`) o
 2. **Decisions** — identify the 2-6 decisions that shape the system. For each: context, 2-4 evaluated options with why each was rejected or chosen, and consequences.
 3. **Diagrams** — at least one flow or component diagram in ASCII/mermaid showing the main path.
 4. **Complexity table** — per component: complexity (low/medium/high) and why; the high ones get their own note.
-5. **State** — end at `APROBADO PARA IMPLEMENTACIÓN` only after owner review.
+5. **State** — end at `State: DRAFT`; the owner flips it to `APPROVED` via `/apm approve` (hash-bound stamp) before `/apm breakdown` accepts it.
 
 ## Output
 
@@ -54,7 +54,7 @@ Write the design doc to `.apm/design/<feature>-design.md` (kebab-case feature na
 | Component | Complexity | Notes |
 |-----------|-----------|-------|
 
-## State: APROBADO PARA IMPLEMENTACIÓN
+## State: DRAFT
 ```
 
 ## Quality Gate

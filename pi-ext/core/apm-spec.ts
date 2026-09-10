@@ -6,7 +6,13 @@
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
 import { existsSync, mkdirSync } from "node:fs";
 import { resolve } from "node:path";
-import { hasApmWorkspace, loadPrompt, sendHiddenPrompt } from "./apm-shared.ts";
+import {
+  assertApprovedState,
+  hasApmWorkspace,
+  loadPrompt,
+  runGate,
+  sendHiddenPrompt,
+} from "./apm-shared.ts";
 
 type SpecField = "type" | "feature" | "domain" | "requirement" | "context";
 
@@ -65,6 +71,9 @@ export function handleSpec(pi: ExtensionAPI, args: string, ctx: ExtensionCommand
     }
     // Empty input with a PRD present — the prompt analyzes the PRD directly.
   }
+  // Gate: a cited proposal must carry an APPROVED stamp (hash-bound).
+  const proposal = rest.match(/[\w./-]+-proposal\.md/);
+  if (proposal && !runGate(ctx, resolve(ctx.cwd, proposal[0]), assertApprovedState)) return;
   mkdirSync(resolve(ctx.cwd, ".apm", "specs"), { recursive: true });
   const input = Object.entries(fields).map(([k, v]) => `- ${k}: ${v}`).join("\n") || "(none — analyze the PRD directly)";
   // Loaded at call time so prompt edits apply without an extension reload.

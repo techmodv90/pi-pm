@@ -7,7 +7,14 @@
  */
 
 import type { ExtensionAPI, ExtensionCommandContext } from "@mariozechner/pi-coding-agent";
-import { hasApmWorkspace, loadPrompt, sendHiddenPrompt } from "./apm-shared.ts";
+import {
+  assertReadySpec,
+  hasApmWorkspace,
+  loadPrompt,
+  resolveArtifactPath,
+  runGate,
+  sendHiddenPrompt,
+} from "./apm-shared.ts";
 
 export function handleTechPlan(pi: ExtensionAPI, args: string, ctx: ExtensionCommandContext): void {
   if (!hasApmWorkspace(ctx)) {
@@ -22,6 +29,9 @@ export function handleTechPlan(pi: ExtensionAPI, args: string, ctx: ExtensionCom
     );
     return;
   }
+  // Gate: the spec must be @ready (set by /apm clarify).
+  const featurePath = resolveArtifactPath(ctx.cwd, rest, ".feature");
+  if (!runGate(ctx, featurePath, assertReadySpec)) return;
   // Loaded at call time so prompt edits apply without an extension reload.
   const prompt = loadPrompt("apm-tech-plan.md").replace("{INPUT}", rest);
   sendHiddenPrompt(pi, "apm-tech-plan", prompt);

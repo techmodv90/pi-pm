@@ -39,7 +39,7 @@ never generate one here (that is `/apm breakdown`'s job).
                    companion .plan.md must exist, and the .feature must be
                    @ready; else stop
 1b. DRIFT        — run the /apm drift procedure (core/prompts/apm-drift.md)
-                   on this feature's spec; any CRÍTICO/WARNING finding →
+                   on this feature's spec; any CRITICAL/WARNING finding →
                    Bug Work Item and stop — no import, no authorization
 2. IMPORT        — dry-run `pic workflow import-apm <tasks.md> --milestone
                    <version> --dry-run`, show the owner the parsed graph
@@ -80,9 +80,9 @@ Run the `/apm drift` procedure (the canonical conformance check in
 this feature's `.feature` spec, against the target branch (usually
 `develop`).
 
-- **No CRÍTICO/WARNING findings** — proceed; note the commit the check ran
+- **No CRITICAL/WARNING findings** — proceed; note the commit the check ran
   against in the handoff summary (INFO gaps are reported as known gaps).
-- **CRÍTICO/WARNING findings** — the procedure routes each to a Bug Work
+- **CRITICAL/WARNING findings** — the procedure routes each to a Bug Work
   Item. Then **stop**: report the bug IDs and discontinue — no import, no
   authorization. Fixing drift is normal scheduled work; `/apm implement` is
   rerun once the bugs close.

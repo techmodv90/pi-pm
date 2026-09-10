@@ -264,11 +264,15 @@ and never mark Approved from conversation alone.
 ## State
 
 ```
-tasks @ Draft → (gate PASS + explicit owner approval) → @ Approved
+tasks @ Draft → (gate PASS + explicit owner approval via /apm approve) → APPROVED stamp
 tasks @ Draft → (gate FAIL) → Draft (fix, re-run /apm breakdown)
 ```
 
-On owner approval, update `**Status:** Approved` in the tasks file.
+On owner approval via `/apm approve`, the tasks file gets the hash-bound
+stamp `## State: APPROVED hash=<sha1-of-body>` — `/apm implement` enforces
+this stamp and rejects the file if it changes after approval. Keep a
+`## State: PENDING` line in the generated template so the approve flow has a
+definite line to flip.
 
 ## Handoff into APM
 

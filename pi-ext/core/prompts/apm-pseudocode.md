@@ -70,7 +70,7 @@ The pseudocode is ready for `/apm design` when:
 
 1. Present the flows and invariants summarized to the owner.
 2. On approval, proceed to `/apm design` (complexity ≥ 3) or `/apm tech-plan` citing the pseudocode path — the design's ADRs must not contradict the pseudocode's invariants without a superseding note.
-3. Recommended for complexity ≥ 2 (Estándar); optional but cheap for simple commands.
+3. Recommended for complexity ≥ 2 (standard); optional but cheap for simple commands.
 
 ## Delivery
 

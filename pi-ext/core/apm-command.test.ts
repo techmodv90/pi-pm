@@ -68,10 +68,10 @@ test("spec-validate is a gate and spec-score is a measurement; both reuse the ca
   }
   // Gate semantics: errors block, warnings pass unless strict, never edit.
   assert.match(validate, /--strict/);
-  assert.match(validate, /RECHAZADA/);
+  assert.match(validate, /REJECTED/);
   assert.match(validate, /Never.*advance a spec by editing it here/);
   // Score semantics: weighted 0-100, threshold, not a gate.
-  assert.match(score, /--umbral/);
+  assert.match(score, /--threshold/);
   assert.match(score, /IEEE 830 \/ ISO 29148/);
   assert.match(score, /not a gate/);
   // Canonical core owns the dimensions and their weights/severities.

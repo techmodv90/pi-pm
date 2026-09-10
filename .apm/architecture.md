@@ -6,7 +6,7 @@
 
 | Section | verified_at | Confidence |
 |---|---|---|
-| Repo-wide | d8f37f0 | HIGH |
+| Repo-wide | 1454cf3 | HIGH |
 
 ## Repo-wide
 
@@ -56,6 +56,8 @@ task-system/
 - **/apm commands:** house handler pattern — `hasApmWorkspace` gate → call-time `loadPrompt()` → `{INPUT}` substitution → `sendHiddenPrompt`; prompts are markdown in `core/prompts/apm-<name>.md`; router is one `if (sub === ...)` chain in `core/apm-command.ts`
 - **Workflow:** lean — Work Items imported from `.apm` specs via `pic workflow import-apm`; stages worker → review → contractor verification; legacy planning (scan/rri/vision/blueprint/contracts/task_graph/TIP) deleted; aggregates verified via `/apm review` + in-session RRI-T scenarios
 - **Scheduler:** never spawns processes; writes dispatch records; contractor binds Agent-tool agent ids and completes dispatches via `task_manager`
+- **Adoption language (owner directive 2026-09-08):** /apm commands adopted from don-cheli-sdd carry `i18n: true` in source — adoption MUST translate all labels, tags, states, and CLI flags to English (`APPROVED`, `PENDING`, `CRITICAL`, `--threshold`); Spanish remnants in existing prompts (propose, design, pseudocode, drift, spec-score) are a known debt pending the gate-strengthening spec
+- **Spec layout schema:** `.apm/specs/features/<domain>/<Name>.feature` is the canonical feature location (features/ tier separates forward specs from artifacts/, distilled/, workflow/); new specs write here; old paths matched for read compatibility during transition
 
 ### Relevant Existing Functionality
 
@@ -72,7 +74,7 @@ task-system/
 - S3 ✅ pi-ext is one extension with a single composition root (`index.ts`, 12 registrations); `/apm` commands follow the prompt+handler+router pattern — **HIGH**
 - S4 ✅ Scheduler dispatches all stages through the Agent-tool dispatch seam; contractor drives bind/complete via `task_manager`; failed review verdicts report as completed stages — **HIGH**
 - S5 ✅ Lean workflow only: spec import → worker → review → verification; legacy planning machinery deleted; aggregates use `/apm review` + RRI-T — **HIGH**
-- S6 ✅ Working tree carries a large uncommitted pi-ext refactor split (+271/−1,979 across 8 modified files, 19 untracked split files); new work must build on the split files — **HIGH**
+- S6 ✅ Working tree carries a large uncommitted pi-ext refactor split (+271/−1,979 across 8 modified files, 23 untracked split files); new work must build on the split files — **HIGH**
 - S7 ✅ Persistence: single SQLite `.pi/tasks.db`, ordered idempotent migrations in `internal/schema`; snake_case persisted fields with noted exceptions — **MEDIUM**
 
 ### Open Questions

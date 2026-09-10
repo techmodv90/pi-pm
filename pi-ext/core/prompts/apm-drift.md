@@ -18,7 +18,7 @@ owns the analysis.
 
 The input is a spec path (`.apm/specs/<domain>/<Name>.feature`), a domain
 directory, or empty for the whole project. Optional flags: `--severity
-critica` (report only critical gaps), `--formato json` (machine-readable
+critica` (report only critical gaps), `--format json` (machine-readable
 report).
 
 ## Behavior
@@ -37,7 +37,7 @@ report).
        snake_case, and Gherkin tags (@smoke, @regression)
 
 3. ANALYZE — Classify gaps by severity
-   ├── CRÍTICO: scenario exists, zero tests exercise its behavior
+   ├── CRITICAL: scenario exists, zero tests exercise its behavior
    ├── WARNING: test exists, no scenario describes its behavior
    └── INFO: partial coverage (happy path without edge cases, or reverse)
 
@@ -48,7 +48,7 @@ report).
 
 | Level | Condition | Action |
 |-------|-----------|--------|
-| `CRÍTICO` | Gherkin scenario with no test exercising it | Bug Work Item; calling gate discontinues |
+| `CRITICAL` | Gherkin scenario with no test exercising it | Bug Work Item; calling gate discontinues |
 | `WARNING` | Test with no corresponding Gherkin scenario | Bug Work Item (write spec or remove orphan test); calling gate discontinues |
 | `INFO` | Partial coverage on a covered scenario | Report only; the calling flow notes it as a known gap |
 
@@ -64,10 +64,10 @@ report).
 | Category | Count | % |
 |---|---|---|
 | Scenarios covered | n | n% |
-| 🔴 Scenarios without tests (CRÍTICO) | n | n% |
+| 🔴 Scenarios without tests (CRITICAL) | n | n% |
 | 🟡 Tests without spec (WARNING) | n | n% |
 
-### 🔴 CRÍTICO — Scenarios without Tests (n)
+### 🔴 CRITICAL — Scenarios without Tests (n)
 
 | Feature | Scenario | Spec location | Tests found |
 |---|---|---|---|
@@ -86,14 +86,14 @@ report).
 | <name> | <scenario> | happy path ✅ / error path ❌ |
 
 ### Recommendations
-1. **Now:** bugs ticketed for CRÍTICO/WARNING findings
+1. **Now:** bugs ticketed for CRITICAL/WARNING findings
 2. **Backlog:** INFO gaps noted for the owner
 ```
 
 ## Finding routing
 
 Drift findings do not loop into the audited code as fix rounds. Each
-CRÍTICO/WARNING finding becomes a Bug Work Item (`create_work_item`, type
+CRITICAL/WARNING finding becomes a Bug Work Item (`create_work_item`, type
 `bug`) carrying: the spec path and scenario/AC reference, the finding with
 file:line evidence (test name or observed behavior), severity justification,
 and one shrunken Given/When/Then acceptance. Scope: one feature's surface →
@@ -104,7 +104,7 @@ Deduplicate against existing backlog before creating.
 
 - **Never** mark a scenario covered when a test matches by name but not by
   behavior — read what the test asserts
-- **Never** ignore CRÍTICO findings because a milestone is near
+- **Never** ignore CRITICAL findings because a milestone is near
 - **Always** consider naming variants when correlating
 - **Always** respect Gherkin tags when classifying priority
 - **Never** edit the spec to match the code as a "fix" — that is the drift

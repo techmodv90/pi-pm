@@ -14,7 +14,7 @@ output; the analysis is the canonical spec-quality procedure.
 {INPUT}
 
 The input is a spec path (`.apm/specs/features/<domain>/<Name>.feature`), a domain
-directory, or empty for all active specs. Flags: `--umbral <n>` (approval
+directory, or empty for all active specs. Flags: `--threshold <n>` (approval
 threshold, default 80).
 
 ## Procedure
@@ -86,7 +86,7 @@ Scope Alignment    [████████░░] 80
 ### Next Steps
 1. <fix, estimated impact: +n pts>
 2. <fix, estimated impact: +n pts>
-3. Re-run `/apm spec-score` → target ≥ <umbral>
+3. Re-run `/apm spec-score` → target ≥ <threshold>
 ```
 
 ## Quality Levels

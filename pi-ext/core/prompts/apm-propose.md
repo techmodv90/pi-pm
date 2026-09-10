@@ -23,7 +23,7 @@ The input may be a change description, a PRD reference, or a finding from `/apm 
 4. **Approach** — 3-6 bullets on HOW, at the level a reviewer can sanity-check (libraries, storage, flow). No ADRs, no contracts — `/apm design` and `/apm tech-plan` own those.
 5. **Risks** — the 2-4 risks that could change the decision, each with a mitigation or an open question.
 6. **Preliminary estimate** — complexity level (Don Cheli 4-dimension scoring, max wins: scope / unknowns / risk / duration, each 0-4), affected files count, rough duration.
-7. **Gate** — the proposal ends at `PENDIENTE APROBACIÓN`. Do not write a spec from an unapproved proposal.
+7. **Gate** — the proposal ends at `State: PENDING`. Do not write a spec from an unapproved proposal.
 
 ## Output
 
@@ -57,7 +57,7 @@ Write the proposal to `.apm/proposals/<slug>-proposal.md` where `<slug>` is a ke
 - Affected files: ~<N>
 - Duration: <range>
 
-## State: PENDIENTE APROBACIÓN
+## State: PENDING
 ```
 
 ## Quality Gate
@@ -71,7 +71,7 @@ A proposal is ready for owner review when:
 ## Handoff into APM
 
 1. Present the proposal to the owner.
-2. On approval, flip `State:` to `APROBADO` and proceed to `/apm spec` citing the proposal path. If a PRD exists, the proposal must cite it; if not, the proposal is the input that seeds one.
+2. On approval via `/apm approve` (which stamps `State: APPROVED hash=<sha1-of-body>`), proceed to `/apm spec` citing the proposal path. If a PRD exists, the proposal must cite it; if not, the proposal is the input that seeds one.
 3. A rejected proposal is closed, not revised silently — record the rejection reason in the file and stop.
 
 ## Delivery
