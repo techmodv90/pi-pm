@@ -57,7 +57,7 @@ task-system/
 - **Workflow:** lean — Work Items imported from `.apm` specs via `pic workflow import-apm`; stages worker → review → contractor verification; legacy planning (scan/rri/vision/blueprint/contracts/task_graph/TIP) deleted; aggregates verified via `/apm review` + in-session RRI-T scenarios
 - **Scheduler:** never spawns processes; writes dispatch records; contractor binds Agent-tool agent ids and completes dispatches via `task_manager`
 - **Adoption language (owner directive 2026-09-08):** /apm commands adopted from don-cheli-sdd carry `i18n: true` in source — adoption MUST translate all labels, tags, states, and CLI flags to English (`APPROVED`, `PENDING`, `CRITICAL`, `--threshold`); Spanish remnants in existing prompts (propose, design, pseudocode, drift, spec-score) are a known debt pending the gate-strengthening spec
-- **Spec layout schema:** `.apm/specs/features/<domain>/<Name>.feature` is the canonical feature location (features/ tier separates forward specs from artifacts/, distilled/, workflow/); new specs write here; old paths matched for read compatibility during transition
+- **Spec layout schema:** `.apm/specs/features/<domain>/<Name>.feature` is the canonical feature location (features/ tier separates forward specs from artifacts/, distilled/, workflow/); new specs write here; old paths matched for read compatibility during transition. Completed features archive under `.apm/specs/archive/<domain>/<Feature>/` via `/apm archive` with a `metadata.json`; decisions log lives at `.apm/decisions.md`
 
 ### Relevant Existing Functionality
 

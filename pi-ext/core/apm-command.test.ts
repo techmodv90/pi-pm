@@ -36,6 +36,16 @@ test("hides the full breakdown prompt while retaining it for the LLM", () => {
   assert.match(source, /sendHiddenPrompt\(pi, "apm-breakdown", prompt\)/);
 });
 
+test("hides the full archive prompt while retaining it for the LLM", () => {
+  const source = readSource("./apm-archive.ts");
+  assert.match(source, /sendHiddenPrompt\(pi, "apm-archive", prompt\)/);
+  // Fail-closed on verification: the archivist never self-tags @implemented.
+  const prompt = readSource("./prompts/apm-archive.md");
+  assert.match(prompt, /@implemented/);
+  assert.match(prompt, /Never add `@implemented` yourself/);
+  assert.match(prompt, /\.apm\/specs\/archive\/<domain>\/<Feature>\//);
+});
+
 test("hides the full distill prompt while retaining it for the LLM", () => {
   const source = readSource("./apm-distill.ts");
   assert.match(source, /sendHiddenPrompt\(pi, "apm-distill", prompt\)/);
