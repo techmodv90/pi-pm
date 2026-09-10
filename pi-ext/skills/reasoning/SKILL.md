@@ -15,35 +15,35 @@ tags: [reasoning, mental-models, decision, analysis, routing]
 ## Model Catalog
 
 ### Analysis (understand the problem)
-| # | Model | Use | Local equivalent |
-|---|-------|-----|------------------|
-| 1 | First Principles | Innovation, strip assumptions | in-session |
-| 2 | 5 Whys | Root cause | `methodology/root-cause-tracing` |
-| 3 | Map vs Territory | Validate assumptions | in-session |
+| # | Model | Use | Skill |
+|---|-------|-----|-------|
+| 1 | First Principles | Innovation, strip assumptions | `first-principles` |
+| 2 | 5 Whys | Root cause | `five-whys` |
+| 3 | Map vs Territory | Validate assumptions | `map-vs-territory` |
 
 ### Decision (choose)
-| # | Model | Use | Local equivalent |
-|---|-------|-----|------------------|
-| 4 | Pareto | Prioritization | in-session |
-| 5 | Opportunity Cost | Trade-offs | in-session |
-| 6 | Reversibility | Commitment, two-way doors | in-session |
-| 7 | Minimize Regret | Long-term decisions | in-session |
-| 8 | Probabilistic | Uncertainty | in-session |
+| # | Model | Use | Skill |
+|---|-------|-----|-------|
+| 4 | Pareto | Prioritization | `pareto` |
+| 5 | Opportunity Cost | Trade-offs | `opportunity-cost` |
+| 6 | Reversibility | Commitment, two-way doors | `reversibility` |
+| 7 | Minimize Regret | Long-term decisions | `minimize-regret` |
+| 8 | Probabilistic | Uncertainty | `probabilistic-thinking` |
 
 ### Perspective (think differently)
-| # | Model | Use | Local equivalent |
-|---|-------|-----|------------------|
-| 9 | Inversion | Think backwards | `methodology/brainstorming` |
-| 10 | Second-Order Effects | Consequences of consequences | in-session |
-| 11 | Pre-Mortem | Think failure before it happens | in-session |
-| 12 | Circle of Competence | Know limits | in-session |
+| # | Model | Use | Skill |
+|---|-------|-----|-------|
+| 9 | Inversion | Think backwards | `inversion` |
+| 10 | Second-Order Effects | Consequences of consequences | `second-order` |
+| 11 | Pre-Mortem | Think failure before it happens | `pre-mortem` |
+| 12 | Circle of Competence | Know limits | `circle-of-competence` |
 
 ### RLM (Recursive LLM — PrimeIntellect)
-| # | Model | Use | Local equivalent |
-|---|-------|-----|------------------|
-| 13 | Sub-LLM Verification | Verify code against specs | `methodology/verification-before-completion` + verification-gate |
-| 14 | Chain + Context Folding | Multi-step reasoning without context rot | `methodology/sequential-thinking` |
-| 15 | Recursive Decomposition | Massive inputs, large codebases | `methodology/dispatching-parallel-agents` |
+| # | Model | Use | Skill |
+|---|-------|-----|-------|
+| 13 | Sub-LLM Verification | Verify code against specs | `rlm-verification` |
+| 14 | Chain + Context Folding | Multi-step reasoning without context rot | `rlm-chain-of-thought` |
+| 15 | Recursive Decomposition | Massive inputs, large codebases | `rlm-recursive-decomposition` |
 
 ## Decision Tree
 
@@ -70,13 +70,9 @@ What kind of problem?
 ## How to Apply
 
 1. Classify the problem via the decision tree; state the chosen model and why.
-2. If a local equivalent skill exists, load it and follow it — do not
-   re-implement the model inline.
-3. "in-session" models apply directly: apply the model's core discipline
-   explicitly (e.g. Pareto = rank by cumulative impact, cut the tail;
-   Reversibility = classify the action as one-way or two-way door first).
-4. Mixed problems: run models in sequence (Analysis → Decision → Perspective);
+2. Load the model's skill and follow it — do not re-implement the model inline.
+3. Mixed problems: run models in sequence (Analysis → Decision → Perspective);
    never parallel — later models need earlier output.
-5. Escalation: a problem resisting two different models is a signal the
+4. Escalation: a problem resisting two different models is a signal the
    problem is underspecified — go back to the owner with concrete questions
    instead of forcing a third model.
