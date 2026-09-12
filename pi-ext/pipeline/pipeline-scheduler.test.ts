@@ -217,16 +217,16 @@ test("planning predecessor lineage rejects orphaned, hash-stale, and rejected ch
 });
 
 test("planning dispatch binds the claim to the persisted profile version and hash", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
   const resolution = readFileSync(new URL("./stage-resolution.ts", import.meta.url), "utf8");
-  assert.match(source, /if \(isPlanningStage\(stage\)\) \{\n\s+const \{ profile \} = this\.planEligibility\(taskId, stage\)/);
+  assert.match(source, /if \(isPlanningStage\(stage\)\) \{\n\s+const \{ profile \} = planEligibility\(deps, taskId, stage\)/);
   assert.match(source, /--profile-version", String\(profile\.version\), "--profile-hash", profile\.contentHash/);
   assert.match(source, /planning stage \$\{stage\} is not in the persisted plan profile/);
   assert.match(resolution, /plan_profile: resolvePlanProfile\(data\)/);
 });
 
 test("planning dispatch demands a persisted Plan profile before any stage launch", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
   // planEligibility must reject a resolved:false profile (empty contentHash) so a
   // pre-persistence dispatch cannot reach the handoff envelope, which also rejects
   // an empty profile_hash with no recovery.
@@ -302,8 +302,9 @@ test("pipeline circuit reset tool derives runner repair fingerprints", () => {
   assert.match(first.changed_fingerprint, /^runner:[a-f0-9]{64}$/);
   assert.equal(first.changed_fingerprint, second.changed_fingerprint);
   assert.equal(JSON.parse(runnerRepairEvidence('{"changed_fingerprint":"manual"}')).changed_fingerprint, "manual");
+  const schema = readFileSync(new URL("../api/task-manager-schema.ts", import.meta.url), "utf8");
+  assert.match(schema, /change_type: Type\.Optional\(StringEnum\(\["contract", "environment", "runner", "artifact"\]/);
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
-  assert.match(source, /change_type: Type\.Optional\(StringEnum\(\["contract", "environment", "runner", "artifact"\]/);
   assert.match(source, /params\.change_type === "runner".*runnerRepairEvidence/);
 });
 
@@ -327,13 +328,15 @@ test("owner-only graph actions never synthesize owner authorization", () => {
 
 test("RRI interview checkpoints use disposable drafts and clean up after terminal planning actions", () => {
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  const rriInterview = readFileSync(new URL("../api/rri-interview.ts", import.meta.url), "utf8");
+  const rriHelpers = readFileSync(new URL("../api/task-manager-helpers.ts", import.meta.url), "utf8");
   assert.match(source, /checkpoint_rri_interview/);
   assert.match(source, /load_rri_interview/);
   assert.match(source, /save_rri_interview/);
-  assert.match(source, /saveRriDraft/);
-  assert.match(source, /loadRriDraft/);
-  assert.match(source, /rri-finalize/);
-  assert.match(source, /execPic\(\["project", "current"\]/);
+  assert.match(rriInterview, /saveRriDraft/);
+  assert.match(rriInterview, /loadRriDraft/);
+  assert.match(rriInterview, /rri-finalize/);
+  assert.match(rriHelpers, /execPic\(\["project", "current"\]/);
   assert.match(source, /approve_work_item_artifact[\s\S]{0,700}deleteRriDraft/);
   assert.match(source, /reset_work_item_planning[\s\S]{0,700}deleteRriDraft/);
   assert.match(source, /update_work_item_status[\s\S]{0,700}deleteRriDraft/);
@@ -443,7 +446,7 @@ test("scheduler rejects legacy planning stages instead of launching them", () =>
 
 
 test("blocked Worker persists concrete evidence without saving a candidate artifact", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
   const blockedStart = source.indexOf('if (taskReport.status !== "done")');
   const blockedFinish = source.slice(blockedStart, source.indexOf("return;", blockedStart));
   assert.match(blockedFinish, /taskReport\.blocker/);
@@ -491,8 +494,8 @@ test("planning pipeline stages use planning agents and prompts without an active
 });
 
 test("worker launches record an observe-mode skill family routing event without blocking", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /recordSkillRoutingEvent\(this\.cwd, taskId, stage, routingPack\?\.id \|\| "", evaluateSkillFamilyRouting\(routingPack \|\| \{\}, scanEvidence, \{ cwd: this\.cwd \}\)\)/);
+  const source = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
+  assert.match(source, /recordSkillRoutingEvent\(cwd, taskId, stage, routingPack\?\.id \|\| "", evaluateSkillFamilyRouting\(routingPack \|\| \{\}, scanEvidence, \{ cwd \}\)\)/);
   const routing = readFileSync(new URL("./skill-routing.ts", import.meta.url), "utf8");
   assert.match(routing, /event-add/, "telemetry reuses the existing pic workflow event-add command");
   assert.match(routing, /"skill_family_routing"/);
@@ -502,17 +505,17 @@ test("worker launches record an observe-mode skill family routing event without 
 });
 
 test("completed planning stages pause for main-agent synthesis instead of launching Scan", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const finishBody = source.slice(source.indexOf("private async finish"), source.indexOf("private async continueWorkerGroup"));
-  assert.match(finishBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
-  assert.ok(finishBody.indexOf("if (isPlanningStage(run.stage))") < finishBody.lastIndexOf("await this.advance(run.task_id, parentId)"));
-  const resumeBody = source.slice(source.indexOf("private async resumePending"), source.indexOf("private pipelineRuns"));
-  assert.match(resumeBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
+  const finishBody = source.slice(source.indexOf("export async function finish"), source.indexOf("export async function continueWorkerGroup"));
+  assert.match(finishBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(deps, run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
+  assert.ok(finishBody.indexOf("if (isPlanningStage(run.stage))") < finishBody.lastIndexOf("await advance\(deps, run\.task_id, parentId\)"));
+  const resumeBody = source.slice(source.indexOf("export async function resumePending"));
+  assert.match(resumeBody, /if \(isPlanningStage\(run\.stage\)\)[\s\S]+publishPlanningHandoff\(deps, run, outputFor\(run\)\)[\s\S]+checkpoint\(run, "advanced"[\s\S]+return;/);
 });
 
 test("planner completion publishes a draft handoff without canonical Blueprint presentation", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /loadLatestBlueprintDraft\(this\.cwd, run\.task_id\)/);
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
+  assert.match(source, /loadLatestBlueprintDraft\(deps\.cwd, run\.task_id\)/);
   assert.match(source, /load the temporary draft with load_blueprint_draft/);
   assert.match(source, /do not call save_work_item_artifact/);
 });
@@ -605,7 +608,10 @@ test("RRI-T authoring is in-session methodology work; no persona subagents are s
 
 test("RRI dispatch stays in contractor session and does not spawn persona agents", () => {
   const source = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
-  const prompt = readFileSync(new URL("../tasking/work-item-prompts.ts", import.meta.url), "utf8");
+  const prompt = [
+    readFileSync(new URL("../tasking/work-item-prompts.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("../tasking/workflow-stage-prompts.ts", import.meta.url), "utf8"),
+  ].join("\n");
   // Contractor-owned RRI prompts are returned by work_on_work_item, never spawned.
   assert.match(source, /buildWorkItemContinuePrompt/);
   assert.doesNotMatch(source, /agent: "rri-persona"/);
@@ -712,8 +718,8 @@ test("canonical owner rejection routes the active TIP to fresh implementation", 
 });
 
 test("completed scan pauses for TIP activation instead of completing the task", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const advanceBody = source.slice(source.indexOf("private async advance"), source.indexOf("private async resumePending"));
+  const source = readFileSync(new URL("./advance.ts", import.meta.url), "utf8");
+  const advanceBody = source.slice(source.indexOf("export async function advance"), source.indexOf("export function parentHasActiveRuns"));
   assert.match(advanceBody, /const activePack = [^;]+status === "active"[\s\S]+if \(!activePack\) return;/);
 });
 
@@ -780,8 +786,8 @@ test("pipelineWorkerBlockReason enforces worker prerequisites", () => {
   assert.equal(pipelineWorkerBlockReason({ canonical: true, ready: true, work_item: { title: "Authorized" }, instruction_packs: [], dependencies: [] }), null);
   assert.match(pipelineWorkerBlockReason({ work_item: { title: "Legacy" }, instruction_packs: [{ status: "active", content_schema_version: 2 }], dependencies: [] }) || "", /schema-v3.*effective contract/);
   assert.equal(pipelineWorkerBlockReason({ work_item: { title: "Ready" }, instruction_packs: [{ status: "active", content_schema_version: 3, skill_families_json: "[]", effective_contract_snapshot_id: "ecs-1", effective_contract_snapshot_hash: "hash-1" }], dependencies: [] }), null);
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const launchGroup = source.slice(source.indexOf("private async launchGroup"), source.indexOf("private async launchRri"));
+  const source = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
+  const launchGroup = source.slice(source.indexOf("export async function launchGroup"));
   assert.doesNotMatch(launchGroup.slice(0, launchGroup.indexOf("const claims:")), /stagePrompt\(/);
   assert.match(launchGroup.slice(launchGroup.indexOf("const claims:")), /pipeline-claim[\s\S]+stagePrompt\(/);
 });
@@ -831,17 +837,18 @@ test("formatPipelineStatus keeps task pipeline output compact", () => {
 
 test("operator start reconciles bounded durable state without granting retry authority", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const launch = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
   assert.match(source, /if \(process\.env\.PI_TASK_PARENT_RUN_ID\) return scheduler/);
-  const startBody = source.slice(source.indexOf("async start("), source.indexOf("status(taskId"));
+  const startBody = source.slice(source.indexOf("async start("), source.indexOf("async startReadyBatch("));
   assert.doesNotMatch(startBody, /setImmediate\(/);
-  assert.match(startBody, /await this\.reconcile\(\)[\s\S]+return await this\.scheduleReady\(rootTaskId\)/);
+  assert.match(startBody, /await this\.reconcile\(\)[\s\S]+return await scheduleReady\(this\.deps, rootTaskId\)/);
   assert.doesNotMatch(startBody, /status: "accepted"/);
   assert.doesNotMatch(startBody, /scheduleReady\(rootTaskId, true\)/);
-  const statusBody = source.slice(source.indexOf("status(taskId"), source.indexOf("async stop("));
+  const statusBody = source.slice(source.indexOf("status(taskId: string"), source.indexOf("async stop("));
   assert.match(statusBody, /lastError/);
-  assert.match(source, /stage === "worker" && explicitRetry[^\n]+--explicit-retry/);
+  assert.match(launch, /stage === "worker" && explicitRetry[^\n]+--explicit-retry/);
 
-  assert.match(source, /activeTaskIds[\s\S]+launchTaskIds = taskIds\.filter/);
+  assert.match(launch, /activeTaskIds[\s\S]+launchTaskIds = taskIds\.filter/);
   assert.match(source, /reconcileSafely/);
   assert.match(source, /deterministic contract failure requires TIP revision[\s\S]+sendUserMessage/);
 });
@@ -862,13 +869,15 @@ test("canonical worker circuit guidance keeps repair out of the application sess
 
 test("agent-tool dispatch seam: bind gates the agent id and completion persists terminal status", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const dispatchComplete = readFileSync(new URL("./dispatch-complete.ts", import.meta.url), "utf8");
+  const launch = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
   const bindBody = source.slice(source.indexOf("bindDispatch(runId: string"), source.indexOf("async completeDispatch("));
   assert.match(bindBody, /bindPipelineDispatch\(dispatch, agentId\)/);
   assert.match(bindBody, /"workflow", "pipeline-bind"/);
-  const completeBody = source.slice(source.indexOf("async completeDispatch("), source.indexOf("  startSession(ctx"));
+  const completeBody = dispatchComplete;
   assert.match(completeBody, /writePipelineOutputLog\(dispatch, report\)/);
   assert.match(completeBody, /writePipelineStatus\(dispatch, report\)/);
-  assert.match(completeBody, /this\.queueReconcile\(\)/);
+  assert.match(completeBody, /queueReconcile\(\)/);
   // T004 smoke guards (2026-09-07): review verdicts are completed stages;
   // worker reports validate and empty patches fail at capture time.
   assert.match(completeBody, /completed review stage — report it with dispatch_status=completed/);
@@ -876,7 +885,7 @@ test("agent-tool dispatch seam: bind gates the agent id and completion persists 
   assert.match(completeBody, /patch capture is empty \(0 bytes\)/);
   // T004 smoke fix (2026-09-07): fix-round dispatches carry the failed review's
   // findings so they reach the fix worker without a contractor relay.
-  assert.match(source, /Review findings to address \(from the failed review of candidate/);
+  assert.match(launch, /Review findings to address \(from the failed review of candidate/);
 });
 
 test("dispatch completion rejects a review verdict misreported as a failed stage", async () => {
@@ -950,22 +959,23 @@ test("dispatch completion fails fast on an empty worker patch without justificat
 });
 
 test("scheduler worktree provisioning uses the asynchronous launch boundary", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
   assert.match(source, /await prepareSubagentWorktree\(spec\.cwd, spec\.initialPatchPath, claim\.id, spec\.durableWorktreeKey \|\| claim\.id, claim\.base_commit \|\| undefined\)/);
   assert.match(source, /spec\.preparedWorktree = prepared\.cwd/);
 });
 
 test("scheduler launches each ready Work Item at its persisted next stage", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const body = source.slice(source.indexOf("private async scheduleReady"), source.indexOf("private async launchGroup"));
+  const source = readFileSync(new URL("./advance.ts", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("export async function scheduleReady"));
   assert.match(body, /nextPipelineStage/);
   assert.doesNotMatch(body, /launchGroup\("worker", taskIds/);
 });
 
 test("parallel sibling reviews are invalidated when the integration base changes", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  assert.match(source, /"--base-commit", repositoryHead\(this\.cwd\)/);
-  assert.match(source, /assertReviewBaseCurrent\(run, this\.cwd\)/);
+  const source = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
+  const finishSource = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
+  assert.match(source, /"--base-commit", repositoryHead\(cwd\)/);
+  assert.match(finishSource, /assertReviewBaseCurrent\(run, cwd\)/);
   const repo = mkdtempSync(join(tmpdir(), "task-system-review-base-"));
   execFileSync("git", ["init", "-q"], { cwd: repo });
   execFileSync("git", ["config", "user.email", "test@example.com"], { cwd: repo });
@@ -1078,11 +1088,11 @@ test("failed review correction prompt requires a changed patch", () => {
   assert.match(prompt, /non-empty patch whose SHA-256 differs from the rejected candidate/);
 });
 test("completed worker candidates transition directly to review and are never downgraded", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const finishBody = source.slice(source.indexOf("private async finish"), source.indexOf("private async continueWorkerGroup"));
-  const groupBody = source.slice(source.indexOf("private async continueWorkerGroup"), source.indexOf("private integrateReviewedCandidate"));
-  assert.match(groupBody, /await this\.launchGroup\("review", \[entry\.task_id\]\)/);
-  assert.doesNotMatch(groupBody, /await this\.advance\(run\.task_id\)/);
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
+  const finishBody = source.slice(source.indexOf("export async function finish"), source.indexOf("export async function continueWorkerGroup"));
+  const groupBody = source.slice(source.indexOf("export async function continueWorkerGroup"), source.indexOf("export function integrateReviewedCandidate"));
+  assert.match(groupBody, /await launchGroup\(deps, "review", \[entry\.task_id\]\)/);
+  assert.doesNotMatch(groupBody, /await advance(deps, run.task_id)/);
   assert.match(finishBody, /if \(persisted\?\.status === "completed" && persisted\.artifact_saved_at\)/);
 });
 
@@ -1340,7 +1350,7 @@ test("worker scope reports root drift and approval-required files", () => {
   }), { unexpected: ["docs/note.md", "package.json"] });
 });
 test("worker integration excludes completed sibling phase tasks", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
   assert.match(source, /taskData\?\.work_item\?\.status === "done"\) return \[\]/);
 });
 
@@ -1350,10 +1360,10 @@ test("passed top-level review stops at executable verification gate", () => {
 });
 
 test("passed review delivers the executable contractor verification handoff", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const advance = source.slice(source.indexOf("private async advance("), source.indexOf("private async resumePending("));
+  const source = readFileSync(new URL("./advance.ts", import.meta.url), "utf8");
+  const advance = source.slice(source.indexOf("export async function advance("), source.indexOf("export function parentHasActiveRuns("));
   assert.match(advance, /buildTaskVerifyPrompt/);
-  assert.match(advance, /sendUserMessage[\s\S]+deliverAs: "followUp"/);
+  assert.match(advance, /deps\.sendUserMessage\(/);
 });
 
 test("aggregate delivery merges the verified head to develop exactly once", () => {
@@ -1385,7 +1395,13 @@ test("aggregate delivery merges the verified head to develop exactly once", () =
 });
 
 test("hybrid scheduler records use canonical Work Item lifecycle mutations", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = [
+    readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("./launch.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("./finish.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("./advance.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("./commands.ts", import.meta.url), "utf8"),
+  ].join("\n");
 
   assert.doesNotMatch(source, /execPic\(\["task", (?:"update"|"status")/);
   assert.equal(source.match(/execPic\(\["work-item", "review"/g)?.length, 2);
@@ -1407,7 +1423,7 @@ test("hybrid scheduler records use canonical Work Item lifecycle mutations", () 
 });
 
 test("worker claims launch implementation directly", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
   assert.doesNotMatch(source, /task-worker-preflight|parsePreflightReport|persistPreflightResult/);
   assert.match(source, /agent: stageAgent\(stage\)/);
   assert.match(source, /pipelineRunIds: claims\.map/);
@@ -1417,7 +1433,8 @@ test("worker claims launch implementation directly", () => {
 
 test("operator stop persists cancellation before stopping runtime and terminal failures do not respawn", () => {
   const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const stopBody = source.slice(source.indexOf("async stop("), source.indexOf("private async scheduleReady"));
+  const commands = readFileSync(new URL("./commands.ts", import.meta.url), "utf8");
+  const stopBody = commands.slice(commands.indexOf("export async function stop"));
 
   assert.match(stopBody, /pipeline-complete[\s\S]+"cancelled"/);
   assert.doesNotMatch(source, /status !== "completed"\) \{[\s\S]{0,300}scheduleReady/);
@@ -1425,17 +1442,18 @@ test("operator stop persists cancellation before stopping runtime and terminal f
 });
 
 test("failed review advances directly into the correction worker loop", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const resumeBody = source.slice(source.indexOf("private async resumePending"), source.indexOf("private pipelineRuns"));
-  assert.ok(resumeBody.lastIndexOf('checkpoint(run, "advanced"') < resumeBody.lastIndexOf("await this.advance"));
-  const advanceBody = source.slice(source.indexOf("private async advance"), source.indexOf("private async resumePending"));
-  assert.match(advanceBody, /nextPipelineStage\(data, this\.pipelineRuns\(taskId\)\)/);
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
+  const advanceSource = readFileSync(new URL("./advance.ts", import.meta.url), "utf8");
+  const resumeBody = source.slice(source.indexOf("export async function resumePending"));
+  assert.ok(resumeBody.lastIndexOf('checkpoint(run, "advanced"') < resumeBody.lastIndexOf("await advance(deps"));
+  const advanceBody = advanceSource.slice(advanceSource.indexOf("export async function advance"), advanceSource.indexOf("export function parentHasActiveRuns"));
+  assert.match(advanceBody, /nextPipelineStage\(data, deps\.pipelineRuns\(taskId\)\)/);
   assert.doesNotMatch(advanceBody, /next === "worker" && data\.task\?\.review_status === "failed"\) return/);
 });
 
 test("pipeline checkpoints use process status instead of a run payload error field", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const body = source.slice(source.indexOf("function checkpoint("), source.indexOf("function saveWorkerReport("));
+  const source = readFileSync(new URL("./run-helpers.ts", import.meta.url), "utf8");
+  const body = source.slice(source.indexOf("export function checkpoint("), source.indexOf("export function saveWorkerReport("));
   assert.match(body, /execPicText\(args, cwd\)/);
   assert.doesNotMatch(body, /result\.error/);
 });
@@ -1449,11 +1467,11 @@ test("Git index writes retry transient lock contention and pauses are delivered"
 });
 
 test("DONE worker reports promote only after reviewed integration", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const groupBody = source.slice(source.indexOf("private async continueWorkerGroup"), source.indexOf("private integrateReviewedCandidate"));
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
+  const groupBody = source.slice(source.indexOf("export async function continueWorkerGroup"), source.indexOf("export function integrateReviewedCandidate"));
   assert.doesNotMatch(groupBody, /saveWorkerReport\(/);
   assert.doesNotMatch(groupBody, /checkpoint\(entry, "integrated"/);
-  const integrationBody = source.slice(source.indexOf("private integrateReviewedCandidate"), source.indexOf("private async advance"));
+  const integrationBody = source.slice(source.indexOf("export function integrateReviewedCandidate"), source.indexOf("export async function advance"));
   assert.match(integrationBody, /checkpoint\(workerRun, "integrated"/);
   assert.ok(integrationBody.indexOf("integrateReviewedCandidate") < integrationBody.indexOf("promoteReviewedCandidate"));
   assert.match(integrationBody, /saveWorkerReport\(run/);
@@ -1502,18 +1520,18 @@ test("review context builder serves lean tasks without TIP bindings", () => {
 });
 
 test("review verdict is durable before restart-safe candidate integration", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const finishBody = source.slice(source.indexOf("private async finish"), source.indexOf("private async continueWorkerGroup"));
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
+  const finishBody = source.slice(source.indexOf("export async function finish"), source.indexOf("export async function continueWorkerGroup"));
   assert.ok(finishBody.indexOf('"pipeline-complete"') < finishBody.indexOf("integrateReviewedCandidate"));
-  const pendingBody = source.slice(source.indexOf("private async resumePending"), source.indexOf("private pipelineRuns"));
+  const pendingBody = source.slice(source.indexOf("export async function resumePending"));
   assert.match(pendingBody, /persistedReviewOutcome/);
   assert.match(pendingBody, /integrateReviewedCandidate/);
 });
 
 test("integration stages only reviewed patch changes and orphan recovery retires unbound claims", () => {
   const integration = readFileSync(new URL("./integration.ts", import.meta.url), "utf8");
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
-  const integrationBody = source.slice(source.indexOf("private integrateReviewedCandidate"), source.indexOf("private async advance"));
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
+  const integrationBody = source.slice(source.indexOf("export function integrateReviewedCandidate"), source.indexOf("export async function advance"));
   assert.match(integrationBody, /finalizeReviewedIntegration\(/);
   const finalizerBody = integration.slice(integration.indexOf("export function finalizeReviewedIntegration"), integration.indexOf("function assertCleanGit"));
   assert.match(finalizerBody, /git", \["apply", "--index"/);
@@ -1546,11 +1564,11 @@ test("session startup performs no pipeline I/O", async () => {
 
 
 test("worker launch wiring carries the durable pack key and resume failure mode", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
   assert.match(source, /spec\.durableWorktreeKey = packKey/);
   assert.match(source, /if \(retainedMode\) spec\.resumeFailureMode = retainedMode/);
   assert.match(source, /spec\.reusedRetainedWorktree = prepared\.reused/);
-  assert.match(source, /if \(!prepared\.reused && spec\.durableWorktreeKey\) this\.retainedFailures\.delete/);
+  assert.match(source, /if \(!prepared\.reused && spec\.durableWorktreeKey\) deps\.retainedFailures\.delete/);
 });
 
 test("worker scope only blocks protected task-system paths", () => {
@@ -1615,7 +1633,11 @@ test("worker artifact validation rejects an empty patch that claims changed file
 });
 
 test("worker provenance is bound by the pipeline claim instead of report hash repetition", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = [
+    readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("./run-helpers.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("./finish.ts", import.meta.url), "utf8"),
+  ].join("\n");
   assert.doesNotMatch(source, new RegExp(["subagents", "rpc"].join(":")));
   assert.doesNotMatch(source, new RegExp(["pi", "subagents", "manager"].join("-")));
   assert.match(source, /completion-save.*--pipeline-run-id/s);
@@ -1640,11 +1662,11 @@ test("failed review corrections are handed to worker", () => {
 });
 
 test("worker launches bind sessions to the claimed instruction pack host-side", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./launch.ts", import.meta.url), "utf8");
   const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
   // Session path must derive from the claimed pack ID (TIP lineage), not the run ID,
   // so review-fix relaunches resume the same conversation and retired packs never do.
-  assert.match(source, /spec\.sessionPath = workerSessionPath\(this\.cwd, activePack\?\.id \|\| claim\.instruction_pack_id \|\| taskId\)/);
+  assert.match(source, /spec\.sessionPath = workerSessionPath\(cwd, activePack\?\.id \|\| claim\.instruction_pack_id \|\| taskId\)/);
   assert.match(prompts, /function workerSessionPath\(cwd: string, packKey: string\)/);
   assert.match(prompts, /\.pi", "runtime", "runs", packKey, "session\.jsonl"/);
 });
@@ -1669,7 +1691,7 @@ test("escalated worker reports carry a structured, source-audited escalation pay
 });
 
 test("scheduler persists escalations fail-closed and injects resolutions at relaunch", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
   const prompts = readFileSync(new URL("./stage-prompts.ts", import.meta.url), "utf8");
   const corrections = readFileSync(new URL("./corrections.ts", import.meta.url), "utf8");
   assert.match(source, /taskReport\.status === "escalated"/);
@@ -1697,7 +1719,7 @@ test("escalation resolutions are authoritative in the next worker prompt", () =>
 });
 
 test("a failed escalation-save surfaces the worker's escalation payload instead of only the CLI error", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./finish.ts", import.meta.url), "utf8");
   const blockStart = source.indexOf('if (taskReport.status === "escalated")');
   assert.ok(blockStart > 0, "escalated branch must exist");
   const blockEnd = source.indexOf('if (taskReport.status !== "done")', blockStart);
@@ -1799,7 +1821,7 @@ test("canonical TIP XML renders the contract interfaces provided by the task gra
 });
 
 test("closing a leaf notifies the owner with dependency-ready next work", () => {
-  const source = readFileSync(new URL("./pipeline-scheduler.ts", import.meta.url), "utf8");
+  const source = readFileSync(new URL("./advance.ts", import.meta.url), "utf8");
   assert.match(source, /"work-item", "status", taskId, "done"[\s\S]{0,900}readyLeafIds\(/);
 });
 

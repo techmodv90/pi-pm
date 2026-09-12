@@ -16,7 +16,7 @@ func TestWorkItemShowIncludesChildrenAndDependencyEdges(t *testing.T) {
 	taskA := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Child A", "--parent", epic["id"].(string)))
 	taskB := asObject(t, runPic(t, bin, root, home, "work-item", "create", "task", "Child B", "--parent", epic["id"].(string)))
 	dbPath := root + "/.pi/tasks.db"
-	runSQLite(t, dbPath, `INSERT INTO work_item_dependencies(id,work_item_id,depends_on_work_item_id) VALUES('wid-test-1','`+taskA["id"].(string)+`','`+taskB["id"].(string)+`')`)
+	runSQLite(t, dbPath, `INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES('wir-test-1','`+taskA["id"].(string)+`','blocks','`+taskB["id"].(string)+`')`)
 
 	shownEpic := asObject(t, runPic(t, bin, root, home, "work-item", "show", epic["id"].(string)))
 	children, ok := shownEpic["children"].([]any)

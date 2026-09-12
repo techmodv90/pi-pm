@@ -1,119 +1,26 @@
-import { execFileSync } from "node:child_process";
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { getMarkdownTheme } from "@mariozechner/pi-coding-agent";
 import { Markdown, Text } from "@mariozechner/pi-tui";
-import { Type } from "typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
 import { execPic } from "../core/cli-helpers.ts";
-import { buildReviewContext } from "../tasking/settings.ts";
-import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt, buildWorkItemDebugPrompt, latestRriTScenarios } from "../tasking/work-item-prompts.ts";
+import { buildAggregateVerifyPrompt, buildWorkItemContinuePrompt } from "../tasking/work-item-prompts.ts";
 import { assertTaskManagerActionAllowed } from "../tasking/agent-capabilities.ts";
-import { parseCanonicalScanReportXml, renderScanReportMarkdown, prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
-import { parseRriReportJson, renderRriReportMarkdown } from "../reporting/rri-report.ts";
-import { parseVisionReportJson, renderVisionReportMarkdown } from "../reporting/vision-report.ts";
+import { prepareCanonicalScanReportArtifact } from "../reporting/scan-report.ts";
 import { parseBlueprintReportJson, renderBlueprintReportMarkdown } from "../reporting/blueprint-report.ts";
+import { parseVisionReportJson, renderVisionReportMarkdown } from "../reporting/vision-report.ts";
 import { parseContractReportJson, renderContractReportMarkdown } from "../reporting/contract-report.ts";
 import { parseTaskGraphReportJson, renderTaskGraphReportMarkdown } from "../reporting/task-graph-report.ts";
-import { deleteRriDraft, loadRriDraft, saveRriDraft, type RriDraftLineage } from "../core/rri-drafts.ts";
-import { annotationDispositionGate, deleteBlueprintDraft, deleteBlueprintDispositions, deleteBlueprintPlan, deletePlanReviewState, loadBlueprintDispositions, loadBlueprintDraft, loadLatestBlueprintDraft, planApprovalGate, planReviewAnnotations, planReviewCliAvailable, recoverPlanReviewResult, requestPlanReview, saveBlueprintDispositions, saveBlueprintDraft, validateBlueprintDispositions, writeBlueprintPlan } from "../core/blueprint-drafts.ts";
-import { planAdrFiles, writeAdrFiles, type AdrCandidate } from "../core/blueprint-adr.ts";
-
-import { currentApprovedPlanningArtifact, withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
+import { deleteRriDraft } from "../core/rri-drafts.ts";
+import { deleteBlueprintDraft, deletePlanReviewState, loadBlueprintDraft, loadLatestBlueprintDraft, saveBlueprintDraft } from "../core/blueprint-drafts.ts";
+import { currentApprovedPlanningArtifact } from "../tasking/task-artifacts.ts";
 import { runnerRepairEvidence, type PipelineScheduler } from "../pipeline/pipeline-scheduler.ts";
-
-function aggregateGitEvidence(cwd: string): { branch: string; head: string; baseBranch: string; baseCommit: string } {
-  const git = (...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
-  const branch = git("branch", "--show-current");
-  if (!branch) throw new Error("aggregate delivery requires a named Git branch");
-  const baseBranch = "develop";
-  let baseCommit = "";
-  try { baseCommit = git("rev-parse", `refs/remotes/origin/${baseBranch}`); }
-  catch { baseCommit = git("rev-parse", baseBranch); }
-  return { branch, head: git("rev-parse", "HEAD"), baseBranch, baseCommit };
-}
-
-function approvedScanLineage(cwd: string, workItemId: string): RriDraftLineage {
-  const data = execPic(["show", workItemId], cwd);
-  const checkpoint = (data.checkpoints || []).find((entry: any) => entry.stage === "scan");
-  if (!checkpoint?.artifact_id || !checkpoint?.content_hash) throw new Error("RRI interview requires an approved Scan checkpoint");
-  return { artifactId: checkpoint.artifact_id, contentHash: checkpoint.content_hash };
-}
-
-function rriDraftRoot(cwd: string): string {
-  const project = execPic(["project", "current"], cwd);
-  if (!project.root_path) throw new Error(project.error || "RRI interview requires a current project root");
-  return project.root_path;
-}
-
-// RRI-T scenario identity constraint: the id-based identity
-// (dimension|stress_axis|requirement_id|id) — shared with the canonical Go
-// validator and the authoring merge — never the persona, so two persisted
-// scenarios may share persona, dimension, stress axis, and requirement while
-// remaining distinct by id, and one persisted scenario can be deferred at most
-// once.
-function rriTScenarioIdentity(scenario: any): string {
-  return `${scenario.dimension}|${scenario.stress_axis}|${scenario.requirement_id}|${scenario.id}`;
-}
-
-// RRI-T save-before-execution (OB-5) keeps its artifact persistence, but the
-// scenario authoring is in-session contractor methodology work (see
-// /apm review): no persona subagents are spawned for authoring, and grading
-// below fails closed when the persisted artifact is missing.
-
-// RRI-T contractor grading (OB-6/OB-7): compile the submission from the
-// persisted scenario artifact and the contractor's in-session evidence; each
-// retained scenario receives exactly one outcome (PASS/ACCEPTABLE/PAINFUL/FAIL
-// with evidence, or not_applicable with a reason that stays out of the
-// executable scenarios), and FAIL blocking plus PAINFUL remediation/deferral
-// remain authoritative on the Go validation side.
-function compileRriTSubmission(data: any, gradedJson: string): string {
-  const persisted = latestRriTScenarios(data);
-  if (!persisted) throw new Error("persisted rri_t_scenarios artifact is missing; authoring was never saved, so aggregate verification is blocked instead of executing an unpersisted list");
-  let graded: { scenarios?: any[]; not_applicable?: any[] };
-  try {
-    graded = JSON.parse(gradedJson || "");
-  } catch {
-    throw new Error("rri_t_evidence_json must be a JSON object with scenarios and/or not_applicable arrays");
-  }
-  if (!graded || typeof graded !== "object" || Array.isArray(graded) || (!Array.isArray(graded.scenarios) && !Array.isArray(graded.not_applicable))) {
-    throw new Error("rri_t_evidence_json must be a JSON object with scenarios and/or not_applicable arrays");
-  }
-  const persistedByIdentity = new Map<string, any>();
-  for (const scenario of persisted.content.scenarios || []) {
-    const key = rriTScenarioIdentity(scenario);
-    if (!persistedByIdentity.has(key)) persistedByIdentity.set(key, scenario);
-  }
-  const outcomes = new Set<string>();
-  const scenarios: any[] = [];
-  for (const grade of graded.scenarios || []) {
-    const key = rriTScenarioIdentity(grade);
-    const match = persistedByIdentity.get(key);
-    if (!match) throw new Error(`graded scenario ${key} is not in the persisted rri_t_scenarios artifact`);
-    if (outcomes.has(key)) throw new Error(`scenario ${key} received more than one outcome`);
-    outcomes.add(key);
-    if (String(grade.procedure || "").trim() !== String(match.procedure || "").trim()) throw new Error(`graded scenario ${key} must reuse the persisted procedure verbatim`);
-    if (!String(grade.evidence || "").trim()) throw new Error(`graded scenario ${key} requires executed evidence`);
-    if (!["PASS", "ACCEPTABLE", "PAINFUL", "FAIL"].includes(String(grade.result || ""))) throw new Error(`graded scenario ${key} result must be PASS, ACCEPTABLE, PAINFUL, or FAIL`);
-    scenarios.push({ id: match.id, persona: match.persona, dimension: match.dimension, stress_axis: match.stress_axis, requirement_id: match.requirement_id, procedure: match.procedure, evidence: String(grade.evidence).trim(), result: String(grade.result).trim() });
-  }
-  const notApplicable: any[] = [];
-  for (const grade of graded.not_applicable || []) {
-    const key = rriTScenarioIdentity(grade);
-    const match = persistedByIdentity.get(key);
-    if (!match) throw new Error(`not_applicable scenario ${key} is not in the persisted rri_t_scenarios artifact`);
-    if (outcomes.has(key)) throw new Error(`scenario ${key} received more than one outcome`);
-    outcomes.add(key);
-    if (!String(grade.reason || "").trim()) throw new Error(`not_applicable scenario ${key} requires a concrete reason`);
-    notApplicable.push({ id: match.id, persona: match.persona, dimension: match.dimension, stress_axis: match.stress_axis, requirement_id: match.requirement_id, reason: String(grade.reason).trim() });
-  }
-  return JSON.stringify({
-    methodology: "rri-t",
-    personas: persisted.content.personas || [],
-    scenarios,
-    not_applicable: [...(Array.isArray(persisted.content.not_applicable) ? persisted.content.not_applicable : []), ...notApplicable],
-    open_blockers: persisted.content.open_blockers || [],
-  });
-}
+import { taskManagerParameters } from "./task-manager-schema.ts";
+import { aggregateGitEvidence, rriDraftRoot } from "./task-manager-helpers.ts";
+import { approveBlueprintDraft, reviewBlueprintCheckpoint } from "./blueprint-approval.ts";
+import { checkpointRriInterview, loadRriInterview, saveRriInterview } from "./rri-interview.ts";
+import { bindPipelineDispatchAction, completePipelineDispatchAction, listPipelineDispatchesAction } from "./dispatch-actions.ts";
+import { debugWorkItem, triggerWorkItemReview, workOnWorkItem } from "./review-actions.ts";
+import { previewArtifact } from "./artifact-preview.ts";
+import { acceptAggregateWorkItem, mergeAggregateWorkItem, verifyAggregateWorkItem } from "./aggregate-actions.ts";
 
 export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: PipelineScheduler) {
     pi.registerTool({
@@ -121,56 +28,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
       label: "Task Manager",
       description: "Manage canonical Work Items through the pic CLI.",
       promptSnippet: "Use Work Item actions for lifecycle mutations. Archived Task Items are read-only history.",
-      parameters: Type.Object({
-        action: StringEnum([
-          "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview", "save_rri_interview",
-          "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "preview_artifact", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "resolve_escalation", "amend_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
-          "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
-          "list_pipeline_dispatches", "bind_pipeline_dispatch", "complete_pipeline_dispatch",
-          "relate_work_items", "reset_pipeline_circuit",
-        ] as const),
-        id: Type.Optional(Type.String({ description: "Work Item ID" })),
-        related_work_item_id: Type.Optional(Type.String({ description: "Work Item related to the subject" })),
-        relation_type: Type.Optional(StringEnum(["blocks", "gates", "related"] as const)),
-        title: Type.Optional(Type.String({ description: "Work Item title" })),
-        description: Type.Optional(Type.String({ description: "Description text" })),
-        content: Type.Optional(Type.String({ description: "Immutable workflow artifact content" })),
-        status: Type.Optional(StringEnum(["open", "in_progress", "done", "cancelled"] as const)),
-        priority: Type.Optional(StringEnum(["low", "medium", "high"] as const)),
-        notes: Type.Optional(Type.String({ description: "Concise note or summary to append" })),
-        query: Type.Optional(Type.String({ description: "Search query" })),
-        summary: Type.Optional(Type.String({ description: "Workflow artifact summary" })),
-        rri_t_evidence_json: Type.Optional(Type.String({ description: "Graded RRI-T scenario JSON (persisted scenarios plus per-scenario evidence/result or not_applicable with reason) submitted by the contractor with verify_aggregate_work_item" })),
-        verification_status: Type.Optional(StringEnum(["passed", "failed", "partial", "blocked"] as const)),
-        actor_role: Type.Optional(Type.String({ description: "Explicit actor role; owner-only actions require owner confirmation from the user" })),
-        event_type: Type.Optional(Type.String({ description: "Debug trigger type" })),
-        work_item_type: Type.Optional(StringEnum(["epic", "feature", "task", "bug", "chore", "gate"] as const)),
-        parent_id: Type.Optional(Type.String({ description: "Parent aggregate Work Item ID" })),
-        labels: Type.Optional(Type.Array(Type.String(), { description: "Work Item labels" })),
-        deviation_ids: Type.Optional(Type.Array(Type.String(), { description: "Requirement IDs approved for deferment" })),
-        reason: Type.Optional(Type.String({ description: "Owner-recorded reason for a bounded planning amendment" })),
-        substitutions: Type.Optional(Type.Array(Type.Object({ old: Type.String(), new: Type.String() }), { description: "Exact old→new string pairs for amend_work_item_planning; every occurrence across approved planning artifacts, requirements, and owner decisions is replaced" })),
-        stage: Type.Optional(StringEnum(["scan", "rri", "vision", "blueprint", "contracts", "task_graph"] as const)),
-        dispositions: Type.Optional(Type.Array(Type.Object({
-          annotation: Type.String({ description: "Exact annotation text from the persisted plan review feedback" }),
-          resolution: StringEnum(["addressed", "waived"] as const),
-          evidence: Type.String({ description: "Owner-recorded evidence for the terminal resolution" }),
-        }), { description: "Terminal dispositions resolving recorded plan-review annotations; required while any annotation remains unresolved" })),
-        artifact_id: Type.Optional(Type.String({ description: "Immutable Work Item artifact ID" })),
-        completion_report_id: Type.Optional(Type.String({ description: "Current integrated Completion Report ID" })),
-        verification_report_id: Type.Optional(Type.String({ description: "Current aggregate Verification Report ID" })),
-        decision: Type.Optional(StringEnum(["accepted", "rejected"] as const)),
-        change_type: Type.Optional(StringEnum(["contract", "environment", "runner", "artifact"] as const)),
-        evidence_json: Type.Optional(Type.String({ description: "JSON evidence supporting a pipeline circuit reset" })),
-        agent_id: Type.Optional(Type.String({ description: "Agent tool id returned by the background spawn; required for bind_pipeline_dispatch" })),
-        output: Type.Optional(Type.String({ description: "Terminal agent output reported with complete_pipeline_dispatch" })),
-        error: Type.Optional(Type.String({ description: "Failure reason reported with complete_pipeline_dispatch when status is failed" })),
-        dispatch_status: Type.Optional(StringEnum(["completed", "failed"] as const)),
-        failure_code: Type.Optional(Type.String({ description: "Optional failure classification reported with complete_pipeline_dispatch" })),
-        claimant: Type.Optional(Type.String({ description: "Worker or scheduler claiming the Work Item" })),
-        deferrable: Type.Optional(Type.Boolean({ description: "Whether the Work Item is deferred" })),
-        escalation_id: Type.Optional(Type.String({ description: "Open escalation ID (wies-…) to resolve with a recorded decision" })),
-      }),
+      parameters: taskManagerParameters,
   
       async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
         let args: string[] = [];
@@ -206,46 +64,9 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
               return { content: [{ type: "text", text: `Error: ${message}` }], details: { error: message }, isError: true };
             }
           }
-          case "checkpoint_rri_interview": {
-            if (!params.id || !params.content) return { content: [{ type: "text", text: "Error: id and JSON content required" }], details: {}, isError: true };
-            let state: unknown;
-            try { state = JSON.parse(params.content); }
-            catch { return { content: [{ type: "text", text: "Error: RRI interview content must be valid JSON" }], details: {}, isError: true }; }
-            if (!state || typeof state !== "object" || Array.isArray(state)) return { content: [{ type: "text", text: "Error: RRI interview content must be one JSON object" }], details: {}, isError: true };
-            try {
-              const path = saveRriDraft(rriDraftRoot(ctx.cwd), params.id, approvedScanLineage(ctx.cwd, params.id), state);
-              const result = { work_item_id: params.id, checkpointed: true, path };
-              return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Error: ${message}` }], details: { error: message }, isError: true };
-            }
-          }
-          case "load_rri_interview": {
-            if (!params.id) return { content: [{ type: "text", text: "Error: id required" }], details: {}, isError: true };
-            try {
-              const result = loadRriDraft(rriDraftRoot(ctx.cwd), params.id, approvedScanLineage(ctx.cwd, params.id));
-              return { content: [{ type: "text", text: JSON.stringify(result.state, null, 2) }], details: result };
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Error: ${message}` }], details: { error: message }, isError: true };
-            }
-          }
-          case "save_rri_interview": {
-            if (!params.id || !params.content || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, content (final RRI JSON), and actor_role=contractor are required" }], details: {}, isError: true };
-            try {
-              const payload = JSON.parse(params.content) as { report?: unknown };
-              if (!payload.report) throw new Error("RRI finalization requires a structured report object");
-              rriPresentation = renderRriReportMarkdown(parseRriReportJson(JSON.stringify(payload.report)));
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
-            }
-            const result = execPic(["work-item", "rri-finalize", params.id, params.content, "--actor-role", params.actor_role], ctx.cwd);
-            if (result.error) return { content: [{ type: "text", text: `Error: ${result.error}` }], details: result, isError: true };
-            pipelineScheduler.finalizeHandoffs(params.id, "rri");
-            return { content: [{ type: "text", text: rriPresentation }], details: { ...result, rriPresentation } };
-          }
+          case "checkpoint_rri_interview": return checkpointRriInterview(ctx, params);
+          case "load_rri_interview": return loadRriInterview(ctx, params);
+          case "save_rri_interview": return saveRriInterview(pipelineScheduler, ctx, params);
           case "create_work_item": {
             if (!params.work_item_type || !params.title) return { content: [{ type: "text", text: "Error: work_item_type and title required" }], details: {}, isError: true };
             args = ["work-item", "create", params.work_item_type, params.title];
@@ -330,164 +151,15 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             args = ["work-item", "artifact-save", params.id, params.stage, scanContent || params.content];
             break;
           }
-          case "preview_artifact": {
-            if (!params.stage || !params.content) return { content: [{ type: "text", text: "Error: stage and content required" }], details: {}, isError: true };
-            try {
-              let markdown: string;
-              switch (params.stage) {
-                case "scan": markdown = renderScanReportMarkdown(parseCanonicalScanReportXml(params.content)); break;
-                case "rri": {
-                  // RRI finalization content nests the report under .report; accept either shape
-                  const payload = JSON.parse(params.content) as { report?: unknown };
-                  markdown = renderRriReportMarkdown(parseRriReportJson(JSON.stringify(payload.report ?? payload)));
-                  break;
-                }
-                case "vision": markdown = renderVisionReportMarkdown(parseVisionReportJson(params.content)); break;
-                case "blueprint": markdown = renderBlueprintReportMarkdown(parseBlueprintReportJson(params.content)); break;
-                case "contracts": markdown = renderContractReportMarkdown(parseContractReportJson(params.content)); break;
-                case "task_graph": markdown = renderTaskGraphReportMarkdown(parseTaskGraphReportJson(params.content)); break;
-                default: throw new Error(`stage ${params.stage} has no rendered artifact preview`);
-              }
-              return { content: [{ type: "text", text: markdown }], details: { action: "preview_artifact", stage: params.stage, preview: true, previewPresentation: markdown } };
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
-            }
-          }
+          case "preview_artifact": return previewArtifact(params);
           case "approve_work_item_artifact": {
             if (!params.id || !params.stage || !params.artifact_id) return { content: [{ type: "text", text: "Error: id, stage, and artifact_id required" }], details: {}, isError: true };
             if (params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: actor_role must be owner after explicit owner approval" }], details: {}, isError: true };
             args = ["work-item", "artifact-approve", params.id, params.stage, params.artifact_id, params.stage === "scan" ? "accepted" : "approved"];
             break;
           }
-          case "review_blueprint_checkpoint": {
-            if (!params.id || !params.artifact_id || !params.content || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, artifact_id (the draft ID), content, and actor_role=contractor are required" }], details: {}, isError: true };
-            const draft = loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id);
-            let checkpoint: Record<string, unknown>;
-            try { checkpoint = JSON.parse(params.content) as Record<string, unknown>; }
-            catch { return { content: [{ type: "text", text: "Error: content must be a JSON object with the five checkpoint booleans: architecture, design, requirements, task_decomposition (verification_seams for decomposition policy v2 drafts), nothing_missing" }], details: {}, isError: true }; }
-            // The fifth check is policy-dependent: decomposition policy v2 drafts
-            // are reviewed for verification seams, v1 drafts for task decomposition.
-            const policyVersion = (JSON.parse(draft.content) as { decomposition_policy_version?: number }).decomposition_policy_version ?? 1;
-            const checks = policyVersion === 2
-              ? ["architecture", "design", "requirements", "verification_seams", "nothing_missing"]
-              : ["architecture", "design", "requirements", "task_decomposition", "nothing_missing"];
-            if (!checks.every((key) => checkpoint[key] === true)) return { content: [{ type: "text", text: `Error: all five Blueprint checks must pass; set each to true: ${checks.join(", ")}` }], details: {}, isError: true };
-            // OB-F3-1 stable review projection: persist the reviewed render at
-            // the stable plan path before owner review. Rendering failures
-            // surface as the checkpoint error and a failed persistence write
-            // never removes the prior plan file (atomic rename inside
-            // writeBlueprintPlan).
-            let planMarkdown: string;
-            try { planMarkdown = renderBlueprintReportMarkdown(parseBlueprintReportJson(draft.content)); }
-            catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
-            }
-            try { writeBlueprintPlan(ctx.cwd, params.id, planMarkdown); }
-            catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Error: ${message}` }], details: { error: message }, isError: true };
-            }
-            const reviewed = saveBlueprintDraft(ctx.cwd, params.id, draft.content, checkpoint);
-            blueprintPresentation = planMarkdown.replaceAll("- [ ]", "- [x]");
-            // OB-F3-4 review entry: hand the reviewed render to the Plannotator
-            // Pi extension through the asynchronous plannotator:request
-            // plan-review event. An unavailable extension is a guarded fallback
-            // that never fabricates an annotation outcome; zero annotations
-            // approve with no dispositions recorded, and the standalone CLI is
-            // informational only.
-            const planReview = await requestPlanReview(pi.events, ctx.cwd, params.id, planMarkdown);
-            const reviewNote = planReview.status === "pending"
-              ? `Plan review requested through the Plannotator Pi extension (review ${planReview.reviewId}); annotations are optional — zero annotations approve with no dispositions recorded.`
-              : `Plan review entry unavailable (${planReview.error || "extension did not respond"}); proceeding without annotations. The standalone plannotator CLI is not required (CLI on PATH: ${planReviewCliAvailable() ? "yes" : "no"}).`;
-            return { content: [{ type: "text", text: `${blueprintPresentation}\n\nContractor checkpoint passed. Draft ${reviewed.draftId} is ready for owner approval.\nPlan review: ${planReview.planPath}\n${reviewNote}` }], details: { draft_id: reviewed.draftId, reviewed: true, plan_path: planReview.planPath, plan_review: planReview } };
-          }
-          case "approve_blueprint_draft": {
-            if (!params.id || !params.artifact_id || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id, draft_id, and actor_role=owner are required" }], details: {}, isError: true };
-            const draft = loadBlueprintDraft(ctx.cwd, params.id, params.artifact_id);
-            if (!draft.reviewed) return { content: [{ type: "text", text: "Error: Contractor review is required before owner approval" }], details: {}, isError: true };
-            // OB-F3-4 hard gate: recover the persisted Plannotator review
-            // result before approval. A pending review or a rejected review
-            // with entered annotations blocks approval until the revision loop
-            // resolves it; an approved review, a guarded unavailable runtime,
-            // or a never-requested review passes with zero dispositions.
-            const planReview = await recoverPlanReviewResult(pi.events, ctx.cwd, params.id);
-            const gate = planApprovalGate(planReview);
-            // OB-F3-2/OB-F3-3 persisted-state hard gate: a still-pending review
-            // blocks approval outright (no annotations exist to resolve); a
-            // rejected review falls through to the disposition gate, where the
-            // annotations derived from the persisted feedback are recorded into
-            // the persisted disposition store and the unresolved count is
-            // recomputed from persistence before any canonical save. A pending
-            // annotation returns a gate error with no save and no cleanup, so
-            // the draft, plan file, and recorded dispositions all stay
-            // recoverable for the next attempt.
-            const annotations = planReviewAnnotations(planReview);
-            let dispositions = loadBlueprintDispositions(ctx.cwd, params.id);
-            if (!gate.ok && annotations.length === 0) return { content: [{ type: "text", text: `Error: ${gate.reason}` }], details: { plan_review: planReview }, isError: true };
-            if (params.dispositions !== undefined) {
-              try {
-                const validated = validateBlueprintDispositions(params.dispositions);
-                for (const entry of validated) {
-                  if (!annotations.includes(entry.annotation)) {
-                    throw new Error(`Disposition annotation "${entry.annotation}" does not match a recorded plan-review annotation`);
-                  }
-                }
-                dispositions = saveBlueprintDispositions(ctx.cwd, params.id, validated);
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                return { content: [{ type: "text", text: `Error: ${message}` }], details: { annotations, dispositions }, isError: true };
-              }
-            }
-            const dispositionGate = annotationDispositionGate(annotations, dispositions);
-            if (!dispositionGate.ok) return { content: [{ type: "text", text: `Error: ${dispositionGate.reason}` }], details: { annotations, dispositions }, isError: true };
-            // OB-F2-3: full adr_candidates validation (shape, string fields,
-            // safe slugs) and target-conflict preflight run BEFORE the Go
-            // artifact-save/approve, so malformed or conflicting input can
-            // never leave the canonical Blueprint approved while the tool
-            // returns an error. writeAdrFiles runs only after both Go
-            // operations succeed.
-            let adrPayload: { adr_candidates?: unknown };
-            try { adrPayload = JSON.parse(draft.content); }
-            catch {
-              return { content: [{ type: "text", text: "Error: Blueprint draft content must be valid JSON" }], details: {}, isError: true };
-            }
-            const parsedAdrCandidates = adrPayload.adr_candidates;
-            if (parsedAdrCandidates !== undefined && !Array.isArray(parsedAdrCandidates)) return { content: [{ type: "text", text: "Error: adr_candidates must be an array of {context, choice, reason} objects" }], details: {}, isError: true };
-            const adrCandidates = (parsedAdrCandidates ?? []) as AdrCandidate[];
-            try { planAdrFiles(ctx.cwd, adrCandidates); }
-            catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Error: ${message}` }], details: {}, isError: true };
-            }
-            const saved = execPic(["work-item", "artifact-save", params.id, "blueprint", draft.content], ctx.cwd);
-            if (saved.error) return { content: [{ type: "text", text: `Error: ${saved.error}` }], details: saved, isError: true };
-            // Durable evidence ordering (OB-F3-3): the Go approval commits the
-            // terminal dispositions onto the Blueprint checkpoint in the same
-            // transaction, before any temporary file is deleted; a failed save
-            // or approval leaves zero evidence and preserves temporary files.
-            const approveArgs = ["work-item", "artifact-approve", params.id, "blueprint", saved.id, "approved"];
-            if (dispositionGate.resolved.length > 0) approveArgs.push("--dispositions-json", JSON.stringify(dispositionGate.resolved));
-            const approved = execPic(approveArgs, ctx.cwd);
-            if (approved.error) return { content: [{ type: "text", text: `Error: ${approved.error}` }], details: { saved, approved }, isError: true };
-            let adrFiles: string[] = [];
-            // Validation already passed before the Go calls; this write only
-            // fails on a mid-approval filesystem change, which must surface as
-            // a concrete approval-side error, not a thrown exception.
-            if (adrCandidates.length > 0) {
-              try { adrFiles = writeAdrFiles(ctx.cwd, adrCandidates); }
-              catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                return { content: [{ type: "text", text: `Error: ${message}` }], details: { saved, approved }, isError: true };
-              }
-            }
-            deleteBlueprintDraft(ctx.cwd, params.id);
-            deletePlanReviewState(ctx.cwd, params.id);
-            deleteBlueprintDispositions(ctx.cwd, params.id);
-            deleteBlueprintPlan(ctx.cwd, params.id);
-            return { content: [{ type: "text", text: JSON.stringify({ saved, approved, adr_files: adrFiles }, null, 2) }], details: { saved, approved, adr_files: adrFiles } };
-          }
+          case "review_blueprint_checkpoint": return await reviewBlueprintCheckpoint(pi, ctx, params);
+          case "approve_blueprint_draft": return await approveBlueprintDraft(pi, ctx, params);
           case "load_planning_artifact": {
             if (!params.id || !params.stage || !["scan", "rri", "vision", "blueprint", "contracts", "task_graph"].includes(params.stage)) return { content: [{ type: "text", text: "Error: id and a valid planning stage are required" }], details: {}, isError: true };
             const data = execPic(["show", params.id], ctx.cwd);
@@ -553,45 +225,18 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             break;
           }
           case "verify_aggregate_work_item": {
-            if (!params.id || !params.verification_status || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, verification_status, and actor_role=contractor required" }], details: {}, isError: true };
-            // RRI-T scenario ownership (OB-5): compile the grading submission from
-            // the aggregate's own persisted scenarios only; parent-inherited rows
-            // are never a valid scenario source for a feature aggregate, so the
-            // aggregate is loaded directly instead of merged with parent artifacts.
-            const aggregateData = execPic(["show", params.id], ctx.cwd);
-            if (!aggregateData.work_item) return { content: [{ type: "text", text: `Error: ${aggregateData.error || "Work Item not found"}` }], details: {}, isError: true };
-            let rriTJson = "";
-            try {
-              // RRI-T grading submission (OB-6): compile the graded scenario
-              // evidence from the persisted rri_t_scenarios artifact only; the
-              // contractor grades in the main session, so the submission never
-              // re-runs persona subagents and fails closed without a saved list.
-              rriTJson = compileRriTSubmission(aggregateData, params.rri_t_evidence_json || "");
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `RRI-T verification blocked: ${message}` }], details: { error: message }, isError: true };
-            }
-            args = ["work-item", "aggregate-verify", params.id, params.verification_status, params.summary || params.notes || "", "--actor-role", params.actor_role, "--rri-t-json", rriTJson];
-            const git = aggregateGitEvidence(ctx.cwd);
-            args.push("--branch-name", git.branch, "--head-commit", git.head, "--base-commit", git.baseCommit);
+            const prepared = verifyAggregateWorkItem(ctx, params);
+            if ("args" in prepared) args = prepared.args;
+            else return prepared;
             break;
           }
           case "accept_aggregate_work_item": {
-            if (!params.id || !params.verification_report_id || !params.decision || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id, verification_report_id, decision, and actor_role=owner required" }], details: {}, isError: true };
-            const git = aggregateGitEvidence(ctx.cwd);
-            args = ["work-item", "aggregate-accept", params.id, params.verification_report_id, params.decision, params.notes || "", "--actor-role", params.actor_role, "--head-commit", git.head, "--base-commit", git.baseCommit];
+            const prepared = acceptAggregateWorkItem(ctx, params);
+            if ("args" in prepared) args = prepared.args;
+            else return prepared;
             break;
           }
-          case "merge_aggregate_work_item": {
-            if (!params.id) return { content: [{ type: "text", text: "Error: id required" }], details: {}, isError: true };
-            try {
-              const result = await pipelineScheduler.mergeAggregate(params.id, ctx);
-              return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: result };
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Aggregate merge blocked: ${message}` }], details: { error: message }, isError: true };
-            }
-          }
+          case "merge_aggregate_work_item": return await mergeAggregateWorkItem(pipelineScheduler, ctx, params);
           case "verify_work_item": {
             if (!params.id || !params.completion_report_id || !params.verification_status || params.actor_role !== "contractor") return { content: [{ type: "text", text: "Error: id, completion_report_id, verification_status, and actor_role=contractor required" }], details: {}, isError: true };
             args = ["work-item", "verification-save", params.id, params.completion_report_id, params.verification_status, params.summary || params.notes || "", "--actor-role", params.actor_role];
@@ -607,18 +252,7 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             if (!params.query) return { content: [{ type: "text", text: "Error: query required" }], details: {}, isError: true };
             args = ["search", params.query];
             break;
-          case "debug_work_item": {
-            if (!params.id) return { content: [{ type: "text", text: "Error: id required for debug_work_item" }], details: {}, isError: true };
-            const data = execPic(["show", params.id], ctx.cwd);
-            if (!data.work_item) return { content: [{ type: "text", text: `Error: ${data.error || "Work Item not found"}` }], details: {}, isError: true };
-            const inheritedData = withInheritedParentWorkflowArtifacts(data, ctx.cwd);
-            const text = buildWorkItemDebugPrompt(inheritedData.work_item, {
-              scanReports: (inheritedData.artifacts || []).filter((artifact: any) => artifact.stage === "scan"),
-              trigger: params.event_type || "manual",
-              evidence: params.notes || params.description || "",
-            });
-            return { content: [{ type: "text", text }], details: { action: "debug_work_item", workItem: inheritedData.work_item, trigger: params.event_type || "manual" } };
-          }
+          case "debug_work_item": return debugWorkItem(ctx, params);
           case "reset_pipeline_circuit": {
             if (!params.id || !params.notes || !params.change_type || !params.evidence_json || params.actor_role !== "owner") return { content: [{ type: "text", text: "Error: id, notes, change_type, evidence_json, and actor_role=owner required for reset_pipeline_circuit" }], details: {}, isError: true };
             let evidenceJson = params.evidence_json;
@@ -630,84 +264,16 @@ export function registerTaskManagerTool(pi: ExtensionAPI, pipelineScheduler: Pip
             args = ["workflow", "pipeline-circuit-reset", params.id, "--reason", params.notes, "--change-type", params.change_type, "--evidence-json", evidenceJson, "--actor-role", params.actor_role];
             break;
           }
-          case "list_pipeline_dispatches": {
-            const pending = pipelineScheduler.listDispatches();
-            return { content: [{ type: "text", text: JSON.stringify(pending, null, 2) }], details: { action: "list_pipeline_dispatches", dispatches: pending } };
-          }
-          case "bind_pipeline_dispatch": {
-            if (!params.id || !params.agent_id) return { content: [{ type: "text", text: "Error: id (pipeline run id) and agent_id required" }], details: {}, isError: true };
-            try {
-              const bound = pipelineScheduler.bindDispatch(params.id, params.agent_id);
-              return { content: [{ type: "text", text: JSON.stringify(bound, null, 2) }], details: { action: "bind_pipeline_dispatch", runId: params.id, agentId: params.agent_id } };
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Bind blocked: ${message}` }], details: { action: "bind_pipeline_dispatch", error: message }, isError: true };
-            }
-          }
-          case "complete_pipeline_dispatch": {
-            if (!params.id || !params.dispatch_status) return { content: [{ type: "text", text: "Error: id (pipeline run id) and dispatch_status (completed|failed) required" }], details: {}, isError: true };
-            if (params.dispatch_status === "failed" && !params.output && !params.error) return { content: [{ type: "text", text: "Error: failed dispatch requires output or error" }], details: {}, isError: true };
-            try {
-              await pipelineScheduler.completeDispatch(params.id, { completed: params.dispatch_status === "completed", output: params.output || "", error: params.error, failureCode: params.failure_code });
-              return { content: [{ type: "text", text: `Dispatch ${params.id} reported ${params.dispatch_status}; scheduler reconcile queued.` }], details: { action: "complete_pipeline_dispatch", runId: params.id, dispatchStatus: params.dispatch_status } };
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Report blocked: ${message}` }], details: { action: "complete_pipeline_dispatch", error: message }, isError: true };
-            }
-          }
-          case "work_on_work_item": {
-            if (!params.id) {
-              try {
-                const result = await pipelineScheduler.startReadyBatch(ctx);
-                return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: { action: "work_on_work_item", pipeline: result } };
-              } catch (error) {
-                const message = error instanceof Error ? error.message : String(error);
-                return { content: [{ type: "text", text: `Work batch blocked: ${message}` }], details: { action: "work_on_work_item", error: message }, isError: true };
-              }
-            }
-            const data = execPic(["show", params.id], ctx.cwd);
-            if (!data.work_item) return { content: [{ type: "text", text: `Error: ${data.error || "Work Item not found"}` }], details: {}, isError: true };
-            const status = execPic(["work-item", "workflow-status", params.id], ctx.cwd);
-            if (!status.error && (status.next_stage === "rri" || status.next_stage === "vision" || status.next_stage === "contracts")) {
-              const prompt = buildWorkItemContinuePrompt(status, data.work_item);
-              return { content: [{ type: "text", text: prompt }], details: { action: "work_on_work_item", workItem: data.work_item, next_stage: status.next_stage, contractor: true } };
-            }
-            try {
-              const result = await pipelineScheduler.start(params.id, ctx);
-              return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: { action: "work_on_work_item", workItem: data.work_item, pipeline: result } };
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              return { content: [{ type: "text", text: `Work pipeline blocked: ${message}` }], details: { action: "work_on_work_item", workItem: data.work_item, error: message }, isError: true };
-            }
-          }
+          case "list_pipeline_dispatches": return listPipelineDispatchesAction(pipelineScheduler);
+          case "bind_pipeline_dispatch": return bindPipelineDispatchAction(pipelineScheduler, params);
+          case "complete_pipeline_dispatch": return await completePipelineDispatchAction(pipelineScheduler, params);
+          case "work_on_work_item": return await workOnWorkItem(pipelineScheduler, ctx, params);
           case "dry_run_work_item": {
             if (!params.id) return { content: [{ type: "text", text: "Error: id required" }], details: {}, isError: true };
             const result = pipelineScheduler.dryRun(params.id, ctx);
             return { content: [{ type: "text", text: JSON.stringify(result, null, 2) }], details: { action: "dry_run_work_item", ...result } };
           }
-          case "trigger_work_item_review": {
-            if (!params.id) return { content: [{ type: "text", text: "Error: id required" }], details: {}, isError: true };
-            const data = execPic(["show", params.id], ctx.cwd);
-            if (!data.work_item || !["task", "bug", "chore"].includes(data.work_item.type)) {
-              return { content: [{ type: "text", text: `Error: ${data.error || "Executable Work Item not found"}` }], details: {}, isError: true };
-            }
-            const review = buildReviewContext(params.id, ctx.cwd);
-            if (review.error || !review.text) {
-              return { content: [{ type: "text", text: `Error: ${review.error || "Failed to build review context"}` }], details: {}, isError: true };
-            }
-  
-            const text = [
-              `# Review Context for Work Item ${params.id}`,
-              "",
-              "This is the complete pack-bound review context. Review it directly; do not launch another reviewer.",
-              "",
-              review.text,
-            ].join("\n");
-            return {
-              content: [{ type: "text", text }],
-              details: { action: "trigger_work_item_review", readyForSubagent: true, workItem: data.work_item, gitDiff: review.gitDiff, reviewContext: review.text },
-            };
-          }
+          case "trigger_work_item_review": return triggerWorkItemReview(ctx, params);
         }
   
         const result = execPic(args, ctx.cwd);

@@ -729,7 +729,7 @@ func queryDependendencies(t *testing.T, bin, root, home string) [][2]string {
 		t.Fatal(err)
 	}
 	defer db.Close()
-	rows, err := db.Query(`SELECT work_item_id,depends_on_work_item_id FROM work_item_dependencies ORDER BY id`)
+	rows, err := db.Query(`SELECT work_item_id,related_work_item_id FROM work_item_relations WHERE relation_type='blocks' ORDER BY id`)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -13,7 +13,7 @@ const ReadySQL = `wi.type IN ('task','bug','chore') AND wi.status='open' AND wi.
 )=1 OR EXISTS (
 	SELECT 1 FROM work_item_materializations m JOIN implementation_authorizations a ON a.work_item_id=m.root_work_item_id AND a.task_graph_checkpoint_id=m.checkpoint_id AND a.revoked_at='' WHERE m.work_item_id=wi.id
 ) OR (
-	-- Lean path: no legacy pipeline state at all; the description is the worker input.
+	-- Lean path: no pack-based planning state at all; the description is the worker input.
 	(SELECT COUNT(*) FROM work_item_instruction_packs p WHERE p.work_item_id=wi.id AND p.status='active')=0 AND NOT EXISTS (
 		SELECT 1 FROM work_item_materializations m WHERE m.work_item_id=wi.id
 	)

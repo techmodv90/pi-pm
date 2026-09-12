@@ -1,6 +1,6 @@
 ---
 name: reasoning
-description: "Structured mental-model router: pick the right analysis, decision, or perspective model for a problem instead of ad-hoc reasoning. Activate when the user says: 'razonar', 'reason about', 'mental model', 'which model', 'analizar problema', or when a problem needs systematic decomposition (root cause, trade-off, pre-mortem, mass context)."
+description: Use this skill for applying structured mental models, analytical frameworks, and systematic problem decomposition. Trigger this whenever a user explicitly requests a mental model or systematic analysis (e.g., "reason about", "mental model", "which model", "razonar", "analizar problema"). It applies to complex problems requiring rigorous evaluation, including root-cause analysis, trade-off matrices, first-principles thinking, pre-mortems, or managing massive contextual information instead of using ad-hoc intuition.
 version: 1.0.0
 adopted_from: don-cheli-sdd habilidades/razonamiento (v1.0.0, Don Cheli; RLM models adapted from PrimeIntellect)
 tags: [reasoning, mental-models, decision, analysis, routing]

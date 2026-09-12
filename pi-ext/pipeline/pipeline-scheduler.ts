@@ -1,31 +1,20 @@
-import { execFile, execFileSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, realpathSync, statSync, writeFileSync } from "node:fs";
-import { promisify } from "node:util";
-import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { Type } from "typebox";
-import { execPic, execPicText, withGitWriteLock } from "../core/cli-helpers.ts";
+import { execPic } from "../core/cli-helpers.ts";
 import { EphemeralHandoffStore } from "../core/ephemeral-handoffs.ts";
-import { loadLatestBlueprintDraft } from "../core/blueprint-drafts.ts";
-
-
-import { withInheritedParentWorkflowArtifacts } from "../tasking/task-artifacts.ts";
-import { buildTaskVerifyPrompt, buildPlanningHandoffXml } from "../tasking/work-item-prompts.ts";
-import { discoverAgents } from "../subagent/agents.ts";
-import { cleanupOrphanedSubagentWorktrees, prepareSubagentWorktree } from "../subagent/runner.ts";
-import { bindPipelineDispatch, findPipelineDispatch, listPipelineDispatches, writePipelineDispatch, writePipelineOutputLog, writePipelineStatus, type PipelineDispatch, type PipelineDispatchReport } from "./pipeline-dispatch.ts";
-
-import type { SubagentResult } from "../subagent/types.ts";
+import { cleanupOrphanedSubagentWorktrees } from "../subagent/runner.ts";
 import { parsePicShow, type PicShowDocument } from "./pic-show.ts";
-import { parsePipelineRuns, type PipelineRun, type PipelineStage } from "./pipeline-types.ts";
-import { activePackDoneReports, currentFailedReview, isMutationStage, latestVerificationAfter, parseReviewReport, parseTaskCompletionReport, persistedReviewOutcome, pipelineVerificationBlockReason } from "./report-parsing.ts";
-import { assertCleanGit, assertReviewBaseCurrent, finalizeReviewedIntegration, mergeAggregateBranch, rejectedCandidatePatch, repositoryHead, verificationEnvironmentFingerprint, type AggregateDeliveryState } from "./integration.ts";
-import { DEFAULT_GENERATED_FILES, filterGeneratedFiles, pipelineFailureResult, validateWorkerOutput, validateWorkerPatchArtifact, workerPatch } from "./worker-validation.ts";
-import { REVIEW_FIX_ROUND_LIMIT, assertReviewFixChangedPatch, buildReviewFixCapBlock, reviewCycleCount } from "./corrections.ts";
-import { isPlanningStage, pipelineSpawnParams, stageAgent, stagePrompt, predecessorCheckpointFor, workerSessionPath } from "./stage-prompts.ts";
-import { assertRunContractCurrent, buildPipelineDryRun, canonicalReadyLeafIds, isResumableExecutionState, nextPipelineStage, normalizePipelineData, pipelineWorkerBlockReason, resolvePlanProfile, workerIntegrationCandidate, type PlanningProfileState } from "./stage-resolution.ts";
-import { evaluateSkillFamilyRouting, recordSkillRoutingEvent } from "./skill-routing.ts";
+import { parsePipelineRuns, type PipelineRun } from "./pipeline-types.ts";
+import { pipelineFailureResult } from "./worker-validation.ts";
+import { canonicalReadyLeafIds } from "./stage-resolution.ts";
+import { assertCleanGit } from "./integration.ts";
+import { checkpoint, statusFor, formatPipelineStatus, formatPipelineStop } from "./run-helpers.ts";
+import { scheduleReady } from "./advance.ts";
+import { finish, resumePending } from "./finish.ts";
+import { startReadyBatch as startReadyBatchOf, status as statusOf, stop as stopOf, dryRun as dryRunOf, mergeAggregate as mergeAggregateOf } from "./commands.ts";
+import { completeDispatch as completeDispatchOf } from "./dispatch-complete.ts";
+import { bindPipelineDispatch, findPipelineDispatch as findPipelineDispatchOf, listPipelineDispatches as listPipelineDispatchesOf, type PipelineDispatchReport } from "./pipeline-dispatch.ts";
+import type { SchedulerDeps } from "./scheduler-context.ts";
 
 export * from "./rri-t.ts";
 export * from "./report-parsing.ts";
@@ -35,104 +24,10 @@ export * from "./corrections.ts";
 export * from "./stage-prompts.ts";
 export * from "./instruction-pack-xml.ts";
 export * from "./stage-resolution.ts";
-
-const execFileAsync = promisify(execFile);
-
-
-
-
-
-
-
-
-
-function checkpoint(run: PipelineRun, name: "integrated" | "artifact_saved" | "advanced", cwd: string, patchFile = ""): void {
-  const args = ["workflow", "pipeline-checkpoint", run.id, run.lease_token, name];
-  if (patchFile) args.push("--patch-file", patchFile);
-  try {
-    execPicText(args, cwd);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  } catch (error: any) {
-    const message = error?.stderr?.toString().trim() || error?.message || String(error);
-    if (message.includes("already recorded")) return;
-    // Terminal runs with an expired lease are reconciled by the durable pending-run sweep.
-    // Do not turn that cleanup race into a new worker blocker.
-    if (name === "advanced" && (message.includes("invalid stage, status, lease") || message.includes("stale, invalid, or already recorded"))) return;
-    throw new Error(message);
-  }
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-function saveWorkerReport(run: PipelineRun, cwd: string, taskReport: { status: "done" | "partial" | "blocked"; markdown: string }, report: any = { changedFiles: [], commandsRun: [], criteriaSatisfied: [], diffSummary: `Async worker ${taskReport.status}`, reviewFindings: [], residualRisks: [] }): void {
-  const result = execPic([
-    "workflow", "completion-save", run.task_id, taskReport.status,
-    "--pipeline-run-id", run.id,
-    "--summary", report.diffSummary || `Async worker ${taskReport.status}`,
-    "--report-markdown", taskReport.markdown,
-    "--files-changed-json", JSON.stringify(report.changedFiles || []),
-    "--tests-run-json", JSON.stringify(report.commandsRun || []),
-    "--acceptance-results-json", JSON.stringify(report.criteriaSatisfied || []),
-    "--issues-json", JSON.stringify(report.reviewFindings || []),
-    "--deviations-json", "[]",
-    "--suggestions-json", JSON.stringify(report.residualRisks || []),
-  ], cwd);
-  if (result.error) throw new Error(result.error);
-}
-
-function outputFor(run: PipelineRun): string {
-  const path = join(run.async_dir || "", `output-${run.child_index || 0}.log`);
-  if (!existsSync(path)) throw new Error(`subagent output missing: ${path}`);
-  return readFileSync(path, "utf8");
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-function statusFor(run: PipelineRun): any {
-  const path = join(run.async_dir || "", "status.json");
-  if (!existsSync(path)) return null;
-  const status = JSON.parse(readFileSync(path, "utf8"));
-  if (status.state === "running" && Number.isInteger(status.pid)) {
-    try {
-      process.kill(status.pid, 0);
-    } catch {
-      return { ...status, state: "failed", error: "subagent process is no longer running" };
-    }
-  }
-  return status;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-export function formatPipelineStatus(result: any): string {
-  const runs = Array.isArray(result?.runs) ? result.runs : [];
-  if (!runs.length) return `Pipeline ${result?.task_id || "unknown"}: no runs`;
-  const lines = [`Pipeline ${result.task_id || "unknown"}`];
-  for (const run of runs) {
-    const runId = run.subagent_run_id ? ` run=${String(run.subagent_run_id).slice(0, 8)}` : "";
-    const model = run.agent_model ? ` model=${run.agent_model}` : "";
-    const error = run.error ? ` error=${String(run.error).replace(/\s+/g, " ").slice(0, 120)}` : "";
-    lines.push(`- ${run.stage || "unknown"} ${run.status || "unknown"} attempt=${run.attempt || 1}${runId}${model}${error}`);
-  }
-  return lines.join("\n");
-}
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-export function formatPipelineStop(result: any): string {
-  const cancelled = Array.isArray(result?.cancelled_runs) ? result.cancelled_runs.length : 0;
-  return `Pipeline ${result?.task_id || "unknown"}: cancelled ${cancelled} run${cancelled === 1 ? "" : "s"}`;
-}
-
-
-
-
-
-
-
-
-
-
+export { formatPipelineStatus, formatPipelineStop } from "./run-helpers.ts";
 
 export class PipelineScheduler {
   readonly handoffs = new EphemeralHandoffStore();
-  private cwd = "";
 
   /** Fail-closed typed view of one `pic show` document. */
   showItem(id: string): PicShowDocument {
@@ -158,6 +53,22 @@ export class PipelineScheduler {
 
   constructor(pi: ExtensionAPI) { this.pi = pi; }
 
+  private cwd = "";
+
+  /** Facade consumed by the split scheduler operation modules. */
+  private get deps(): SchedulerDeps {
+    return {
+      cwd: this.cwd,
+      showItem: (id) => this.showItem(id),
+      pipelineRuns: (taskId) => this.pipelineRuns(taskId),
+      sendUserMessage: (text) => this.pi.sendUserMessage(text, { deliverAs: "followUp" }),
+      notifyBlockedAttempt: (run, reason) => this.notifyBlockedAttempt(run, reason),
+      addRoot: (id) => this.roots.add(id),
+      retainedFailures: this.retainedFailures,
+      handoffs: this.handoffs,
+    };
+  }
+
   private queueReconcile(): void {
     setImmediate(() => { void this.reconcileSafely(); });
   }
@@ -165,8 +76,9 @@ export class PipelineScheduler {
   /** Pending Agent-tool dispatches awaiting a contractor spawn + bind, enriched
    *  with the run's live lifecycle state (status, error, integration fields) —
    *  the zero-sqlite contractor surface (RLB-GAP-002). */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   listDispatches(): any[] {
-    return listPipelineDispatches(this.cwd).map((dispatch) => {
+    return listPipelineDispatchesOf(this.cwd).map((dispatch) => {
       let run: PipelineRun | undefined;
       try {
         run = this.pipelineRuns(dispatch.taskId).find((entry) => entry.id === dispatch.runId);
@@ -178,8 +90,9 @@ export class PipelineScheduler {
   }
 
   /** Bind an Agent tool id to a dispatched run — the hard gate: empty ids are rejected. */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   bindDispatch(runId: string, agentId: string): any {
-    const dispatch = findPipelineDispatch(this.cwd, runId);
+    const dispatch = findPipelineDispatchOf(this.cwd, runId);
     if (!dispatch) throw new Error(`no pending pipeline dispatch for run ${runId}`);
     bindPipelineDispatch(dispatch, agentId);
     const bound = execPic(["workflow", "pipeline-bind", dispatch.runId, dispatch.leaseToken, agentId.trim(), "--async-dir", dispatch.asyncDir, "--child-index", "0"], this.cwd);
@@ -187,52 +100,9 @@ export class PipelineScheduler {
     return bound;
   }
 
-  /**
-   * Contractor-reported terminal output for a dispatched run. Completed
-   * mutation stages get their worktree patch captured through the same
-   * writeWorkerPatch path the process runner used; the reconcile loop then
-   * advances the state machine exactly as before. Failed reports leave
-   * completed_at/output null and persist a failed status for retry routing.
-   */
   async completeDispatch(runId: string, report: PipelineDispatchReport): Promise<void> {
-    const dispatch = findPipelineDispatch(this.cwd, runId);
-    if (!dispatch) throw new Error(`no pipeline dispatch for run ${runId}`);
-    // Dispatch-status semantics guard (T004 smoke, 2026-09-07): a returned
-    // review verdict is a COMPLETED review stage whose failed status lives in
-    // the report; dispatch_status=failed means "the stage never ran" and, if
-    // misused, strands the state machine (reviewStatusForCandidate only admits
-    // completed review runs, and pipeline-complete cannot correct a failed run).
-    if (!report.completed && dispatch.stage === "review" && /<review_report\b/.test(report.output || "")) {
-      throw new Error("review dispatch reported failed but its output carries a review report; a returned review verdict is a completed review stage — report it with dispatch_status=completed so the verdict routes the fix round (dispatch_status=failed means the stage never ran)");
-    }
-    writePipelineOutputLog(dispatch, report);
-    if (report.completed && isMutationStage(dispatch.stage as PipelineStage)) {
-      // Fail-fast report validation (T004 smoke, 2026-09-07): run the same
-      // parseTaskCompletionReport validation finish() applies BEFORE any
-      // terminal transition, so a malformed relay leaves the run `running` and
-      // retryable instead of terminally blocked (blocked is uncorrectable).
-      const taskReport = parseTaskCompletionReport(report.output || "");
-      if (!dispatch.worktree) throw new Error(`dispatch ${runId} completed without a prepared worktree`);
-      // Synthesize the minimal SubagentResult shape writeWorkerPatch consumes.
-      await this.writeWorkerPatch(
-        { id: dispatch.runId, task_id: dispatch.taskId, stage: dispatch.stage, child_index: 0, async_dir: dispatch.asyncDir } as unknown as PipelineRun,
-        { exitCode: 0, stopReason: "completed", messages: [], stderr: "", errorMessage: "", workspace: { assignedWorktree: dispatch.worktree } } as unknown as SubagentResult,
-      );
-      // Fail-fast empty-patch guard (T004 smoke, 2026-09-07): done workers with
-      // no changes and no justification almost always committed their work
-      // inside the task worktree, which breaks the scheduler's uncommitted-diff
-      // patch capture. Surface that at capture time, not two stages later.
-      const patch = workerPatch({ id: dispatch.runId, child_index: 0, async_dir: dispatch.asyncDir } as unknown as PipelineRun);
-      if (taskReport.status === "done" && statSync(patch).size === 0 && !taskReport.no_change_justification) {
-        throw new Error(`worker patch capture is empty (0 bytes) for run ${runId}; if the worker committed its changes inside the worktree, uncommit them (git reset --mixed <base>) and re-emit the completion report — task worktrees must never contain the work as commits; the scheduler captures the uncommitted diff`);
-      }
-    } else if (dispatch.worktree) {
-      writeFileSync(join(dispatch.asyncDir, "workspace.json"), JSON.stringify({ assignedWorktree: dispatch.worktree }, null, 2), { mode: 0o600 });
-    }
-    writePipelineStatus(dispatch, report);
-    this.queueReconcile();
+    await completeDispatchOf(this.deps, () => this.queueReconcile(), runId, report);
   }
-
 
   private async reconcileSafely(): Promise<void> {
     try {
@@ -242,41 +112,10 @@ export class PipelineScheduler {
     }
   }
 
-  private async writeWorkerPatch(run: PipelineRun, result: SubagentResult): Promise<void> {
-    if (!run.async_dir) return;
-    const worktree = result.workspace?.assignedWorktree;
-    if (!worktree) throw new Error("worker result missing assigned worktree");
-    const gitToplevel = (await execFileAsync("git", ["-C", worktree, "rev-parse", "--show-toplevel"], { encoding: "utf8" })).stdout.trim();
-    if (realpathSync(gitToplevel) !== realpathSync(worktree)) throw new Error(`worker worktree invariant failed after exit: assigned=${worktree} git_toplevel=${gitToplevel}`);
-    // Pre-existing tolerance: an unreadable show document (e.g. no project DB in a
-    // probe repo) falls back to default constraints instead of losing the patch.
-    let constraints: Record<string, unknown> = {};
-    try {
-      const data = this.showItem(run.task_id);
-      const activePack = data.instruction_packs.find((pack) => pack.status === "active");
-      constraints = JSON.parse(activePack?.constraints_json || "{}");
-    } catch {}
-    await execFileAsync("git", ["-C", worktree, "add", "-N", "--", "."], { encoding: "utf8" });
-    const changedResult = await execFileAsync("git", ["-C", worktree, "diff", "--name-only", "HEAD"], { encoding: "utf8" });
-    const filtered = filterGeneratedFiles(changedResult.stdout.trim().split("\n").filter(Boolean), constraints);
-    const changedFiles = filtered.changedFiles;
-    if (result.workspace) result.workspace.changedFiles = changedFiles;
-    if (result.workspace) result.workspace.generatedFiles = filtered.generatedFiles;
-    const excluded = [...DEFAULT_GENERATED_FILES, ...(Array.isArray(constraints.generated_files) ? constraints.generated_files : [])].map((pattern) => `:(exclude,glob)${pattern}`);
-    const patchResult = await execFileAsync("git", ["-C", worktree, "diff", "--binary", "HEAD", "--", ".", ...excluded], { encoding: "utf8", maxBuffer: 100 * 1024 * 1024 });
-    const dir = join(run.async_dir, "worktree-diffs");
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
-    const patch = workerPatch(run);
-    writeFileSync(patch, patchResult.stdout, { mode: 0o600 });
-    validateWorkerPatchArtifact(patch, join(run.async_dir, `output-${run.child_index || 0}.log`), { changedFiles: changedFiles });
-    writeFileSync(join(run.async_dir, "workspace.json"), JSON.stringify(result.workspace, null, 2), { mode: 0o600 });
-  }
-
   startSession(ctx: ExtensionContext): void {
     this.cwd = ctx.cwd;
     this.context = ctx;
   }
-
 
   stopSession(): void {
     this.handoffs.clear();
@@ -345,340 +184,37 @@ export class PipelineScheduler {
     // api/tool.ts, never through the spawn scheduler.
     assertCleanGit(ctx.cwd);
     await this.reconcile();
-    return await this.scheduleReady(rootTaskId);
+    return await scheduleReady(this.deps, rootTaskId);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   async startReadyBatch(ctx: ExtensionContext): Promise<any> {
     this.cwd = ctx.cwd;
     this.context = ctx;
     this.lastError = "";
     assertCleanGit(ctx.cwd);
     await this.reconcile();
-    const ready = execPic(["work-item", "ready"], ctx.cwd);
-    const listed = execPic(["work-item", "list"], ctx.cwd);
-    const taskIds = [...new Set([
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-      ...(Array.isArray(ready) ? ready.map((item: any) => item.id) : []),
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-      ...(Array.isArray(listed) ? listed.filter((item: any) => ["task", "bug", "chore"].includes(item.type) && item.status === "in_progress").map((item: any) => item.id).filter((id: any) => {
-        // Auto-batch must not touch items with a live claim; explicit retries are
-        // guarded by the one-active-run-per-(task,stage) unique index instead.
-        const runs = this.pipelineRuns(id);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-        if (runs.some((run: any) => run.status === "claimed" || run.status === "running")) return false;
-        const state = execPic(["work-item", "workflow-status", id], ctx.cwd);
-        return isResumableExecutionState(state);
-      }) : []),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    ])].filter((id: any): id is string => typeof id === "string");
-    if (!taskIds.length) return { launches: [], blocked: "No authorized dependency-ready executable Work Items" };
-    const stages = new Map<PipelineStage, string[]>();
-    for (const taskId of taskIds) {
-      const data = normalizePipelineData(execPic(["show", taskId], ctx.cwd));
-      const stage = nextPipelineStage(data, this.pipelineRuns(taskId));
-      if (stage) stages.set(stage, [...(stages.get(stage) || []), taskId]);
-    }
-    const launches = [];
-    for (const [stage, ids] of stages) launches.push(await this.launchGroup(stage, ids));
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    const pipelineRunIds = launches.flatMap((launch: any) => launch.pipelineRunIds || []);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    const subagentRunIds = launches.flatMap((launch: any) => launch.subagentRunIds || []);
-    if (!pipelineRunIds.length || !subagentRunIds.length) {
-      return { taskIds, launches, blocked: "Ready Work Items were found, but no persisted pipeline or subagent runs were created." };
-    }
-    return { taskIds, launches, pipelineRunIds, subagentRunIds };
+    return startReadyBatchOf(this.deps, ctx);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   dryRun(rootTaskId: string, ctx: ExtensionContext): any {
-    const root = execPic(["show", rootTaskId], ctx.cwd);
-    if (!root.work_item) return { rootTaskId, leaves: [], blocker: "Work Item not found" };
-    return buildPipelineDryRun(root, (id) => execPic(["show", id], ctx.cwd));
+    return dryRunOf(rootTaskId, ctx);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   status(taskId: string, ctx: ExtensionContext): any {
-    const active = execPic(["workflow", "pipeline-active"], ctx.cwd);
-    if (Array.isArray(active)) cleanupOrphanedSubagentWorktrees(ctx.cwd, new Set(active.flatMap((run: PipelineRun) => [run.id, run.subagent_run_id || ""]).filter(Boolean)));
-    const activeRun = Array.isArray(active)
-      ? active.find((run: PipelineRun) => run.id === taskId || run.subagent_run_id === taskId)
-      : undefined;
-    if (activeRun) return { task_id: activeRun.task_id, pipeline_run_id: activeRun.id, subagent_run_id: activeRun.subagent_run_id, runs: [activeRun] };
-    const root = execPic(["show", taskId], ctx.cwd);
-    const taskIds = root.work_item
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-      ? [taskId, ...(root.children || []).map((child: any) => child.id)]
-      : [taskId];
-    const runs = taskIds.flatMap((id: string) => {
-      const runs = execPic(["workflow", "pipeline-runs", id], ctx.cwd);
-      return Array.isArray(runs) ? runs : [];
-    });
-    return { task_id: taskId, runs, error: runs.length ? "" : this.lastError };
+    return statusOf(taskId, ctx, this.lastError);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   async stop(taskId: string, ctx: ExtensionContext): Promise<any> {
-    const status = this.status(taskId, ctx);
-    const active = (status.runs || []).filter((run: PipelineRun & { status: string }) => run.status === "claimed" || run.status === "running");
-    for (const run of active) {
-      const cancelled = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "cancelled", "--error", "cancelled by operator"], ctx.cwd);
-      if (cancelled.error) throw new Error(cancelled.error);
-    }
-    return { task_id: taskId, cancelled_runs: active.map((run: PipelineRun) => run.id) };
+    return stopOf(taskId, ctx);
   }
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
+// eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   async mergeAggregate(workItemId: string, ctx: ExtensionContext): Promise<any> {
-    const state = execPic(["work-item", "workflow-status", workItemId], ctx.cwd) as AggregateDeliveryState & { next_stage?: string; integration_mode?: string };
-    if (state.integration_mode === "coordination" && state.next_stage === "done") return state;
-    if (state.next_stage !== "merge_pending" || state.integration_mode !== "branch") throw new Error(`Work Item ${workItemId} is not awaiting a branch merge`);
-    try {
-      const mergeCommit = mergeAggregateBranch(ctx.cwd, state);
-      const result = execPic(["work-item", "aggregate-merge-result", workItemId, state.verified_head, "merged", mergeCommit], ctx.cwd);
-      if (result.error) throw new Error(result.error);
-      return result;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      const blocked = execPic(["work-item", "aggregate-merge-result", workItemId, state.verified_head, "blocked", message], ctx.cwd);
-      if (blocked.error) throw new Error(`${message}; failed to persist merge blocker: ${blocked.error}`);
-      throw new Error(message);
-    }
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  private async scheduleReady(rootTaskId: string, explicitRetry = false): Promise<any> {
-    const root = this.showItem(rootTaskId);
-    if (root.work_item) {
-      const taskIds = this.readyLeafIds(root);
-      if (!taskIds.length) return { rootTaskId, launches: [], blocked: "No authorized dependency-ready executable Work Items" };
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      const stages = new Map<PipelineStage, string[]>();
-      for (const taskId of taskIds) {
-        const data = normalizePipelineData(this.showItem(taskId));
-        const stage = nextPipelineStage(data, this.pipelineRuns(taskId));
-        if (stage) stages.set(stage, [...(stages.get(stage) || []), taskId]);
-      }
-      const launches = [];
-      for (const [stage, ids] of stages) launches.push(await this.launchGroup(stage, ids, explicitRetry));
-      return { rootTaskId, launches };
-    }
-    return { rootTaskId, launches: [], blocked: "Work Item not found" };
-  }
-
-
-  // Planning profile constraint: refuse to dispatch a planning stage that the
-  // persisted Plan profile (or the kind/depth contract before it is persisted)
-  // does not include, and bind the claim to the persisted profile version/hash
-  // so a stale Go/TypeScript profile view cannot dispatch an unapproved stage.
-  // A stage must not dispatch before the Plan profile is persisted: the handoff
-  // envelope requires a profile version/hash, so a resolved:false profile would
-  // publish an invalid envelope with no recovery.
-  private planEligibility(taskId: string, stage: PipelineStage): { profile: PlanningProfileState } {
-    const profile = resolvePlanProfile(normalizePipelineData(this.showItem(taskId)));
-    if (!profile.resolved || !profile.contentHash) {
-      throw new Error(`planning stage ${stage} cannot dispatch for ${taskId} before the Plan profile is persisted; persist the approved profile before dispatch`);
-    }
-    if (!profile.stages.includes(stage)) {
-      throw new Error(`planning stage ${stage} is not in the persisted plan profile for ${taskId} (depth ${profile.depth}); revise the profile before dispatch`);
-    }
-    return { profile };
-  }
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  private async launchGroup(stage: PipelineStage, taskIds: string[], explicitRetry = false): Promise<any> {
-    const active = execPic(["workflow", "pipeline-active"], this.cwd);
-    const activeRuns = Array.isArray(active) ? active.filter((run: PipelineRun) => run.stage === stage && taskIds.includes(run.task_id)) : [];
-    const activeTaskIds = new Set(activeRuns.map((run: PipelineRun) => run.task_id));
-    const launchTaskIds = taskIds.filter((taskId) => !activeTaskIds.has(taskId));
-    if (launchTaskIds.length === 0) return { stage, taskIds, pipelineRunIds: [], activePipelineRunIds: activeRuns.map((run: PipelineRun) => run.id), subagentRunIds: [] };
-    const workerPrompts = new Map<string, string>();
-    const initialPatchPaths = new Map<string, string>();
-    const reviewFixTaskIds = new Set<string>();
-    if (isMutationStage(stage)) {
-      assertCleanGit(this.cwd);
-      for (const taskId of launchTaskIds) {
-        const raw = this.showItem(taskId);
-        const data = raw.work_item ? normalizePipelineData(raw) : withInheritedParentWorkflowArtifacts(raw, this.cwd);
-        if (!data.work_item) throw new Error(data.error || `Task ${taskId} not found`);
-        const blockReason = pipelineWorkerBlockReason(data);
-        if (blockReason) throw new Error(blockReason);
-        const runs = this.pipelineRuns(taskId);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-        const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
-        // Observe-mode routing telemetry (skill-family-routing plan): record the
-        // routing evaluation for every worker/autofix launch without ever
-        // blocking it — enforcement is a follow-up gated on this data.
-        if (stage === "worker" || stage === "autofix") {
-          const routingPack = (data.instruction_packs || []).find((pack: { status?: string }) => pack.status === "active");
-          const scanEvidence = Array.isArray(data.scan_reports) && data.scan_reports.length ? [data.scan_reports[0]] : [];
-          recordSkillRoutingEvent(this.cwd, taskId, stage, routingPack?.id || "", evaluateSkillFamilyRouting(routingPack || {}, scanEvidence, { cwd: this.cwd }));
-        }
-        if (stage === "worker" && currentFailedReview(runs, activePack)) {
-          const cycle = reviewCycleCount(runs);
-          if (cycle >= REVIEW_FIX_ROUND_LIMIT) {
-            // Round-cap persistence constraint: persist the owner-action block
-            // durably BEFORE refusing the launch, so the failed review is elevated
-            // to owner-approval-required and nextPipelineStage/claim gates stop
-            // relaunching the fix worker across reconciliation (a transient throw
-            // alone would leave the failed review eligible for a repeated launch).
-            const failedReview = currentFailedReview(runs, activePack);
-            const capBlock = buildReviewFixCapBlock(taskId, failedReview?.findings || []);
-            try {
-              const blocked = execPic(["workflow", "review-fix-block", taskId, "--summary", capBlock], this.cwd);
-              if (blocked.error) throw new Error(blocked.error);
-            } catch (error) {
-              const message = error instanceof Error ? error.message : String(error);
-              throw new Error(`round-cap block persisted with error (${message}); owner action still required:\n\n${capBlock}`);
-            }
-            throw new Error(capBlock);
-          }
-          reviewFixTaskIds.add(taskId);
-          const rejectedPatch = rejectedCandidatePatch(data, runs, this.cwd);
-          if (rejectedPatch) initialPatchPaths.set(taskId, rejectedPatch);
-        }
-      }
-    }
-    const claims: PipelineRun[] = [];
-    try {
-      for (const taskId of launchTaskIds) {
-        const data = this.showItem(taskId);
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-        const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
-        const claimArgs = ["workflow", "pipeline-claim", taskId, stage, "--lease-seconds", "14400", "--environment-fingerprint", verificationEnvironmentFingerprint(this.cwd), "--base-commit", repositoryHead(this.cwd)];
-        if (isPlanningStage(stage)) {
-          const { profile } = this.planEligibility(taskId, stage);
-          if (profile.resolved && profile.version > 0) claimArgs.push("--profile-version", String(profile.version), "--profile-hash", profile.contentHash);
-        }
-        if (stage === "worker" && reviewFixTaskIds.has(taskId)) claimArgs.push("--review-fix", "1");
-        if (stage === "worker" && explicitRetry) claimArgs.push("--explicit-retry", "1");
-        if (activePack && (isMutationStage(stage) || stage === "review")) claimArgs.push("--instruction-pack-id", activePack.id ?? "", "--instruction-pack-hash", activePack.content_hash ?? "");
-        const claim = execPic(claimArgs, this.cwd);
-        if (claim.error) throw new Error(claim.error);
-        claims.push(claim);
-      }
-      if (isMutationStage(stage)) {
-        await new Promise<void>((resolve) => setImmediate(resolve));
-        for (const taskId of launchTaskIds) {
-          const raw = this.showItem(taskId);
-          const reset = execPic(["work-item", "status", taskId, "in_progress"], this.cwd);
-          if (reset.error) throw new Error(reset.error);
-          if (!raw.work_item) {
-            const event = execPic(["workflow", "event-add", taskId, "implementation_started", "--actor-role", "orchestrator", "--summary", stage === "autofix" ? "Targeted autofix started" : "Persisted Worker stage started"], this.cwd);
-            if (event.error) throw new Error(event.error);
-          }
-        }
-      }
-      const subagentRunIds: string[] = [];
-      const dispatches: PipelineDispatch[] = [];
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      for (let index = 0; index < claims.length; index++) {
-        const claim = claims[index]!;
-        const taskId = launchTaskIds[index]!;
-        const data = normalizePipelineData(this.showItem(taskId));
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-        const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
-        let skillFamilies: string[] = [];
-        if (activePack?.skill_families_json) {
-          const parsed = JSON.parse(activePack.skill_families_json);
-          if (!Array.isArray(parsed) || !parsed.every((family) => typeof family === "string")) throw new Error(`Task ${taskId} has invalid persisted skill families`);
-          skillFamilies = parsed;
-        }
-        let taskPrompt = workerPrompts.get(taskId) || stagePrompt(stage, taskId, this.cwd);
-        // Fix-round findings relay (T004 smoke, 2026-09-07): dispatch payloads
-        // carry only the original task description, so review findings never
-        // reach the fix-round worker unless attached here — the contractor
-        // relay proved unreliable when done by hand.
-        if (stage === "worker" && claim.candidate_run_id) {
-          const failedReview = this.pipelineRuns(taskId).filter((entry) => entry.stage === "review" && entry.status === "completed" && entry.candidate_run_id === claim.candidate_run_id)
-            .filter((entry) => { try { return JSON.parse(entry.result_json || "{}")?.review_status === "failed"; } catch { return false; } })
-            .pop();
-          const findings = Array.isArray(failedReview?.findings) ? failedReview.findings.filter((finding: unknown) => typeof finding === "string" && (finding as string).trim()) as string[] : [];
-          if (findings.length) {
-            taskPrompt += `\n\nReview findings to address (from the failed review of candidate ${claim.candidate_run_id}):\n${findings.map((finding: string) => `- ${finding}`).join("\n")}`;
-          }
-        }
-        if (stage === "rri") taskPrompt += `\n\nComplete RRI source context:\n${JSON.stringify({ work_item: data.work_item, scan_reports: data.scan_reports, requirements: data.requirements || [], owner_decisions: data.owner_decisions || [] })}`;
-        const task = { agent: stageAgent(stage), task: taskPrompt, taskId, ...(isMutationStage(stage) || stage === "review" ? { skillFamilies } : {}) };
-        const spec = pipelineSpawnParams(stage, task, this.cwd);
-        if (stage === "worker") {
-          spec.initialPatchPath = initialPatchPaths.get(taskId);
-          spec.sessionPath = workerSessionPath(this.cwd, activePack?.id || claim.instruction_pack_id || taskId);
-          // Durable worker worktree constraint (RLB-GAP-001): worker-stage spawns
-          // (including review-fix relaunches) key their worktree by instruction
-          // pack so a transient failure retains the partial work for the retry;
-          // review/scan stages stay run-keyed and clean up per GAP-091/096.
-          const packKey = activePack?.id || claim.instruction_pack_id || taskId;
-          spec.durableWorktreeKey = packKey;
-          const retainedMode = this.retainedFailures.get(packKey);
-          if (retainedMode) spec.resumeFailureMode = retainedMode;
-        }
-        if (stage === "review") {
-          const candidate = this.pipelineRuns(taskId).find((entry) => entry.id === claim.candidate_run_id);
-          if (!candidate?.integrated_patch_path || candidate.integrated_patch_hash !== claim.candidate_patch_hash || !existsSync(candidate.integrated_patch_path)) {
-            throw new Error("review candidate patch attestation failed");
-          }
-          spec.initialPatchPath = candidate.integrated_patch_path;
-        }
-        const agent = discoverAgents(this.cwd, "project").find((candidate) => candidate.name === spec.agent);
-        if (!agent) throw new Error(`Task-system agent definition not found: ${spec.agent}`);
-        if (spec.isolation === "worktree") {
-          let prepared;
-          try {
-            // RLB-GAP-003: pass the claim's stamped base_commit so retained
-            // worktrees align to the exact commit the candidate patch must
-            // later apply against.
-            prepared = await prepareSubagentWorktree(spec.cwd, spec.initialPatchPath, claim.id, spec.durableWorktreeKey || claim.id, claim.base_commit || undefined);
-          } catch (error) {
-            if (stage === "review") {
-              const candidate = this.pipelineRuns(taskId).find((entry) => entry.id === claim.candidate_run_id);
-              if (candidate) {
-                execPic(["workflow", "pipeline-complete", candidate.id, candidate.lease_token, "blocked", "--error", "candidate patch no longer applies to the current integration base"], this.cwd);
-                checkpoint(candidate, "advanced", this.cwd);
-              }
-            }
-            throw error;
-          }
-          spec.runId = prepared.runId;
-          spec.preparedWorktree = prepared.cwd;
-          spec.reusedRetainedWorktree = prepared.reused;
-          // Fresh creation after a deterministic terminal: no retained worktree
-          // exists for this pack anymore, so drop the stale failure-mode note.
-          if (!prepared.reused && spec.durableWorktreeKey) this.retainedFailures.delete(spec.durableWorktreeKey);
-        }
-        // Agent-tool dispatch: persist the dispatch record with the prepared
-        // worktree; the contractor binds the Agent tool id (hard gate: empty
-        // id rejected) and reports terminal output. The run row stays
-        // `claimed` with no async_dir until bind, so reconcile skips it.
-        const artifactDir = join(this.cwd, ".pi-subagents", "pipeline", claim.id);
-        const dispatch: PipelineDispatch = {
-          runId: claim.id,
-          leaseToken: claim.lease_token,
-          agent: spec.agent,
-          stage,
-          taskId,
-          task: taskPrompt,
-          asyncDir: artifactDir,
-          worktree: spec.preparedWorktree || "",
-          initialPatchPath: spec.initialPatchPath,
-          skillFamilies,
-        };
-        writePipelineDispatch(dispatch);
-        dispatches.push(dispatch);
-      }
-      return {
-        stage,
-        taskIds: launchTaskIds,
-        pipelineRunIds: claims.map((claim) => claim.id),
-        activePipelineRunIds: [...activeRuns.map((run: PipelineRun) => run.id), ...claims.map((claim) => claim.id)],
-        subagentRunIds,
-        dispatches,
-      };
-    } catch (error) {
-      for (const claim of claims) execPic(["workflow", "pipeline-complete", claim.id, claim.lease_token, "failed", "--error", error instanceof Error ? error.message : String(error)], this.cwd);
-      throw error;
-    }
+    return mergeAggregateOf(workItemId, ctx);
   }
 
   private async reconcile(): Promise<void> {
@@ -711,12 +247,12 @@ export class PipelineScheduler {
           this.notifyBlockedAttempt(run, reason);
           continue;
         }
-        this.integrating = this.integrating.then(() => this.finish(run, status)).catch(() => undefined);
+        this.integrating = this.integrating.then(() => finish(this.deps, run, status)).catch(() => undefined);
         await this.integrating;
       }
       const pending = execPic(["workflow", "pipeline-pending"], this.cwd);
       if (Array.isArray(pending)) {
-        for (const run of pending as PipelineRun[]) await this.resumePending(run);
+        for (const run of pending as PipelineRun[]) await resumePending(this.deps, run);
       }
     } finally {
       this.reconciling = false;
@@ -724,342 +260,9 @@ export class PipelineScheduler {
   }
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-  private async finish(run: PipelineRun, status: any): Promise<void> {
-    let reviewCompleted = false;
-    try {
-      const child = status.steps?.[run.child_index || 0] || {};
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-      const resolvedModel = child.model || child.resolvedModel || child.modelAttempts?.findLast?.((attempt: any) => attempt.success)?.model || "";
-      if (resolvedModel) execPic(["workflow", "pipeline-model", run.id, run.lease_token, resolvedModel], this.cwd);
-      if (isMutationStage(run.stage)) {
-        const output = outputFor(run);
-        const taskReport = parseTaskCompletionReport(output);
-        if (!run.artifact_saved_at) {
-          // Provenance comes from the persisted claim; Workers need not echo hashes in prose.
-          if (taskReport.status === "done") {
-            const workspacePath = join(run.async_dir || "", "workspace.json");
-            if (!existsSync(workspacePath)) throw new Error(`worker workspace diagnostics missing: ${workspacePath}`);
-            const workspace = JSON.parse(readFileSync(workspacePath, "utf8"));
-            const data = normalizePipelineData(this.showItem(run.task_id));
-            assertRunContractCurrent(data, run);
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-            const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
-            const constraints = JSON.parse(activePack?.constraints_json || "{}");
-            const actualChangedFiles = filterGeneratedFiles(workspace.changedFiles || [], constraints).changedFiles;
-            const normalizedReport = { changedFiles: actualChangedFiles };
-            validateWorkerOutput(taskReport.status, actualChangedFiles, constraints);
-            const patch = workerPatch(run);
-            const outputPath = join(run.async_dir || "", `output-${run.child_index || 0}.log`);
-            validateWorkerPatchArtifact(patch, outputPath, normalizedReport);
-            assertReviewFixChangedPatch(run, readFileSync(patch), taskReport.no_change_justification);
-            if (run.stage === "autofix" && statSync(patch).size === 0) throw new Error("autofix made no repository changes");
-            if (statSync(patch).size > 0) execFileSync("git", ["apply", "--check", patch], { cwd: this.cwd, stdio: "pipe" });
-          }
-        }
-        if (taskReport.status === "escalated") {
-          // Fail-closed escalation (GAP-138): persist the structured report bound to the
-          // run's TIP lineage, block the run, release the claim, and stop — never retry
-          // or continue downstream while the escalation is open.
-          const saved = execPic(["workflow", "escalation-save", run.task_id, "--pipeline-run-id", run.id, "--report-json", JSON.stringify(taskReport.escalation)], this.cwd);
-          if (saved.error) {
-            // GAP-141: never lose the escalation intent to a tooling mismatch (e.g., a
-            // stale installed pic predating escalation-save). Persist the run blocked
-            // with the full structured payload and completion report so the owner sees
-            // the actual question instead of only the subcommand error.
-            const reason = `escalation persistence failed (${saved.error}); worker escalation payload preserved below`;
-            const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", reason, "--result-json", JSON.stringify({ ...pipelineFailureResult(reason), blocker: taskReport.escalation?.summary || reason, completion_report: taskReport.markdown, escalation: taskReport.escalation })], this.cwd);
-            if (result.error) throw new Error(result.error);
-            checkpoint(run, "advanced", this.cwd);
-            this.notifyBlockedAttempt(run, `${reason}\n\n${taskReport.markdown}`);
-            return;
-          }
-          checkpoint(run, "advanced", this.cwd);
-          this.notifyBlockedAttempt(run, `worker escalated ${taskReport.escalation.level}: ${taskReport.escalation.summary || "decision required before progress can resume"}`);
-          return;
-        }
-        if (taskReport.status !== "done") {
-          const reason = taskReport.blocker || `worker reported ${taskReport.status}`;
-          execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", reason, "--result-json", JSON.stringify({ ...pipelineFailureResult(reason), blocker: reason, completion_report: taskReport.markdown, ...(taskReport.failure_metadata ? { failure_metadata: taskReport.failure_metadata } : {}) })], this.cwd);
-          checkpoint(run, "advanced", this.cwd);
-          this.notifyBlockedAttempt(run, reason);
-          return;
-        }
-      }
-      if (run.stage === "review") {
-        assertReviewBaseCurrent(run, this.cwd);
-        const review = parseReviewReport(outputFor(run));
-        const reviewNotes = review.findings.length ? `${review.notes}\n\n${review.findings.map((finding) => `- ${finding}`).join("\n")}` : review.notes;
-        const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state, review_status: review.status, notes: review.notes, findings: review.findings, owner_approval_required: review.ownerApprovalRequired, candidate_run_id: run.candidate_run_id, candidate_patch_hash: run.candidate_patch_hash })], this.cwd);
-        if (result.error) throw new Error(result.error);
-        reviewCompleted = true;
-        // Integration-before-advance constraint (RLB-GAP-007): `work-item review`
-        // advances next_stage to contractor_verification, so the candidate must
-        // integrate FIRST — a failed integration then leaves the run completed
-        // but not advanced, which pipeline-pending → resumePending converges on,
-        // instead of a wedged verification stage with no delivered commit.
-        if (review.status === "passed") {
-          const workerRun = this.integrateReviewedCandidate(run.task_id, run);
-          this.promoteReviewedCandidate(workerRun);
-        }
-        const update = execPic(["work-item", "review", run.task_id, review.status, "--notes", reviewNotes, "--pipeline-run-id", run.id], this.cwd);
-        if (update.error) throw new Error(update.error);
-        checkpoint(run, "advanced", this.cwd);
-        await this.advance(run.task_id);
-        return;
-      }
-      if (isPlanningStage(run.stage)) {
-        const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state })], this.cwd);
-        if (result.error) throw new Error(result.error);
-        this.publishPlanningHandoff(run, outputFor(run));
-        checkpoint(run, "advanced", this.cwd);
-        return;
-      }
-      const result = execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "completed", "--result-json", JSON.stringify({ subagent_state: status.state })], this.cwd);
-      if (result.error) throw new Error(result.error);
-      const data = this.showItem(run.task_id);
-      const parentId = data.work_item?.parent_id;
-      if (parentId) this.roots.add(parentId);
-      if (isMutationStage(run.stage)) {
-        await this.continueWorkerGroup(run);
-        return;
-      }
-      checkpoint(run, "advanced", this.cwd);
-      await this.advance(run.task_id, parentId);
-    } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
-      if (reviewCompleted) {
-        this.notifyBlockedAttempt(run, reason);
-        return;
-      }
-      const persisted = isMutationStage(run.stage) ? this.pipelineRuns(run.task_id).find((entry) => entry.id === run.id) : undefined;
-      if (persisted?.status === "completed" && persisted.artifact_saved_at) {
-        this.notifyBlockedAttempt(persisted, reason);
-        return;
-      }
-      execPic(["workflow", "pipeline-complete", run.id, run.lease_token, "blocked", "--error", reason, "--result-json", JSON.stringify(pipelineFailureResult(reason))], this.cwd);
-      if (isMutationStage(run.stage)) await this.continueWorkerGroup(run);
-      else this.notifyBlockedAttempt(run, reason);
-    }
-  }
-
-  private async continueWorkerGroup(run: PipelineRun): Promise<void> {
-    const task = this.showItem(run.task_id);
-    const parentId = task.work_item?.parent_id;
-    const parent = parentId ? this.showItem(parentId) : null;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    const taskIds = parentId ? (parent?.children || []).map((child: any) => child.id) : [run.task_id];
-    const taskRuns = new Map<string, PipelineRun[]>();
-    const group = taskIds.flatMap((taskId: string) => {
-      const taskData = normalizePipelineData(this.showItem(taskId));
-      if (taskData?.work_item?.status === "done") return [];
-      const runs = execPic(["workflow", "pipeline-runs", taskId], this.cwd);
-      if (!Array.isArray(runs)) return [];
-      taskRuns.set(taskId, runs);
-      const latest = workerIntegrationCandidate(runs) || runs.find((entry: PipelineRun) => isMutationStage(entry.stage) && !entry.advanced_at);
-      return latest ? [latest] : [];
-    });
-    if (group.some((entry: PipelineRun) => entry.status === "claimed" || entry.status === "running")) return;
-
-    if (group.some((entry: PipelineRun) => entry.status !== "completed")) {
-      for (const entry of group.filter((entry: PipelineRun) => entry.status !== "completed")) {
-        checkpoint(entry, "advanced", this.cwd);
-        this.notifyBlockedAttempt(entry, entry.error || `worker pipeline ended with status ${entry.status || "unknown"}`);
-      }
-      return;
-    }
-
-    for (const entry of group) {
-      const report = parseTaskCompletionReport(outputFor(entry));
-      if (report.status === "escalated") throw new Error("escalated run cannot be integrated");
-      const data = normalizePipelineData(this.showItem(entry.task_id));
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-      const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
-      const constraints = JSON.parse(activePack?.constraints_json || "{}");
-      const workspace = JSON.parse(readFileSync(join(entry.async_dir || "", "workspace.json"), "utf8"));
-      const actualChangedFiles = filterGeneratedFiles(workspace.changedFiles || [], constraints).changedFiles;
-      validateWorkerOutput(report.status, actualChangedFiles, constraints);
-      const patch = workerPatch(entry);
-      if (!entry.artifact_saved_at) {
-        if (!existsSync(patch)) throw new Error(`worker patch missing: ${patch}`);
-        checkpoint(entry, "artifact_saved", this.cwd, patch);
-      }
-
-    }
-
-    for (const entry of group) {
-      for (const sibling of taskRuns.get(entry.task_id) || []) {
-        if (isMutationStage(sibling.stage) && sibling.id !== entry.id && !sibling.advanced_at) checkpoint(sibling, "advanced", this.cwd);
-      }
-    }
-
-    for (const entry of group) await this.launchGroup("review", [entry.task_id]);
-    for (const entry of group) checkpoint(entry, "advanced", this.cwd);
-  }
-
-  private integrateReviewedCandidate(taskId: string, reviewRun: PipelineRun): PipelineRun {
-    const data = normalizePipelineData(this.showItem(taskId));
-    assertRunContractCurrent(data, reviewRun);
-    const workerRun = this.pipelineRuns(taskId).find((candidate: PipelineRun) => candidate.id === reviewRun.candidate_run_id && isMutationStage(candidate.stage));
-    if (!workerRun?.artifact_saved_at || !workerRun.integrated_patch_path || !workerRun.integrated_patch_hash) throw new Error("review passed without validated candidate patch evidence");
-    if (reviewRun.candidate_patch_hash !== workerRun.integrated_patch_hash) throw new Error("review passed for a different candidate patch");
-    if (!workerRun.integrated_at) {
-      withGitWriteLock(this.cwd, () => {
-        const patch = workerRun.integrated_patch_path;
-        if (!existsSync(patch)) throw new Error(`candidate patch missing: ${patch}`);
-        const actualHash = createHash("sha256").update(readFileSync(patch)).digest("hex");
-        if (actualHash !== workerRun.integrated_patch_hash) throw new Error("candidate patch changed after review");
-        const commitMessage = `task-system: integrate reviewed worker ${workerRun.subagent_run_id || workerRun.id}`;
-        finalizeReviewedIntegration({
-          patch,
-          cwd: this.cwd,
-          commitMessage,
-          integrated: false,
-          checkpoint: () => checkpoint(workerRun, "integrated", this.cwd),
-        });
-      });
-    }
-    return workerRun;
-  }
-
-  private promoteReviewedCandidate(run: PipelineRun): void {
-    const raw = this.showItem(run.task_id);
-    const data = normalizePipelineData(raw);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    if ((data.completion_reports || []).some((report: any) => report.status === "done" && report.pipeline_run_id === run.id)) return;
-    const report = parseTaskCompletionReport(outputFor(run));
-    if (report.status === "escalated") throw new Error("escalated run cannot be integrated");
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
-    const constraints = JSON.parse(activePack?.constraints_json || "{}");
-    const workspace = JSON.parse(readFileSync(join(run.async_dir || "", "workspace.json"), "utf8"));
-    const changedFiles = filterGeneratedFiles(workspace.changedFiles || [], constraints).changedFiles;
-    if (raw.work_item) {
-      const saved = execPic(["work-item", "completion-save", run.task_id, "done", "--pipeline-run-id", run.id, "--summary", "Reviewed implementation completed", "--report-markdown", report.markdown], this.cwd);
-      if (saved.error) throw new Error(saved.error);
-    } else {
-      // The escalated guard above makes this narrowing safe: escalated runs never integrate.
-      const integrationStatus = report.status as "done" | "partial" | "blocked";
-      saveWorkerReport(run, this.cwd, { status: integrationStatus, markdown: report.markdown }, { changedFiles, diffSummary: "Reviewed implementation completed" });
-    }
-  }
-
-  private async advance(taskId: string, parentId?: string): Promise<void> {
-    const raw = this.showItem(taskId);
-    const data = raw.work_item ? normalizePipelineData(raw) : withInheritedParentWorkflowArtifacts(raw, this.cwd);
-    const next = nextPipelineStage(data, this.pipelineRuns(taskId));
-    if (next) {
-      if (isMutationStage(next)) assertCleanGit(this.cwd);
-      await this.launchGroup(next, [taskId]);
-      return;
-    }
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    const activePack = (data.instruction_packs || []).find((pack: any) => pack.status === "active");
-    if (!activePack) return;
-    const verificationBlock = pipelineVerificationBlockReason(data);
-    if (verificationBlock) throw new Error(verificationBlock);
-    const doneReports = activePackDoneReports(data, activePack);
-    if (doneReports.length) {
-      if (!latestVerificationAfter(data, doneReports[0])) this.pi.sendUserMessage(buildTaskVerifyPrompt(data), { deliverAs: "followUp" });
-      return;
-    }
-    const done = execPic(["work-item", "status", taskId, "done"], this.cwd);
-    if (done.error) throw new Error(done.error);
-    // Close-out transition: point the contractor at the next dependency-ready
-    // work so leaf completion flows straight into the next increment.
-    if (parentId && !this.parentHasActiveRuns(parentId)) {
-      const parent = this.showItem(parentId);
-      const readyIds = this.readyLeafIds(parent).filter((id) => id !== taskId);
-      const nextUp = readyIds.length
-        ? `${readyIds.length} dependency-ready leaf(es) will launch next: ${readyIds.slice(0, 5).join(", ")}${readyIds.length > 5 ? ", …" : ""}`
-        : "No dependency-ready leaves remain; check `work-item workflow-status` for the aggregate's verification stage.";
-      this.pi.sendUserMessage(`${taskId} is done. ${nextUp}`, { deliverAs: "followUp" });
-    }
-
-    if (!parentId) return;
-    if (this.parentHasActiveRuns(parentId)) return;
-    await this.scheduleReady(parentId);
-  }
-
-  private async resumePending(run: PipelineRun): Promise<void> {
-    if (run.advanced_at) return;
-    if (isMutationStage(run.stage)) {
-      await this.continueWorkerGroup(run);
-      return;
-    }
-    const data = this.showItem(run.task_id);
-    if (run.status !== "completed") {
-      checkpoint(run, "advanced", this.cwd);
-      return;
-    }
-    if (run.stage === "review") {
-      const outcome = persistedReviewOutcome(run);
-      if (!outcome) throw new Error("completed review is missing its durable verdict");
-      const candidate = this.pipelineRuns(run.task_id).find((entry: PipelineRun) => entry.id === outcome.candidateRunId && isMutationStage(entry.stage));
-      if (!candidate || candidate.status !== "completed" || !candidate.artifact_saved_at || !candidate.integrated_patch_path || candidate.integrated_patch_hash !== outcome.candidatePatchHash) {
-        throw new Error("completed review references invalid candidate lineage");
-      }
-      const reviewData = this.showItem(run.task_id);
-      // Same integration-before-advance ordering as finish()'s review path (RLB-GAP-007):
-      // integrate the passed candidate before recording the review verdict.
-      if (outcome.status === "passed") {
-        const workerRun = this.integrateReviewedCandidate(run.task_id, run);
-        this.promoteReviewedCandidate(workerRun);
-      }
-      if (reviewData.work_item?.review_status !== outcome.status) {
-        const notes = outcome.findings.length ? `${outcome.notes}\n\n${outcome.findings.map((finding) => `- ${finding}`).join("\n")}` : outcome.notes;
-        const update = execPic(["work-item", "review", run.task_id, outcome.status, "--notes", notes, "--pipeline-run-id", run.id], this.cwd);
-        if (update.error) throw new Error(update.error);
-      }
-    }
-    if (isPlanningStage(run.stage)) {
-      this.publishPlanningHandoff(run, outputFor(run));
-      checkpoint(run, "advanced", this.cwd);
-      return;
-    }
-    const parentId = data.work_item?.parent_id;
-    checkpoint(run, "advanced", this.cwd);
-    await this.advance(run.task_id, parentId);
-  }
-
-  private publishPlanningHandoff(run: PipelineRun, output: string): void {
-    // Blueprint draft constraint: planner output is not canonical until the
-    // Contractor checkpoint and owner promotion complete.
-    const payload = run.stage === "blueprint"
-      ? JSON.stringify(loadLatestBlueprintDraft(this.cwd, run.task_id))
-      : output;
-    const data = this.showItem(run.task_id);
-    const profile = resolvePlanProfile(data);
-    const predecessor = predecessorCheckpointFor(data, run.stage, profile.stages);
-    const envelope = buildPlanningHandoffXml({
-      work_item_id: run.task_id,
-      stage: run.stage,
-      predecessor_checkpoint: predecessor?.artifact_id ? String(predecessor.artifact_id) : "",
-      profile_version: String(profile.version),
-      profile_hash: profile.contentHash,
-    }, payload);
-    const handoffId = this.handoffs.put(run.stage, run.task_id, envelope);
-    const action = run.stage === "rri"
-      ? "conduct the owner interview, persist confirmed requirements and decisions, then save the owner-confirmed RRI artifact"
-      : run.stage === "blueprint"
-        ? "load the temporary draft with load_blueprint_draft, validate its JSON content, and use its draft_id for review_blueprint_checkpoint; revise through save_blueprint_draft if needed, then present the checked draft for owner approval; do not call save_work_item_artifact"
-        : `validate the result, save the ${run.stage} artifact, and present it for owner approval`;
-    this.pi.sendUserMessage(`${run.stage.toUpperCase()} analysis ready for ${run.task_id}. Load ephemeral handoff ${handoffId}, ${action}. The handoff expires five minutes after first load and is never persisted.`, { deliverAs: "followUp" });
-  }
-
-
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
   private pipelineRuns(taskId: string): any[] {
     const runs = execPic(["workflow", "pipeline-runs", taskId], this.cwd);
     return parsePipelineRuns(runs);
-  }
-
-  private parentHasActiveRuns(parentId: string): boolean {
-    const parent = this.showItem(parentId);
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- legacy baseline (pre-split scheduler)
-    const childIds = (parent.children || []).map((child: any) => child.id);
-    const ids = new Set([parentId, ...childIds]);
-    const active = execPic(["workflow", "pipeline-active"], this.cwd);
-    return Array.isArray(active) && active.some((run: PipelineRun) => ids.has(run.task_id));
   }
 }
 

@@ -21,9 +21,11 @@ func Review(db *sql.DB, args []string) error {
 	}
 	// State-driven routing mirrors the claim path: a lean task (no pack, no
 	// materialization) binds its review to the latest completed pack-free
-	// candidate run; legacy tasks keep the TIP-bound triple match.
-	var legacyState int
-	if err = db.QueryRow(`SELECT (SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active') + (SELECT COUNT(*) FROM work_item_materializations WHERE work_item_id=?)`, args[0], args[0]).Scan(&legacyState); err != nil {
+	// candidate run; pack-bound tasks keep the TIP-bound triple match.
+	// packState counts active instruction packs plus materializations: >0 means
+	// the item carries frozen planning state and uses the pack-based path.
+	var packState int
+	if err = db.QueryRow(`SELECT (SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active') + (SELECT COUNT(*) FROM work_item_materializations WHERE work_item_id=?)`, args[0], args[0]).Scan(&packState); err != nil {
 		return err
 	}
 	query := `UPDATE work_items SET review_status=?,review_notes=? WHERE id=? AND type IN ('task','bug','chore') AND EXISTS (
@@ -32,7 +34,7 @@ func Review(db *sql.DB, args []string) error {
 		JOIN pipeline_runs candidate ON candidate.id=review.candidate_run_id AND candidate.task_id=review.task_id AND candidate.instruction_pack_id=review.instruction_pack_id AND candidate.instruction_pack_version=review.instruction_pack_version AND candidate.instruction_pack_hash=review.instruction_pack_hash AND candidate.integrated_patch_hash=review.candidate_patch_hash
 		WHERE review.id=? AND review.task_id=work_items.id AND review.stage='review' AND review.status='completed' AND json_valid(review.result_json) AND json_extract(review.result_json,'$.review_status')=?
 		AND candidate.rowid=(SELECT MAX(current.rowid) FROM pipeline_runs current WHERE current.task_id=review.task_id AND current.stage IN ('worker','autofix') AND current.status='completed' AND current.instruction_pack_id=review.instruction_pack_id AND current.instruction_pack_version=review.instruction_pack_version AND current.instruction_pack_hash=review.instruction_pack_hash AND current.artifact_saved_at<>''))`
-	if legacyState == 0 {
+	if packState == 0 {
 		query = `UPDATE work_items SET review_status=?,review_notes=? WHERE id=? AND type IN ('task','bug','chore') AND EXISTS (
 			SELECT 1 FROM pipeline_runs review
 			JOIN pipeline_runs candidate ON candidate.id=review.candidate_run_id AND candidate.task_id=review.task_id AND candidate.integrated_patch_hash=review.candidate_patch_hash
@@ -65,11 +67,11 @@ func CompletionSave(db *sql.DB, args []string) error {
 	// Lean path: a task with no pack and no materialization closes with a
 	// status flip plus a completed event — no completion-report row (its pack
 	// columns are NOT NULL by design); the pipeline run is the evidence.
-	var legacyState int
-	if err = tx.QueryRow(`SELECT (SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active') + (SELECT COUNT(*) FROM work_item_materializations WHERE work_item_id=?)`, args[0], args[0]).Scan(&legacyState); err != nil {
+	var packState int
+	if err = tx.QueryRow(`SELECT (SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active') + (SELECT COUNT(*) FROM work_item_materializations WHERE work_item_id=?)`, args[0], args[0]).Scan(&packState); err != nil {
 		return err
 	}
-	if legacyState == 0 {
+	if packState == 0 {
 		if status != "done" {
 			return errors.New("lean completion supports done; failures revert through pipeline-complete")
 		}
@@ -128,11 +130,11 @@ func VerificationSave(db *sql.DB, args []string) error {
 	// Lean path: verification binds to the task and its completed pack-free run
 	// (completion_report_id stays NULL); a failed verification reopens the task
 	// and records a verification_failed event for fix routing without pack caps.
-	var legacyState int
-	if err = tx.QueryRow(`SELECT (SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active') + (SELECT COUNT(*) FROM work_item_materializations WHERE work_item_id=?)`, args[0], args[0]).Scan(&legacyState); err != nil {
+	var packState int
+	if err = tx.QueryRow(`SELECT (SELECT COUNT(*) FROM work_item_instruction_packs WHERE work_item_id=? AND status='active') + (SELECT COUNT(*) FROM work_item_materializations WHERE work_item_id=?)`, args[0], args[0]).Scan(&packState); err != nil {
 		return err
 	}
-	if legacyState == 0 {
+	if packState == 0 {
 		var runOK int
 		if err = tx.QueryRow(`SELECT 1 FROM pipeline_runs WHERE id=? AND task_id=? AND status='completed' AND instruction_pack_id=''`, args[1], args[0]).Scan(&runOK); err != nil {
 			return errors.New("lean verification requires a completed pack-free pipeline run for this task")
@@ -294,7 +296,7 @@ func LoadExecutionState(db Queryer, id string) (ExecutionState, error) {
 	if errors.Is(err, sql.ErrNoRows) {
 		// Lean path: no pack — execution state tracks pack-free runs so the
 		// scheduler advances worker → review → close on the description-verbatim
-		// contract (mirrors the legacy state machine without pack bindings).
+		// contract (mirrors the pack-based state machine without pack bindings).
 		var leanCandidate string
 		_ = db.QueryRow(`SELECT id FROM pipeline_runs WHERE task_id=? AND stage IN ('worker','autofix') AND status='completed' AND instruction_pack_id='' AND artifact_saved_at<>'' AND integrated_patch_hash<>'' ORDER BY rowid DESC LIMIT 1`, id).Scan(&leanCandidate)
 		if leanCandidate == "" {

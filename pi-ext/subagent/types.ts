@@ -55,6 +55,42 @@ export interface SubagentResult {
   workspace?: SubagentWorkspace;
 }
 
+import type { AgentRunTracker } from "./tracker.ts";
+import type { HerdrPanel } from "./herdr-panel.ts";
+
+export interface SubagentSpec {
+  agent: AgentConfig;
+  task: string;
+  cwd: string;
+  acceptance?: "checked" | "attested";
+  isolation?: "worktree";
+  signal?: AbortSignal;
+  runId?: string;
+  stage?: string;
+  taskId?: string;
+  tracker?: AgentRunTracker;
+  skillDirectories?: string[];
+  skillFamilies?: string[];
+  herdrPanel?: HerdrPanel;
+  initialPatchPath?: string;
+  preparedWorktree?: string;
+  /** Host-side pi session file (create-or-continue) pinned outside the worktree; enables review-fix resume. */
+  sessionPath?: string;
+  /** Backoff base (ms) between in-claim transient-provider retries; defaults to RUNNER_TRANSIENT_BACKOFF_MS. */
+  transientBackoffMs?: number;
+  /** Durable worker worktree constraint (RLB-GAP-001): when set, the worktree is keyed by this id (instruction pack) and retained across report-less transient failures instead of destroyed per attempt. */
+  durableWorktreeKey?: string;
+  /** Resume preamble for a retained pack worktree, prepended to the task on every launch. */
+  resumeFailureMode?: string;
+}
+
+export interface SubagentHandle {
+  id: string;
+  pid?: number;
+  result: Promise<SubagentResult>;
+  stop(): void;
+}
+
 export interface SubagentUpdate {
   result: SubagentResult;
   event: "message" | "tool_result";

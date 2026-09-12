@@ -37,7 +37,6 @@ func testDB(t *testing.T) *sql.DB {
 		`CREATE TABLE work_item_relations (
 			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL, relation_type TEXT NOT NULL,
 			related_work_item_id TEXT NOT NULL, created_at TEXT NOT NULL DEFAULT (datetime('now')))`,
-		`CREATE TABLE work_item_dependencies (work_item_id TEXT NOT NULL, depends_on_work_item_id TEXT NOT NULL, dependency_type TEXT NOT NULL DEFAULT 'blocks')`,
 		`CREATE TABLE work_item_events (
 			id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL, event_type TEXT NOT NULL,
 			actor_role TEXT NOT NULL, actor_model TEXT NOT NULL DEFAULT '', summary TEXT NOT NULL DEFAULT '',

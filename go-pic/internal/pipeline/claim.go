@@ -126,8 +126,8 @@ func Claim(db *sql.DB, args []string) error {
 		if err = tx.QueryRow(`SELECT COUNT(*) FROM work_item_materializations WHERE work_item_id=?`, taskID).Scan(&materializations); err != nil {
 			return err
 		}
-		// State-driven claim routing: a Work Item carrying legacy pipeline state
-		// (active instruction pack or materialization) keeps the unchanged legacy
+		// State-driven claim routing: a Work Item carrying pack-based planning state
+		// (active instruction pack or materialization) keeps the pack-based
 		// gates; a Work Item with neither takes the lean path — description is the
 		// worker input, no pack, no pack-keyed limiters (owner decision 2026-09-07).
 		leanClaim = activePacks == 0 && materializations == 0

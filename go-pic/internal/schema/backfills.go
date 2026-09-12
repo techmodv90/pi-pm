@@ -59,7 +59,6 @@ func ApplyPipelineColumnMigrations(db DB) error {
 		{"pipeline_runs", "candidate_patch_hash", "TEXT DEFAULT ''"},
 		{"pipeline_runs", "review_fix_cycle", "INTEGER DEFAULT 0"},
 		{"pipeline_runs", "advanced_at", "TEXT DEFAULT ''"},
-		{"pipeline_runs", "migration_status", "TEXT DEFAULT 'legacy'"},
 		{"work_items", "review_status", "TEXT DEFAULT 'pending'"},
 		{"work_items", "review_notes", "TEXT DEFAULT ''"},
 		{"work_items", "planning_depth", "TEXT DEFAULT 'full'"},
@@ -74,6 +73,13 @@ func ApplyPipelineColumnMigrations(db DB) error {
 	}
 	if HasColumn(db, "pipeline_runs", "integrated_patch") {
 		if _, err := db.Exec(`ALTER TABLE pipeline_runs DROP COLUMN integrated_patch`); err != nil && HasColumn(db, "pipeline_runs", "integrated_patch") {
+			return err
+		}
+	}
+	// migration_status defaulted to 'legacy' but was never written or read —
+	// dead since the canonical baseline. Drop wherever it survived.
+	if HasColumn(db, "pipeline_runs", "migration_status") {
+		if _, err := db.Exec(`ALTER TABLE pipeline_runs DROP COLUMN migration_status`); err != nil && HasColumn(db, "pipeline_runs", "migration_status") {
 			return err
 		}
 	}
@@ -140,37 +146,6 @@ func ApplyCanonicalBackfills(db DB) error {
 			OR verification.pipeline_high_water_rowid>0 AND NOT EXISTS (SELECT 1 FROM pipeline_runs later WHERE later.task_id=verification.work_item_id AND later.rowid>verification.pipeline_high_water_rowid)
 		) AND NOT EXISTS (SELECT 1 FROM work_item_owner_decisions decision WHERE decision.work_item_id=verification.work_item_id AND decision.completion_report_id=verification.completion_report_id AND decision.decision='rejected')
 	)`); err != nil {
-		return err
-	}
-	if err := ApplyConvergentDependencyBackfill(db); err != nil {
-		return err
-	}
-	return nil
-}
-
-// ApplyConvergentDependencyBackfill projects retired dependency and gate edge
-// tables onto work_item_relations blocks/gates rows. The migration runner
-// applies version 6 exactly once, but edges keep arriving after that (the APM
-// import writes work_item_dependencies rows post-migration), and the readiness
-// SQL (workitem.ReadySQL) reads only work_item_relations — so this backfill must
-// converge on every open, not just at migration time. INSERT OR IGNORE keeps it
-// idempotent under the wir-migrated- id scheme.
-func ApplyConvergentDependencyBackfill(db DB) error {
-	// Minimal schemas (hand-crafted fixtures recording migration versions
-	// without the tables those versions created) have nothing to project;
-	// skip instead of failing initDB on tables every migrated real database
-	// already has.
-	var tableCount int
-	if err := db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('work_item_dependencies','work_item_gates','work_item_relations')`).Scan(&tableCount); err != nil {
-		return err
-	}
-	if tableCount < 3 {
-		return nil
-	}
-	if _, err := db.Exec(`INSERT OR IGNORE INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id,created_at)
-		SELECT 'wir-migrated-'||id,work_item_id,'blocks',depends_on_work_item_id,created_at FROM work_item_dependencies
-		UNION ALL
-		SELECT 'wir-migrated-'||id,work_item_id,'gates',gate_work_item_id,created_at FROM work_item_gates`); err != nil {
 		return err
 	}
 	return nil

@@ -6,7 +6,10 @@ import { buildWorkItemContinuePrompt } from "./work-item-prompts.ts";
 const source = readFileSync(new URL("../agents/task-planner.md", import.meta.url), "utf8");
 
 test("Blueprint continuation requires Contractor checkpoint before owner approval", () => {
-  const source = readFileSync(new URL("./work-item-prompts.ts", import.meta.url), "utf8");
+  const source = [
+    readFileSync(new URL("./work-item-prompts.ts", import.meta.url), "utf8"),
+    readFileSync(new URL("./workflow-stage-prompts.ts", import.meta.url), "utf8"),
+  ].join("\n");
   assert.match(source, /load_blueprint_draft/);
   assert.match(source, /draft_id/);
 });

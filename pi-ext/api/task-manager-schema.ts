@@ -1,0 +1,56 @@
+import { Type } from "typebox";
+import { StringEnum } from "@mariozechner/pi-ai";
+import type { Static } from "typebox";
+
+export const taskManagerParameters = Type.Object({
+  action: StringEnum([
+    "create_work_item", "update_work_item", "update_work_item_status", "list_work_items", "show_work_item", "ready_work_items", "claim_work_item", "add_work_item_labels", "remove_work_item_labels", "list_work_item_labels", "list_all_work_item_labels", "checkpoint_rri_interview", "load_rri_interview", "save_rri_interview",
+    "save_blueprint_draft", "load_blueprint_draft", "review_blueprint_checkpoint", "approve_blueprint_draft", "load_planning_artifact", "preview_artifact", "save_work_item_artifact", "approve_work_item_artifact", "approve_work_item_deviations", "reject_work_item_scan", "reset_work_item_planning", "reset_work_item_execution", "resolve_escalation", "amend_work_item_planning", "work_item_workflow_status", "validate_work_item_graph", "materialize_work_item", "authorize_work_item_implementation", "verify_work_item", "accept_work_item", "verify_aggregate_work_item", "accept_aggregate_work_item", "merge_aggregate_work_item", "close_aggregate_work_item",
+    "search", "work_on_work_item", "dry_run_work_item", "trigger_work_item_review", "debug_work_item",
+    "list_pipeline_dispatches", "bind_pipeline_dispatch", "complete_pipeline_dispatch",
+    "relate_work_items", "reset_pipeline_circuit",
+  ] as const),
+  id: Type.Optional(Type.String({ description: "Work Item ID" })),
+  related_work_item_id: Type.Optional(Type.String({ description: "Work Item related to the subject" })),
+  relation_type: Type.Optional(StringEnum(["blocks", "gates", "related"] as const)),
+  title: Type.Optional(Type.String({ description: "Work Item title" })),
+  description: Type.Optional(Type.String({ description: "Description text" })),
+  content: Type.Optional(Type.String({ description: "Immutable workflow artifact content" })),
+  status: Type.Optional(StringEnum(["open", "in_progress", "done", "cancelled"] as const)),
+  priority: Type.Optional(StringEnum(["low", "medium", "high"] as const)),
+  notes: Type.Optional(Type.String({ description: "Concise note or summary to append" })),
+  query: Type.Optional(Type.String({ description: "Search query" })),
+  summary: Type.Optional(Type.String({ description: "Workflow artifact summary" })),
+  rri_t_evidence_json: Type.Optional(Type.String({ description: "Graded RRI-T scenario JSON (persisted scenarios plus per-scenario evidence/result or not_applicable with reason) submitted by the contractor with verify_aggregate_work_item" })),
+  verification_status: Type.Optional(StringEnum(["passed", "failed", "partial", "blocked"] as const)),
+  actor_role: Type.Optional(Type.String({ description: "Explicit actor role; owner-only actions require owner confirmation from the user" })),
+  event_type: Type.Optional(Type.String({ description: "Debug trigger type" })),
+  work_item_type: Type.Optional(StringEnum(["epic", "feature", "task", "bug", "chore", "gate"] as const)),
+  parent_id: Type.Optional(Type.String({ description: "Parent aggregate Work Item ID" })),
+  labels: Type.Optional(Type.Array(Type.String(), { description: "Work Item labels" })),
+  deviation_ids: Type.Optional(Type.Array(Type.String(), { description: "Requirement IDs approved for deferment" })),
+  reason: Type.Optional(Type.String({ description: "Owner-recorded reason for a bounded planning amendment" })),
+  substitutions: Type.Optional(Type.Array(Type.Object({ old: Type.String(), new: Type.String() }), { description: "Exact old→new string pairs for amend_work_item_planning; every occurrence across approved planning artifacts, requirements, and owner decisions is replaced" })),
+  stage: Type.Optional(StringEnum(["scan", "rri", "vision", "blueprint", "contracts", "task_graph"] as const)),
+  dispositions: Type.Optional(Type.Array(Type.Object({
+    annotation: Type.String({ description: "Exact annotation text from the persisted plan review feedback" }),
+    resolution: StringEnum(["addressed", "waived"] as const),
+    evidence: Type.String({ description: "Owner-recorded evidence for the terminal resolution" }),
+  }), { description: "Terminal dispositions resolving recorded plan-review annotations; required while any annotation remains unresolved" })),
+  artifact_id: Type.Optional(Type.String({ description: "Immutable Work Item artifact ID" })),
+  completion_report_id: Type.Optional(Type.String({ description: "Current integrated Completion Report ID" })),
+  verification_report_id: Type.Optional(Type.String({ description: "Current aggregate Verification Report ID" })),
+  decision: Type.Optional(StringEnum(["accepted", "rejected"] as const)),
+  change_type: Type.Optional(StringEnum(["contract", "environment", "runner", "artifact"] as const)),
+  evidence_json: Type.Optional(Type.String({ description: "JSON evidence supporting a pipeline circuit reset" })),
+  agent_id: Type.Optional(Type.String({ description: "Agent tool id returned by the background spawn; required for bind_pipeline_dispatch" })),
+  output: Type.Optional(Type.String({ description: "Terminal agent output reported with complete_pipeline_dispatch" })),
+  error: Type.Optional(Type.String({ description: "Failure reason reported with complete_pipeline_dispatch when status is failed" })),
+  dispatch_status: Type.Optional(StringEnum(["completed", "failed"] as const)),
+  failure_code: Type.Optional(Type.String({ description: "Optional failure classification reported with complete_pipeline_dispatch" })),
+  claimant: Type.Optional(Type.String({ description: "Worker or scheduler claiming the Work Item" })),
+  deferrable: Type.Optional(Type.Boolean({ description: "Whether the Work Item is deferred" })),
+  escalation_id: Type.Optional(Type.String({ description: "Open escalation ID (wies-…) to resolve with a recorded decision" })),
+});
+
+export type TaskManagerParams = Static<typeof taskManagerParameters>;

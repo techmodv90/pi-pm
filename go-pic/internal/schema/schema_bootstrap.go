@@ -62,6 +62,7 @@ func migrationSteps() []Migration {
 		}},
 		{Version: 8, Name: "decomposition_policy_projection", Apply: ApplyDecompositionProjectionColumns},
 		{Version: 9, Name: "blueprint_annotation_evidence", Apply: ApplyBlueprintAnnotationEvidenceColumn},
+		{Version: 10, Name: "drop_retired_edge_tables", Apply: DropRetiredEdgeTables},
 	}
 }
 
@@ -98,8 +99,8 @@ func ApplyBlueprintAnnotationEvidenceColumn(db DB) error {
 // against an already-widened table (the older-binary simulation path clears
 // version records) stays idempotent.
 // Note: the rationale lands on work_item_relations — the canonical blocking-edge
-// table materialization and `pic show` read — not on the legacy
-// work_item_dependencies table retired by the canonical backfills.
+// table materialization and `pic show` read — not on the retired
+// work_item_dependencies table dropped by the drop_retired_edge_tables migration.
 func ApplyDecompositionProjectionColumns(db DB) error {
 	projections := []struct{ table, column, ddl string }{
 		{"work_item_relations", "rationale", `ALTER TABLE work_item_relations ADD COLUMN rationale TEXT NOT NULL DEFAULT ''`},
@@ -174,6 +175,22 @@ func ReconcileLegacySchema(db DB) error {
 	return nil
 }
 
+// DropRetiredEdgeTables removes the retired dependency/gate edge tables once
+// no writer remains: the APM import writes work_item_relations directly, so
+// the tables are inert copies. Guarded by TableExists so fresh databases and
+// already-dropped databases are no-ops (idempotent under the older-binary
+// path that clears schema_migrations records).
+func DropRetiredEdgeTables(db DB) error {
+	for _, table := range []string{"work_item_dependencies", "work_item_gates"} {
+		if TableExists(db, table) {
+			if _, err := db.Exec(`DROP TABLE "` + table + `"`); err != nil {
+				return fmt.Errorf("drop retired edge table %s: %w", table, err)
+			}
+		}
+	}
+	return nil
+}
+
 // ApplyMigrations applies the ordered schema steps once per database.
 // Legacy steps are skipped (and never recorded) on databases that never carried
 // the retired Epic/Task tables.
@@ -210,12 +227,6 @@ func ApplyMigrations(db *sql.DB) error {
 		if err := ApplyMigration(context.Background(), db, migration); err != nil {
 			return fmt.Errorf("schema migration %03d_%s: %w", migration.Version, migration.Name, err)
 		}
-	}
-	// Convergent per-open backfill: retired dependency/gate edge tables keep
-	// receiving rows after the version-gated migration applied (post-migration
-	// APM imports), and readiness reads only their work_item_relations projection.
-	if err := ApplyConvergentDependencyBackfill(db); err != nil {
-		return err
 	}
 	return nil
 }

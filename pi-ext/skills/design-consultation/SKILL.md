@@ -1,8 +1,7 @@
 ---
 name: design-consultation
-description: "Senior design consultant that creates a complete design system from scratch — aesthetic, typography, color, layout, spacing, motion — and writes DESIGN.md as the project's source of truth. Activate when the user says: 'design system', 'create brand', 'brand guidelines', 'create DESIGN.md', 'design from scratch', or asks for visual/typography/color direction for a product."
+description: Use this skill for architectural UI/UX design, creating brand guidelines, and establishing design systems from scratch. Trigger this whenever the user asks for visual, typography, color, spacing, layout, or motion direction for a product. It applies to requests for building a new design system, creating brand identity assets, or generating a "DESIGN.md" file as the project's visual source of truth.
 version: 1.0.0
-adopted_from: don-cheli-sdd habilidades/design-consultation (v1.0.0, itself adapted from gstack)
 tags: [design, design-system, brand, typography, color, aesthetic]
 allowed-tools: [Read, Write, Edit, Glob, Grep, Bash, WebSearch, Agent]
 ---

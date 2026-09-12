@@ -24,7 +24,7 @@ func attachWorkItemGraph(db *sql.DB, item map[string]any) error {
 	}
 	item["children"] = children
 
-	edges, err := store.QueryMaps(db, `SELECT work_item_id,depends_on_work_item_id FROM work_item_dependencies WHERE work_item_id=? OR depends_on_work_item_id=? ORDER BY created_at,id`, id, id)
+	edges, err := store.QueryMaps(db, `SELECT work_item_id,related_work_item_id AS depends_on_work_item_id FROM work_item_relations WHERE relation_type='blocks' AND (work_item_id=? OR related_work_item_id=?) ORDER BY created_at,id`, id, id)
 	if err != nil {
 		return err
 	}

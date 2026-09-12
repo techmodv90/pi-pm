@@ -166,12 +166,13 @@ test("aggregate scenario selection stays on the aggregate's own artifact, never 
 
 test("tool persists the scenario artifact before execution and never re-authors at grading submission", () => {
   const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
+  const aggregateActions = readFileSync(new URL("../api/aggregate-actions.ts", import.meta.url), "utf8");
   // save-before-execution: scenario authoring is in-session contractor work and
   // is persisted via the canonical artifact-save path (no persona subagent spawn)
-  assert.doesNotMatch(tool, /runRriT|ensureRriTScenariosArtifact/);
-  assert.match(tool, /compileRriTSubmission/);
+  assert.doesNotMatch(tool + aggregateActions, /runRriT|ensureRriTScenariosArtifact/);
+  assert.match(tool + aggregateActions, /compileRriTSubmission/);
   // the verify action compiles graded evidence from the persisted artifact via the canonical --rri-t-json path
-  const verifyCase = tool.slice(tool.indexOf('case "verify_aggregate_work_item"'), tool.indexOf('case "accept_aggregate_work_item"'));
+  const verifyCase = aggregateActions.slice(aggregateActions.indexOf("export function verifyAggregateWorkItem"), aggregateActions.indexOf("export function acceptAggregateWorkItem"));
   assert.doesNotMatch(verifyCase, /runRriT/);
   assert.match(verifyCase, /compileRriTSubmission/);
   assert.match(verifyCase, /--rri-t-json/);
@@ -182,8 +183,8 @@ test("tool persists the scenario artifact before execution and never re-authors 
 });
 
 test("RRI-T grading compiler dedupes on the id-based identity and rejects duplicate deferred dispositions", () => {
-  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
-  const compile = tool.slice(tool.indexOf("function rriTScenarioIdentity"), tool.indexOf("export function registerTaskManagerTool"));
+  const helpers = readFileSync(new URL("../api/task-manager-helpers.ts", import.meta.url), "utf8");
+  const compile = helpers.slice(helpers.indexOf("function rriTScenarioIdentity"));
   // The identity contract is id-based (dimension|stress_axis|requirement_id|id) —
   // never the persona — so scenarios sharing persona, dimension, stress axis, and
   // requirement stay distinct by id, and the compiled outcome carries the
@@ -199,8 +200,8 @@ test("RRI-T grading compiler dedupes on the id-based identity and rejects duplic
 });
 
 test("graded submission requires persisted identities, executed evidence, and not_applicable reasons", () => {
-  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
-  const compile = tool.slice(tool.indexOf("function compileRriTSubmission"), tool.indexOf("export function registerTaskManagerTool"));
+  const helpers = readFileSync(new URL("../api/task-manager-helpers.ts", import.meta.url), "utf8");
+  const compile = helpers.slice(helpers.indexOf("export function compileRriTSubmission"));
   assert.match(compile, /persisted rri_t_scenarios artifact is missing/);
   assert.match(compile, /not in the persisted rri_t_scenarios artifact/);
   assert.match(compile, /requires executed evidence/);
@@ -365,8 +366,8 @@ test("Blueprint prompt publishes the solution spec with owner-approved seams", (
   assert.doesNotMatch(prompt, /task_decomposition_preview with estimated_tasks/);
   assert.match(prompt, /"verification_seams":true/);
   // The tool gate accepts the policy-dependent fifth check from the draft.
-  const tool = readFileSync(new URL("../api/tool.ts", import.meta.url), "utf8");
-  assert.match(tool, /decomposition_policy_version[\s\S]{0,120}"verification_seams", "nothing_missing"/);
+  const blueprintApproval = readFileSync(new URL("../api/blueprint-approval.ts", import.meta.url), "utf8");
+  assert.match(blueprintApproval, /decomposition_policy_version[\s\S]{0,120}"verification_seams", "nothing_missing"/);
   const primer = buildStagePrimer({ work_item_id: "wi-b", stage: "blueprint", approved_digests: [] });
   assert.match(primer, /owner-approved verification_seams \(decomposition_policy_version 2, schema_version 2\.1, no task_decomposition_preview\)/);
 });

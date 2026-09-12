@@ -5,8 +5,6 @@ var WorkItemOwnerDecisionsTableSQL = `CREATE TABLE IF NOT EXISTS work_item_owner
 var CanonicalSchemaStatements = []string{
 	WorkItemsTableSQL,
 	`CREATE TABLE IF NOT EXISTS work_item_labels (work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, label TEXT NOT NULL, PRIMARY KEY(work_item_id,label))`,
-	`CREATE TABLE IF NOT EXISTS work_item_dependencies (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, depends_on_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,depends_on_work_item_id), CHECK(work_item_id!=depends_on_work_item_id))`,
-	`CREATE TABLE IF NOT EXISTS work_item_gates (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, gate_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,gate_work_item_id), CHECK(work_item_id!=gate_work_item_id))`,
 	`CREATE TABLE IF NOT EXISTS work_item_relations (id TEXT PRIMARY KEY, work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, relation_type TEXT NOT NULL CHECK(relation_type IN ('blocks','gates','related')), related_work_item_id TEXT NOT NULL REFERENCES work_items(id) ON DELETE CASCADE, created_at TEXT DEFAULT (datetime('now')), UNIQUE(work_item_id,relation_type,related_work_item_id), CHECK(work_item_id!=related_work_item_id))`,
 	WorkItemArtifactsTableSQL,
 	WorkflowCheckpointsTableSQL,
@@ -36,9 +34,6 @@ var CanonicalSchemaStatements = []string{
 	`CREATE INDEX IF NOT EXISTS idx_work_items_parent ON work_items(parent_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_work_items_status_claim ON work_items(type,status,deferred,claimed_at)`,
 	`CREATE INDEX IF NOT EXISTS idx_work_item_labels_label ON work_item_labels(label)`,
-	`CREATE INDEX IF NOT EXISTS idx_work_item_dependencies_item ON work_item_dependencies(work_item_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_work_item_dependencies_blocker ON work_item_dependencies(depends_on_work_item_id)`,
-	`CREATE INDEX IF NOT EXISTS idx_work_item_gates_item ON work_item_gates(work_item_id)`,
 	`CREATE INDEX IF NOT EXISTS idx_work_item_relations_item ON work_item_relations(work_item_id,relation_type)`,
 	`CREATE INDEX IF NOT EXISTS idx_work_item_artifacts_item_stage ON work_item_artifacts(work_item_id,stage,revision DESC)`,
 	`CREATE INDEX IF NOT EXISTS idx_workflow_checkpoints_item_stage ON workflow_checkpoints(work_item_id,stage,artifact_revision DESC)`,

@@ -167,7 +167,7 @@ func createWorkItems(db *sql.DB, doc *Doc, graph *Graph, importLabel string) (st
 			return "", fmt.Errorf("insert feature %s: %w", key, err)
 		}
 		if i > 0 {
-			if _, err := tx.Exec(`INSERT INTO work_item_dependencies(id,work_item_id,depends_on_work_item_id) VALUES(?,?,?)`, "wid-"+store.ShortID(), id, featureIDs[featureKeys[i-1]]); err != nil {
+			if _, err := tx.Exec(`INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES(?,?,'blocks',?)`, "wir-"+store.ShortID(), id, featureIDs[featureKeys[i-1]]); err != nil {
 				return "", fmt.Errorf("insert feature edge %s: %w", key, err)
 			}
 		}
@@ -195,7 +195,7 @@ func createWorkItems(db *sql.DB, doc *Doc, graph *Graph, importLabel string) (st
 	}
 	for _, t := range graph.Tasks {
 		for _, dep := range t.DependsOn {
-			if _, err := tx.Exec(`INSERT INTO work_item_dependencies(id,work_item_id,depends_on_work_item_id) VALUES(?,?,?)`, "wid-"+store.ShortID(), taskIDs[t.TID], taskIDs[dep]); err != nil {
+			if _, err := tx.Exec(`INSERT INTO work_item_relations(id,work_item_id,relation_type,related_work_item_id) VALUES(?,?,'blocks',?)`, "wir-"+store.ShortID(), taskIDs[t.TID], taskIDs[dep]); err != nil {
 				return "", fmt.Errorf("insert task edge %s->%s: %w", t.TID, dep, err)
 			}
 		}
