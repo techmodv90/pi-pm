@@ -32,7 +32,7 @@
     {
       "id": "DEL-0003",
       "kind": "schema",
-      "target": "Relic tables in per-project tasks.db: task_items, tasks, task_materializations, task_phase_metadata, epic_events, task_events, pipeline_runs (pre-Work-Item model)",
+      "target": "Relic tables in per-project tasks.db: task_items, tasks, task_materializations, task_phase_metadata, epic_events, task_events (pre-Work-Item model). NOTE 2026-09-12: pipeline_runs removed from this entry — it is live for worker/review/autofix runs; only its planning-stage rows are history.",
       "reason": "Pre-Work-Item model history. Kept read-only as migration/audit history (AGENTS.md: archived rows are read-only migration history). Drop is irreversible, so this entry only authorizes removal after a quiet window.",
       "expected_escape": "Any recovery, audit, or reporting scenario requires pre-Work-Item task history; or a code path still reads these tables in production.",
       "window": "90 days of zero reads plus one successful backup-restore drill without them",
