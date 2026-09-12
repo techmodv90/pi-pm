@@ -1,0 +1,45 @@
+{
+  "_meta": {
+    "format": "apm deletion ledger v1 (see docs/plans/five-step-algorithm-plan.md)",
+    "events": "append-only; verdicts close an entry",
+    "verdicts": ["keep-deleted", "add-back", "scope"]
+  },
+  "entries": [
+    {
+      "id": "DEL-0001",
+      "kind": "stage",
+      "target": "Work Item planning ladder: scan -> rri -> vision -> blueprint -> contracts -> task_graph durable stages with per-stage owner artifact checkpoints",
+      "reason": "Superseded by lean flow (/apm start complexity routing -> .apm flat-file artifacts -> import-apm). Last planning artifact 2026-09-08; zero planning-stage artifacts and zero Work Item events since; all commits from 2026-09-09 are lean-flow work.",
+      "expected_escape": "A post-cutover work item needs a planning artifact that only the ladder produced (reviewer rejection citing missing blueprint/contracts/scan evidence), or an agent session attempts task_manager planning actions for new work.",
+      "window": "10 imported work items or 30 days, whichever first",
+      "scope": "all projects, all workflow modes",
+      "events": [
+        { "event": "proposed", "ts": "2026-09-12" }
+      ]
+    },
+    {
+      "id": "DEL-0002",
+      "kind": "surface",
+      "target": "task_manager planning actions: checkpoint_rri_interview, load_rri_interview, save_rri_interview, save_blueprint_draft, load_blueprint_draft, review_blueprint_checkpoint, approve_blueprint_draft, save_work_item_artifact (planning stages), approve_work_item_artifact, load_planning_artifact, reject_work_item_scan, amend_work_item_planning, reset_work_item_planning, validate_work_item_graph, materialize_work_item",
+      "reason": "Tool surface of the retired planning ladder (DEL-0001). Retained but documented as legacy in docs/lean-flow.md; agents are instructed not to start new work through them.",
+      "expected_escape": "An agent attempts one of these actions post-cutover and no documented lean-flow replacement covers its need; or imported work items lack a required input the action used to supply.",
+      "window": "with DEL-0001",
+      "scope": "all projects",
+      "events": [
+        { "event": "proposed", "ts": "2026-09-12" }
+      ]
+    },
+    {
+      "id": "DEL-0003",
+      "kind": "schema",
+      "target": "Relic tables in per-project tasks.db: task_items, tasks, task_materializations, task_phase_metadata, epic_events, task_events, pipeline_runs (pre-Work-Item model)",
+      "reason": "Pre-Work-Item model history. Kept read-only as migration/audit history (AGENTS.md: archived rows are read-only migration history). Drop is irreversible, so this entry only authorizes removal after a quiet window.",
+      "expected_escape": "Any recovery, audit, or reporting scenario requires pre-Work-Item task history; or a code path still reads these tables in production.",
+      "window": "90 days of zero reads plus one successful backup-restore drill without them",
+      "scope": "all projects",
+      "events": [
+        { "event": "proposed", "ts": "2026-09-12" }
+      ]
+    }
+  ]
+}

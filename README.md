@@ -10,14 +10,17 @@ kept as-is for compatibility; the product name is APM.
 A staged, gated delivery pipeline run by agents with owner checkpoints:
 
 ```
-Work Item → Scan → RRI → Vision → Blueprint → Contracts → Task Graph
-         → materialize → authorize → implement → review → verify → accept → merge
+/apm start (complexity routing) -> .apm planning artifacts -> import-apm
+          -> Work Item -> implementation authorization -> worker (TIP at first claim)
+          -> review -> verification -> acceptance -> merge
 ```
 
 - **Work Items** (Epic / Feature / Task / Bug / Chore / Gate) are tracked in a
-  canonical SQLite store (`~/.pi/task-system/.pi/tasks.db`).
-- **Planning artifacts** are immutable, content-hashed records with owner
-  approval gates.
+  canonical SQLite store (`~/.pi/task-system/.pi/tasks.db`). Planning happens in
+  flat files under `.apm/` via the `/apm` commands; `import-apm` creates Work
+  Items from them. The durable planning ladder (Scan/RRI/Vision/Blueprint/
+  Contracts/Task Graph stages) is retired — see `docs/lean-flow.md` and
+  `docs/plans/deletion-ledger.json`.
 - **Managed execution** runs workers in isolated git worktrees, passes a review
   gate, and records contractor verification evidence before closure.
 

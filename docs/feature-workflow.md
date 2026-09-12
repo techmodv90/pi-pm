@@ -1,5 +1,10 @@
 # Work Item Workflow
 
+> **Status (2026-09-12):** the Scan/RRI/Vision/Blueprint/Contracts planning ladder in
+> the lifecycle diagram below is **retired** — the lean flow (`docs/lean-flow.md`) is
+> canonical. Execution semantics (Worker → review → verification → acceptance) still
+> apply. Removal tracked in `docs/plans/deletion-ledger.json`.
+
 The canonical model is a typed Work Item tree. `epic` and `feature` are aggregates; a Feature normally represents a complete vertical slice, while an Epic may contain multiple Features or represent one coherent vertical slice when its approved scope warrants that shape. `task`, `bug`, `chore`, and `gate` are executable leaves. Tasks are bite-sized requirement-bound increments, bound to at most two Requirements, while Code Review checks each child change and aggregate verification is final integrated QA. Archived Epic, Task, and Task Item rows remain migration history and are read-only.
 
 ## Lifecycle

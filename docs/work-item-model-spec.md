@@ -1,5 +1,11 @@
 # Work Item Model
 
+> **Status (2026-09-12):** the staged aggregate workflow described here (Scan → RRI →
+> Vision → Blueprint → Contracts → Task Graph) is **retired** — the lean flow
+> (`docs/lean-flow.md`) is canonical. Artifact immutability, TIP freeze, verification,
+> and acceptance semantics below still apply. Removal tracked in
+> `docs/plans/deletion-ledger.json`.
+
 This spec proposes replacing the separate Epic, Task, phase-Task, and Task Item hierarchy with one recursive Work Item graph so that planning, decomposition, readiness, and execution use one consistent unit of work without weakening execution-contract guarantees.
 
 ## Goals
