@@ -1,0 +1,198 @@
+version: 1
+config:
+  profiles:
+    trigger:
+      harness: pi
+      extra-args:
+        - "--model"
+        - "cliproxy/ox-alpha-free"
+        - "--thinking"
+        - "high"
+        - "--tools"
+        - "read,bash,edit,write"
+  profile: trigger
+  run:
+    timeout-ms: 600000
+    max-turns: 20
+
+# Reasoning skill eval. The skill is a router: activation is observable as a
+# read of reasoning/SKILL.md, routing quality as a read of the chosen
+# references/<model>.md. References are copied into the workspace so routed
+# reads actually land on content.
+tests:
+  # ---- Trigger + route: right model for the problem shape ----
+  - name: reasoning-route-five-whys
+    desc: Recurring failure question fires the skill and routes to 5 Whys.
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-five-whys.md, to: .pi/skills/reasoning/references/five-whys.md }
+    input:
+      prompt: >
+        Our deploy pipeline fails every Friday afternoon and we keep patching
+        it, but it comes back. Why does this keep happening?
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reasoning/SKILL\.md }
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: five-whys\.md }
+
+  - name: reasoning-route-first-principles
+    desc: Assumption-stripping build-or-buy question routes to First Principles.
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-first-principles.md, to: .pi/skills/reasoning/references/first-principles.md }
+    input:
+      prompt: >
+        Everyone assumes we need to renew the vendor contract for auth.
+        Reason about it from first principles — what are we actually
+        assuming?
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reasoning/SKILL\.md }
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: first-principles\.md }
+
+  - name: reasoning-route-inversion
+    desc: Think-backwards-from-failure question routes to Inversion.
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-inversion.md, to: .pi/skills/reasoning/references/inversion.md }
+    input:
+      prompt: >
+        Think backwards: if this migration ends in disaster two months from
+        now, what would have caused it?
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reasoning/SKILL\.md }
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: inversion\.md }
+
+  - name: reasoning-route-pre-mortem
+    desc: Pre-launch failure-anticipation question routes to Pre-Mortem.
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-pre-mortem.md, to: .pi/skills/reasoning/references/pre-mortem.md }
+    input:
+      prompt: >
+        We launch next week. It is six months later and the launch failed.
+        Run a pre-mortem — what killed it?
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reasoning/SKILL\.md }
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: pre-mortem\.md }
+
+  - name: reasoning-route-pareto
+    desc: Prioritization-under-scarcity question routes to Pareto.
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-pareto.md, to: .pi/skills/reasoning/references/pareto.md }
+    input:
+      prompt: >
+        We have twenty open bugs and one engineer-week. Help us decide what
+        to prioritize.
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reasoning/SKILL\.md }
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: pareto\.md }
+
+  - name: reasoning-route-reversibility
+    desc: Two-way-door commitment question routes to Reversibility.
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-reversibility.md, to: .pi/skills/reasoning/references/reversibility.md }
+    input:
+      prompt: >
+        Is switching our database engine now a reversible decision or a
+        one-way door? How should that shape how much we deliberate?
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reasoning/SKILL\.md }
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reversibility\.md }
+
+  - name: reasoning-route-second-order
+    desc: Consequences-of-consequences question routes to Second-Order.
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-second-order.md, to: .pi/skills/reasoning/references/second-order.md }
+    input:
+      prompt: >
+        If we add aggressive rate limiting to the API, what second-order
+        effects should we expect downstream?
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reasoning/SKILL\.md }
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: second-order\.md }
+
+  - name: reasoning-route-probabilistic
+    desc: Explicit-uncertainty commitment question routes to Probabilistic Thinking.
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-probabilistic-thinking.md, to: .pi/skills/reasoning/references/probabilistic-thinking.md }
+    input:
+      prompt: >
+        The vendor says 80% chance of on-time delivery. Should we commit to
+        the customer date based on that? Reason about the uncertainty.
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reasoning/SKILL\.md }
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: probabilistic-thinking\.md }
+
+  - name: reasoning-trigger-spanish-razonar
+    desc: Explicit "razona" request fires the skill (description trigger term).
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-five-whys.md, to: .pi/skills/reasoning/references/five-whys.md }
+    input:
+      prompt: >
+        Razónalo: el build falla solo en CI, nunca en local. ¿Por qué?
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: reasoning/SKILL\.md }
+
+  # ---- Router precision: fires, but does not over-route ----
+  - name: reasoning-route-five-whys-not-rlm
+    desc: Root-cause problem must not route into the RLM family.
+    workspace:
+      copy:
+        - { from: fixtures/reasoning-skill.md, to: .pi/skills/reasoning/SKILL.md }
+        - { from: fixtures/reasoning-ref-five-whys.md, to: .pi/skills/reasoning/references/five-whys.md }
+    input:
+      prompt: >
+        The nightly job keeps failing at the same step. Why? Get to the root
+        cause, not the symptom.
+    assertions:
+      - { left: tool.called, op: "==", right: true, tool_name: read, tool_params: five-whys\.md }
+      - { left: tool.called, op: "==", right: false, tool_name: read, tool_params: rlm-recursive-decomposition\.md }
+
+  # ---- Must NOT trigger: no over-firing on plain code work ----
+  - name: reasoning-no-trigger-bugfix
+    desc: Mechanical bug fix must not read the reasoning skill.
+    workspace:
+      copy:
+        - { from: fixtures/buggy-app.go, to: app.go }
+    input:
+      prompt: >
+        Fix the bug in app.go: the greet function returns an empty string
+        because the map lookup uses the wrong key. Make it return "hello".
+    assertions:
+      - { left: tool.called, op: "==", right: false, tool_name: read, tool_params: reasoning/SKILL\.md }
+
+  - name: reasoning-no-trigger-run-tests
+    desc: Plain test-run request must not read the reasoning skill.
+    workspace:
+      copy:
+        - { from: fixtures/hello.txt, to: app.go }
+    input:
+      prompt: >
+        Run the tests in this project and report pass/fail counts.
+    assertions:
+      - { left: tool.called, op: "==", right: false, tool_name: read, tool_params: reasoning/SKILL\.md }
+
+  - name: reasoning-no-trigger-routine-edit
+    desc: Routine code edit must not read the reasoning skill.
+    workspace:
+      copy:
+        - { from: fixtures/hello.txt, to: util.go }
+    input:
+      prompt: >
+        Add a formatDate helper to util.go that formats a time.Time as
+        YYYY-MM-DD. Follow existing style in the file.
+    assertions:
+      - { left: tool.called, op: "==", right: false, tool_name: read, tool_params: reasoning/SKILL\.md }
