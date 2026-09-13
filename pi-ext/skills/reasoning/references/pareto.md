@@ -1,11 +1,3 @@
----
-name: pareto
-description: "Apply the 80/20 principle: focus on the 20% that produces 80% of the results. Activate when the user says: 'pareto', 'prioritize', '80/20', 'highest impact', or when a list of features/bugs/tasks must be cut down to the vital few."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, decision, prioritization]
----
-
 # Pareto (80/20)
 
 Focus on the 20% that produces 80% of the value.

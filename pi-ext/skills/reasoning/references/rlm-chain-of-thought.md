@@ -1,11 +1,3 @@
----
-name: rlm-chain-of-thought
-description: "Multi-step reasoning with context folding: delegate each step to fresh subagents, retain only concise summaries, avoid context rot. Activate when the user says: 'context folding', 'context rot', 'long multi-step reasoning', or when a reasoning chain degrades as steps accumulate."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, rlm, context, multi-step]
----
-
 # RLM: Chain of Thought with Context Folding
 
 Context rot: in multi-step reasoning each step accumulates in context and

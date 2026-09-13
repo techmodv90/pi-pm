@@ -1,11 +1,3 @@
----
-name: first-principles
-description: "Decompose a problem or assumption to fundamental truths, then rebuild understanding from scratch. Activate when the user says: 'first principles', 'question assumptions', 'from scratch', or when conventional approaches feel wrong, innovation is needed, or constraints seem 'impossible'."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, analysis, assumptions, innovation]
----
-
 # First Principles
 
 Escape conventional wisdom by questioning assumptions. Instead of reasoning

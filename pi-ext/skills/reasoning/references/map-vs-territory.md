@@ -1,11 +1,3 @@
----
-name: map-vs-territory
-description: "Distinguish the model (map) from reality (territory); the map is NOT the territory. Activate when the user says: 'map vs territory', 'validate assumptions against reality', or when docs, dashboards, or mental models may have drifted from what is actually true."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, analysis, assumptions, validation]
----
-
 # Map vs Territory
 
 The model is not the reality. Every model is a simplification; find where it

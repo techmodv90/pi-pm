@@ -1,11 +1,3 @@
----
-name: rlm-verification
-description: "Verify work against specs by delegating to fresh subagents with clean context instead of checking everything in one polluted context. Activate when the user says: 'rlm verification', 'verify against spec', 'subagent verification', or when a large artifact needs independent multi-angle verification."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, rlm, verification, subagents]
----
-
 # RLM: Verification with Sub-LLMs
 
 Based on the Recursive Language Model (RLM) paradigm (PrimeIntellect): the

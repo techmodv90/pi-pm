@@ -1,11 +1,3 @@
----
-name: rlm-recursive-decomposition
-description: "Recursive decomposition with subagent delegation for massive inputs or very large codebases; the orchestrator inspects data programmatically, never ingests it whole. Activate when the user says: 'rlm decomposition', 'massive context', 'huge codebase', 'input too large', or when data size alone would degrade reasoning quality."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, rlm, decomposition, scale]
----
-
 # RLM: Recursive Decomposition with Sub-LLMs
 
 For massive inputs or extremely long contexts: decompose programmatically and

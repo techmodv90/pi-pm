@@ -1,11 +1,3 @@
----
-name: five-whys
-description: "Root-cause analysis by asking 'why?' repeatedly until reaching the origin of the problem. Activate when the user says: '5 whys', 'why did this fail', 'root cause', or when a bug or recurring failure needs its process-level origin, not just the symptom."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, root-cause, analysis, debugging]
----
-
 # 5 Whys (Root Cause)
 
 Ask "why?" repeatedly until you reach the origin. Usually 5 levels. A root

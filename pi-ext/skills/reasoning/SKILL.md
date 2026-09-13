@@ -1,7 +1,7 @@
 ---
 name: reasoning
 description: Use this skill for applying structured mental models, analytical frameworks, and systematic problem decomposition. Trigger this whenever a user explicitly requests a mental model or systematic analysis (e.g., "reason about", "mental model", "which model", "razonar", "analizar problema"). It applies to complex problems requiring rigorous evaluation, including root-cause analysis, trade-off matrices, first-principles thinking, pre-mortems, or managing massive contextual information instead of using ad-hoc intuition.
-version: 1.0.0
+version: 1.1.0
 adopted_from: don-cheli-sdd habilidades/razonamiento (v1.0.0, Don Cheli; RLM models adapted from PrimeIntellect)
 tags: [reasoning, mental-models, decision, analysis, routing]
 ---
@@ -9,41 +9,44 @@ tags: [reasoning, mental-models, decision, analysis, routing]
 # Reasoning Router (Mental Models)
 
 > A router, not a reasoner. It maps the problem type to the right model;
-> each model lives in its own methodology skill. Where this skill conflicts
-> with the canonical Work Item workflow, the canonical workflow wins.
+> each model's full method lives in a reference file under `references/`.
+> Where this skill conflicts with the canonical Work Item workflow, the
+> canonical workflow wins.
 
 ## Model Catalog
 
+Reference paths resolve against this skill's directory.
+
 ### Analysis (understand the problem)
-| # | Model | Use | Skill |
-|---|-------|-----|-------|
-| 1 | First Principles | Innovation, strip assumptions | `first-principles` |
-| 2 | 5 Whys | Root cause | `five-whys` |
-| 3 | Map vs Territory | Validate assumptions | `map-vs-territory` |
+| # | Model | Use | Reference |
+|---|-------|-----|-----------|
+| 1 | First Principles | Innovation, strip assumptions | `references/first-principles.md` |
+| 2 | 5 Whys | Root cause | `references/five-whys.md` |
+| 3 | Map vs Territory | Validate assumptions | `references/map-vs-territory.md` |
 
 ### Decision (choose)
-| # | Model | Use | Skill |
-|---|-------|-----|-------|
-| 4 | Pareto | Prioritization | `pareto` |
-| 5 | Opportunity Cost | Trade-offs | `opportunity-cost` |
-| 6 | Reversibility | Commitment, two-way doors | `reversibility` |
-| 7 | Minimize Regret | Long-term decisions | `minimize-regret` |
-| 8 | Probabilistic | Uncertainty | `probabilistic-thinking` |
+| # | Model | Use | Reference |
+|---|-------|-----|-----------|
+| 4 | Pareto | Prioritization | `references/pareto.md` |
+| 5 | Opportunity Cost | Trade-offs | `references/opportunity-cost.md` |
+| 6 | Reversibility | Commitment, two-way doors | `references/reversibility.md` |
+| 7 | Minimize Regret | Long-term decisions | `references/minimize-regret.md` |
+| 8 | Probabilistic | Uncertainty | `references/probabilistic-thinking.md` |
 
 ### Perspective (think differently)
-| # | Model | Use | Skill |
-|---|-------|-----|-------|
-| 9 | Inversion | Think backwards | `inversion` |
-| 10 | Second-Order Effects | Consequences of consequences | `second-order` |
-| 11 | Pre-Mortem | Think failure before it happens | `pre-mortem` |
-| 12 | Circle of Competence | Know limits | `circle-of-competence` |
+| # | Model | Use | Reference |
+|---|-------|-----|-----------|
+| 9 | Inversion | Think backwards | `references/inversion.md` |
+| 10 | Second-Order Effects | Consequences of consequences | `references/second-order.md` |
+| 11 | Pre-Mortem | Think failure before it happens | `references/pre-mortem.md` |
+| 12 | Circle of Competence | Know limits | `references/circle-of-competence.md` |
 
 ### RLM (Recursive LLM — PrimeIntellect)
-| # | Model | Use | Skill |
-|---|-------|-----|-------|
-| 13 | Sub-LLM Verification | Verify code against specs | `rlm-verification` |
-| 14 | Chain + Context Folding | Multi-step reasoning without context rot | `rlm-chain-of-thought` |
-| 15 | Recursive Decomposition | Massive inputs, large codebases | `rlm-recursive-decomposition` |
+| # | Model | Use | Reference |
+|---|-------|-----|-----------|
+| 13 | Sub-LLM Verification | Verify code against specs | `references/rlm-verification.md` |
+| 14 | Chain + Context Folding | Multi-step reasoning without context rot | `references/rlm-chain-of-thought.md` |
+| 15 | Recursive Decomposition | Massive inputs, large codebases | `references/rlm-recursive-decomposition.md` |
 
 ## Decision Tree
 
@@ -70,7 +73,8 @@ What kind of problem?
 ## How to Apply
 
 1. Classify the problem via the decision tree; state the chosen model and why.
-2. Load the model's skill and follow it — do not re-implement the model inline.
+2. Read the model's reference file (the `Reference` path above, resolved against
+   this skill's directory) and follow it — do not re-implement the model inline.
 3. Mixed problems: run models in sequence (Analysis → Decision → Perspective);
    never parallel — later models need earlier output.
 4. Escalation: a problem resisting two different models is a signal the

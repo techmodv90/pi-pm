@@ -1,11 +1,3 @@
----
-name: second-order
-description: "Think through the consequences of the consequences — beyond the immediate effect. Activate when the user says: 'second order', 'unintended consequences', 'downstream effects', or when a fix or decision's side effects outweigh its first-order benefit."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, perspective, consequences]
----
-
 # Second-Order Thinking
 
 Think the consequences of the consequences.

@@ -1,11 +1,3 @@
----
-name: circle-of-competence
-description: "Know your limits: distinguish what you know deeply from what you only know superficially. Activate when the user says: 'circle of competence', 'do we know this', 'should we ask an expert', or before deciding on an unfamiliar domain or technology."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, perspective, limits]
----
-
 # Circle of Competence
 
 Distinguish deep knowledge from superficial knowledge — and act accordingly.

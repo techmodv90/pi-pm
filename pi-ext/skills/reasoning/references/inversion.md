@@ -1,11 +1,3 @@
----
-name: inversion
-description: "Solve a problem backwards: how would we GUARANTEE failure? Convert each failure mode into a preventive action. Activate when the user says: 'inversion', 'think backwards', 'how could this fail', or when planning a launch/migration/refactor where avoiding failure matters most."
-version: 1.0.0
-adopted_from: don-cheli-sdd comandos/razonar (v1.0.0, Don Cheli)
-tags: [reasoning, perspective, failure, planning]
----
-
 # Inversion
 
 Solve the problem backwards: how would we GUARANTEE failure?
